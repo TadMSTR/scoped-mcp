@@ -1,5 +1,6 @@
 # scoped-mcp
 
+[![CI](https://github.com/TadMSTR/scoped-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/TadMSTR/scoped-mcp/actions/workflows/ci.yml)
 [![PyPI version](https://img.shields.io/pypi/v/scoped-mcp.svg)](https://pypi.org/project/scoped-mcp/)
 [![Python versions](https://img.shields.io/pypi/pyversions/scoped-mcp.svg)](https://pypi.org/project/scoped-mcp/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
