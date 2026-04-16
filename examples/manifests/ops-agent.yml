@@ -1,0 +1,34 @@
+# Ops agent manifest — full infrastructure access.
+# InfluxDB, Grafana, ntfy, plus filesystem for scratch space.
+
+agent_type: ops
+description: "Operations agent with infrastructure read/write access"
+
+credentials:
+  source: env
+  # Expected env vars:
+  # INFLUXDB_URL, INFLUXDB_TOKEN, INFLUXDB_ORG
+  # GRAFANA_URL, GRAFANA_SERVICE_ACCOUNT_TOKEN
+  # NTFY_URL
+
+modules:
+  influxdb:
+    mode: write
+    config:
+      org: "homelab"
+      buckets:
+        - "metrics"
+        - "alerts"
+
+  grafana:
+    mode: write
+
+  ntfy:
+    config:
+      topic: "agents-{agent_id}"
+      max_priority: urgent
+
+  filesystem:
+    mode: write
+    config:
+      base_path: /tmp/scoped-mcp-data
