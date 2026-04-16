@@ -1,5 +1,9 @@
 # scoped-mcp
 
+[![PyPI version](https://img.shields.io/pypi/v/scoped-mcp.svg)](https://pypi.org/project/scoped-mcp/)
+[![Python versions](https://img.shields.io/pypi/pyversions/scoped-mcp.svg)](https://pypi.org/project/scoped-mcp/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 Per-agent scoped MCP tool proxy. One server process per agent — loads only the tools that agent is allowed to use, enforces resource boundaries between agents, holds credentials so agents never see them, and logs every tool call to a structured audit trail.
 
 ---
