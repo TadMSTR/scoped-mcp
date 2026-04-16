@@ -124,7 +124,7 @@ def test_missing_db_dir_raises(agent_ctx: AgentContext) -> None:
 
 
 def test_deprecated_db_path_raises(tmp_path, agent_ctx: AgentContext) -> None:
-    with pytest.raises(ValueError, match="db_path.*no longer supported"):
+    with pytest.raises(ValueError, match=r"db_path.*no longer supported"):
         SqliteModule(
             agent_ctx=agent_ctx,
             credentials={},

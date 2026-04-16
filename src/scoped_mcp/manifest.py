@@ -29,7 +29,7 @@ class CredentialSourceConfig(BaseModel):
     strict_permissions: bool = True
 
     @model_validator(mode="after")
-    def _check_file_has_path(self) -> "CredentialSourceConfig":
+    def _check_file_has_path(self) -> CredentialSourceConfig:
         if self.source == "file" and not self.path:
             raise ValueError("credentials.path is required when source is 'file'")
         return self
