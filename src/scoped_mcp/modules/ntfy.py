@@ -10,7 +10,10 @@ Config:
 
 Required credentials:
     NTFY_URL: base URL of the ntfy server (e.g. https://ntfy.example.com)
-    NTFY_TOKEN: optional bearer token for authenticated topics (set to empty string if not needed)
+
+Optional credentials:
+    NTFY_TOKEN: bearer token for authenticated topics. Loaded if present; if
+        absent, ``send()`` issues the request without an Authorization header.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ class NtfyModule(ToolModule):
     name: ClassVar[str] = "ntfy"
     scoping = None
     required_credentials: ClassVar[list[str]] = ["NTFY_URL"]
+    optional_credentials: ClassVar[list[str]] = ["NTFY_TOKEN"]
 
     def __init__(self, agent_ctx, credentials, config):
         super().__init__(agent_ctx, credentials, config)

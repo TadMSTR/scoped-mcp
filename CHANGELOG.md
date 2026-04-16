@@ -69,6 +69,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nearest existing ancestor without inspecting the intermediate
   components. The `docs/scoping-strategies.md` operator guidance now
   calls out that scope directories should not contain pre-seeded symlinks.
+- **H3 — `@audited` contract honestified:** The `scope_strategy` parameter
+  on the `@audited` decorator was documented as "the thing that enforces
+  scope" but never actually called `enforce()`. It has been removed. The
+  module-author contract is now explicit in `AGENTS.md` and
+  `docs/module-authoring.md`: every tool method must call
+  `self.scoping.enforce(value, self.agent_ctx)` (or validate against an
+  explicit allowlist in `self.config`) before issuing any backend call.
+  `@audited` provides structured audit logging only. `ARCHITECTURE.md`
+  and `scoping.py` docstrings were updated to match.
+- **M1 — Grafana datasource allowlist:** `grafana.query_datasource` now
+  requires the module config to include `allowed_datasources: list[str]`;
+  calls to any datasource not in that list raise `ScopeViolation`. Without
+  an allowlist the tool is disabled entirely (previously it would run
+  against any datasource the SA token could see — which, for Grafana SA
+  tokens, is the full org). `list_datasources` is also filtered to the
+  allowlist when one is configured.
+- **L1 — Broader audit-log redaction:** The structlog sanitizer now walks
+  the full `event_dict` (not just the `args` sub-mapping) so credentials
+  leaking into `error`, `detail`, or any other field are still caught.
+  The sensitive-suffix list expanded to `_PWD`, `_PASS`, `_AUTH`; full-match
+  keys now include `authorization`, `cookie`, `session`, `bearer`,
+  `password`, `token`, `secret`, `api_key`, `apikey`, `access_token`, and
+  `refresh_token`. Pattern-based redaction was added for JWTs, `Bearer <tok>`
+  substrings, long hex strings, and GitHub PATs. The log-frame fields
+  `event`, `level`, `logger`, `timestamp`, and `status` are preserved so
+  labels like `"scope_violation"` can never be clobbered.
+- **L2 — `ntfy` bearer token now loaded:** Modules can declare
+  `optional_credentials: list[str]` as a ClassVar. The registry loads
+  those keys non-fatally from env or the secrets file; missing optional
+  keys are simply omitted from `self.credentials`. `NtfyModule` now
+  declares `NTFY_TOKEN` as an optional credential, so configuring it in
+  the environment / secrets file actually attaches
+  `Authorization: Bearer <token>` to outbound ntfy requests. Previously
+  the module's docstring claimed the header was sent when `NTFY_TOKEN`
+  was set, but the registry never loaded the key and the header was never
+  attached.
+- **L3 — GitHub Actions pinned to commit SHAs:** `.github/workflows/ci.yml`
+  and `.github/workflows/release.yml` now pin every action to a full
+  commit SHA with a comment naming the version — `actions/checkout`,
+  `actions/setup-python`, `actions/upload-artifact`,
+  `actions/download-artifact`, and `pypa/gh-action-pypi-publish`. Floating
+  tag references reachable by the upstream maintainer or via tag hijack
+  could have published a backdoored wheel under the project name via the
+  `id-token: write` OIDC publisher.
 
 ### Breaking Changes
 
@@ -101,6 +145,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ```
   Multiple filters are combined with the `logical_op` parameter
   (`"and"` — default — or `"or"`).
+- **`@audited` decorator signature:** the `scope_strategy` parameter was
+  removed. Third-party module authors who relied on the (never-actually-wired)
+  invariant that `@audited` enforces scope must explicitly call
+  `self.scoping.enforce(value, self.agent_ctx)` in every tool method, or
+  validate the argument against an allowlist. See the updated module-author
+  checklist in `AGENTS.md` and the "Scope enforcement is your responsibility"
+  callout in `docs/module-authoring.md`. None of the built-in modules relied
+  on the removed parameter — every one of them already enforced scope
+  inside its tool methods.
+- **`grafana.query_datasource` now requires an allowlist:** callers using
+  the Grafana module in `mode: write` must add
+  `allowed_datasources: ["name1", "name2"]` to the module config. Without
+  it, `query_datasource` raises `ScopeViolation` on every call.
+
+  Migration:
+  ```yaml
+  # before
+  grafana:
+    mode: write
+    config: {}
+  # after
+  grafana:
+    mode: write
+    config:
+      allowed_datasources: ["prom-agent", "postgres-agent"]
+  ```
 
 ### Deprecated
 

@@ -117,3 +117,97 @@ async def test_delete_dashboard_wrong_folder_blocked(grafana_module: GrafanaModu
     )
     with pytest.raises(ScopeViolation):
         await grafana_module.delete_dashboard("dash-other")
+
+
+# ── M1: allowed_datasources allowlist ────────────────────────────────────────
+
+
+def _ds_module(agent_ctx: AgentContext, allowed: list[str] | None) -> GrafanaModule:
+    config: dict = {}
+    if allowed is not None:
+        config["allowed_datasources"] = allowed
+    return GrafanaModule(
+        agent_ctx=agent_ctx,
+        credentials={
+            "GRAFANA_URL": "http://grafana.test",
+            "GRAFANA_SERVICE_ACCOUNT_TOKEN": "EXAMPLE_TOKEN",
+        },
+        config=config,
+    )
+
+
+@pytest.mark.asyncio
+async def test_query_datasource_disabled_without_allowlist(agent_ctx: AgentContext) -> None:
+    """With no allowed_datasources configured, query_datasource must refuse."""
+    mod = _ds_module(agent_ctx, allowed=None)
+    with pytest.raises(ScopeViolation, match="allowed_datasources"):
+        await mod.query_datasource(datasource="prom", query="up")
+
+
+@pytest.mark.asyncio
+async def test_query_datasource_rejects_non_allowlisted(agent_ctx: AgentContext) -> None:
+    mod = _ds_module(agent_ctx, allowed=["prom-agent"])
+    with pytest.raises(ScopeViolation, match="not in the agent's allowed_datasources"):
+        await mod.query_datasource(datasource="loki-prod", query="{}")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_query_datasource_allows_listed(agent_ctx: AgentContext) -> None:
+    mod = _ds_module(agent_ctx, allowed=["prom-agent"])
+    respx.get("http://grafana.test/api/datasources/name/prom-agent").mock(
+        return_value=Response(200, json={"uid": "ds-abc"})
+    )
+    route = respx.post("http://grafana.test/api/ds/query").mock(
+        return_value=Response(200, json={"results": {}})
+    )
+    result = await mod.query_datasource(datasource="prom-agent", query="up")
+    assert route.called
+    assert result == {"results": {}}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_list_datasources_filtered_by_allowlist(agent_ctx: AgentContext) -> None:
+    mod = _ds_module(agent_ctx, allowed=["prom-agent"])
+    respx.get("http://grafana.test/api/datasources").mock(
+        return_value=Response(
+            200,
+            json=[
+                {"name": "prom-agent", "uid": "a"},
+                {"name": "loki-prod", "uid": "b"},
+                {"name": "postgres-prod", "uid": "c"},
+            ],
+        )
+    )
+    result = await mod.list_datasources()
+    names = [d["name"] for d in result]
+    assert names == ["prom-agent"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_list_datasources_unfiltered_when_no_allowlist(agent_ctx: AgentContext) -> None:
+    mod = _ds_module(agent_ctx, allowed=None)
+    respx.get("http://grafana.test/api/datasources").mock(
+        return_value=Response(200, json=[{"name": "a", "uid": "1"}, {"name": "b", "uid": "2"}])
+    )
+    result = await mod.list_datasources()
+    assert len(result) == 2
+
+
+def test_grafana_rejects_invalid_allowlist_entry(agent_ctx: AgentContext) -> None:
+    with pytest.raises(ValueError, match="allowed_datasources"):
+        _ds_module(agent_ctx, allowed=["bad/name"])
+
+
+def test_grafana_rejects_non_list_allowlist(agent_ctx: AgentContext) -> None:
+    with pytest.raises(ValueError, match="allowed_datasources"):
+        GrafanaModule(
+            agent_ctx=agent_ctx,
+            credentials={
+                "GRAFANA_URL": "http://grafana.test",
+                "GRAFANA_SERVICE_ACCOUNT_TOKEN": "EXAMPLE_TOKEN",
+            },
+            config={"allowed_datasources": "prom-agent"},  # type: ignore[dict-item]
+        )

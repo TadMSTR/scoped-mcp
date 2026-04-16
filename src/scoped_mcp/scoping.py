@@ -1,11 +1,17 @@
 """Scoping strategies for resource isolation between agents.
 
 Scope enforcement is the security boundary of scoped-mcp. Every tool call
-passes through enforce() before any backend operation. Do not bypass it.
+must pass through enforce() (or an equivalent allowlist / validation check)
+before any backend operation. Do not bypass it.
 
-Invariant: enforce() MUST be called before any backend operation. The
-@audited decorator in audit.py calls enforce() — module authors do not
-call it directly. This prevents accidental omission.
+Invariant: every tool method in a ToolModule subclass must call
+``self.scoping.enforce(value, self.agent_ctx)`` on each argument that
+addresses a backend resource — or, for modules that scope via an allowlist
+rather than a transformable value (e.g. Grafana datasource names, SMTP
+recipients, ntfy topics), validate the argument against that allowlist
+before issuing the backend call. The ``@audited`` decorator applied by the
+registry provides logging; it does NOT enforce scope. See ``AGENTS.md`` for
+the module-author enforcement checklist.
 """
 
 from __future__ import annotations

@@ -122,3 +122,45 @@ def test_file_source_0600_passes(tmp_path: object) -> None:
 def test_unknown_source_raises() -> None:
     with pytest.raises(CredentialError, match="Unknown credential source"):
         resolve_credentials("vault", ["MY_TOKEN"])  # type: ignore[arg-type]
+
+
+# ── L2: optional_keys ─────────────────────────────────────────────────────────
+
+
+def test_env_optional_key_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REQUIRED_KEY", "a")
+    monkeypatch.setenv("OPTIONAL_KEY", "b")
+    result = resolve_credentials("env", ["REQUIRED_KEY"], optional_keys=["OPTIONAL_KEY"])
+    assert result == {"REQUIRED_KEY": "a", "OPTIONAL_KEY": "b"}
+
+
+def test_env_optional_key_absent_does_not_raise(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REQUIRED_KEY", "a")
+    monkeypatch.delenv("OPTIONAL_KEY", raising=False)
+    result = resolve_credentials("env", ["REQUIRED_KEY"], optional_keys=["OPTIONAL_KEY"])
+    assert result == {"REQUIRED_KEY": "a"}
+
+
+def test_env_required_missing_still_raises_when_optional_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("REQUIRED_KEY", raising=False)
+    monkeypatch.setenv("OPTIONAL_KEY", "b")
+    with pytest.raises(CredentialError, match="REQUIRED_KEY"):
+        resolve_credentials("env", ["REQUIRED_KEY"], optional_keys=["OPTIONAL_KEY"])
+
+
+def test_file_optional_key_present(tmp_path: object) -> None:
+    path = _write_secrets(tmp_path, "REQUIRED_KEY: a\nOPTIONAL_KEY: b\n")
+    result = resolve_credentials(
+        "file", ["REQUIRED_KEY"], file_path=path, optional_keys=["OPTIONAL_KEY"]
+    )
+    assert result == {"REQUIRED_KEY": "a", "OPTIONAL_KEY": "b"}
+
+
+def test_file_optional_key_absent_does_not_raise(tmp_path: object) -> None:
+    path = _write_secrets(tmp_path, "REQUIRED_KEY: a\n")
+    result = resolve_credentials(
+        "file", ["REQUIRED_KEY"], file_path=path, optional_keys=["OPTIONAL_KEY"]
+    )
+    assert result == {"REQUIRED_KEY": "a"}

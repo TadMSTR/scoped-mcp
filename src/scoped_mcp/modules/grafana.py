@@ -13,6 +13,13 @@ Targets Grafana v12+ API. Falls back to v11 endpoints where noted.
 
 Config:
     grafana_url (str): optional override — defaults to GRAFANA_URL credential.
+    allowed_datasources (list[str]): optional allowlist of datasource names the
+        agent may query via ``query_datasource``. If set, ``list_datasources`` is
+        also filtered to this list and ``query_datasource`` rejects anything else.
+        If unset or empty, ``query_datasource`` is disabled and ``list_datasources``
+        returns all org datasources (legacy behaviour — note that Grafana SA tokens
+        are org-scoped, so without an allowlist any agent with a write-mode Grafana
+        module can query every datasource the Grafana org has configured).
 
 Required credentials:
     GRAFANA_URL: base URL of the Grafana instance (e.g. https://grafana.example.com)
@@ -63,6 +70,14 @@ class GrafanaModule(ToolModule):
         self._token = credentials["GRAFANA_SERVICE_ACCOUNT_TOKEN"]
         self._folder_title = f"agent-{agent_ctx.agent_id}"
         self._folder_uid: str | None = None  # resolved at first use
+
+        allowed = config.get("allowed_datasources") or []
+        if not isinstance(allowed, list) or any(not isinstance(x, str) for x in allowed):
+            raise ValueError("grafana config 'allowed_datasources' must be a list of strings")
+        for name in allowed:
+            if not _DATASOURCE_NAME_PATTERN.match(name):
+                raise ValueError(f"grafana config allowed_datasources entry is invalid: {name!r}")
+        self._allowed_datasources: frozenset[str] = frozenset(allowed)
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
@@ -144,7 +159,10 @@ class GrafanaModule(ToolModule):
 
     @tool(mode="read")
     async def list_datasources(self) -> list[dict[str, Any]]:
-        """List available datasources (read-only metadata, org-scoped).
+        """List available datasources.
+
+        If ``allowed_datasources`` is configured, the response is filtered to
+        names in the allowlist. Otherwise the full org-scoped list is returned.
 
         Returns:
             List of datasource metadata dicts.
@@ -155,11 +173,19 @@ class GrafanaModule(ToolModule):
                 headers=self._headers(),
             )
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+        if self._allowed_datasources:
+            data = [d for d in data if d.get("name") in self._allowed_datasources]
+        return data
 
     @tool(mode="read")
     async def query_datasource(self, datasource: str, query: str) -> dict[str, Any]:
         """Execute a query against a named datasource.
+
+        The datasource must be listed in the module's ``allowed_datasources``
+        config. Without that allowlist, this tool always raises
+        ``ScopeViolation`` — Grafana SA tokens are org-scoped so the proxy
+        layer is the only place this boundary can be drawn.
 
         Args:
             datasource: Datasource name.
@@ -169,6 +195,15 @@ class GrafanaModule(ToolModule):
             Query result dict.
         """
         _validate_datasource_name(datasource)
+        if not self._allowed_datasources:
+            raise ScopeViolation(
+                "query_datasource requires 'allowed_datasources' to be configured; "
+                "Grafana SA tokens are org-scoped so this tool is disabled by default."
+            )
+        if datasource not in self._allowed_datasources:
+            raise ScopeViolation(
+                f"Datasource '{datasource}' is not in the agent's allowed_datasources"
+            )
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Get datasource UID by name
             resp = await client.get(
