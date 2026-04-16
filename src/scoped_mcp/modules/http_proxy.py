@@ -102,7 +102,9 @@ class HttpProxyModule(ToolModule):
         return url
 
     @tool(mode="read")
-    async def get(self, service: str, path: str, params: dict[str, Any] = {}) -> dict[str, Any]:
+    async def get(
+        self, service: str, path: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         """Make a GET request to an allowlisted service.
 
         Args:
@@ -116,7 +118,7 @@ class HttpProxyModule(ToolModule):
         svc = self._get_service(service)
         url = self._build_url(svc, path)
         async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(url, params=params, headers=self._make_headers(svc))
+            response = await client.get(url, params=params or {}, headers=self._make_headers(svc))
             response.raise_for_status()
         try:
             return response.json()
@@ -124,7 +126,9 @@ class HttpProxyModule(ToolModule):
             return {"text": response.text}
 
     @tool(mode="write")
-    async def post(self, service: str, path: str, body: dict[str, Any] = {}) -> dict[str, Any]:
+    async def post(
+        self, service: str, path: str, body: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         """Make a POST request to an allowlisted service.
 
         Args:
@@ -138,7 +142,7 @@ class HttpProxyModule(ToolModule):
         svc = self._get_service(service)
         url = self._build_url(svc, path)
         async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(url, json=body, headers=self._make_headers(svc))
+            response = await client.post(url, json=body or {}, headers=self._make_headers(svc))
             response.raise_for_status()
         try:
             return response.json()
@@ -146,7 +150,9 @@ class HttpProxyModule(ToolModule):
             return {"text": response.text}
 
     @tool(mode="write")
-    async def put(self, service: str, path: str, body: dict[str, Any] = {}) -> dict[str, Any]:
+    async def put(
+        self, service: str, path: str, body: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         """Make a PUT request to an allowlisted service.
 
         Args:
@@ -160,7 +166,7 @@ class HttpProxyModule(ToolModule):
         svc = self._get_service(service)
         url = self._build_url(svc, path)
         async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.put(url, json=body, headers=self._make_headers(svc))
+            response = await client.put(url, json=body or {}, headers=self._make_headers(svc))
             response.raise_for_status()
         try:
             return response.json()

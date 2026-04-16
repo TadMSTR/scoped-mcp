@@ -21,12 +21,32 @@ Required credentials:
 
 from __future__ import annotations
 
+import re
 from typing import Any, ClassVar
+from urllib.parse import quote
 
 import httpx
 
 from ..exceptions import ScopeViolation
 from ._base import ToolModule, tool
+
+# Grafana UIDs are alphanumeric with -/_, up to 40 chars per convention.
+_UID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+# Datasource names are operator-configured but passed via URL path — restrict to a
+# conservative character set and encode on use.
+_DATASOURCE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9 _.-]{1,64}$")
+
+
+def _validate_uid(uid: str) -> str:
+    if not _UID_PATTERN.match(uid):
+        raise ValueError(f"Invalid Grafana UID: {uid!r}")
+    return uid
+
+
+def _validate_datasource_name(name: str) -> str:
+    if not _DATASOURCE_NAME_PATTERN.match(name):
+        raise ValueError(f"Invalid datasource name: {name!r}")
+    return name
 
 
 class GrafanaModule(ToolModule):
@@ -72,9 +92,10 @@ class GrafanaModule(ToolModule):
 
     async def _verify_dashboard_folder(self, client: httpx.AsyncClient, uid: str) -> None:
         """Raise ScopeViolation if the dashboard is not in the agent's folder."""
+        _validate_uid(uid)
         folder_uid = await self._ensure_folder(client)
         resp = await client.get(
-            f"{self._base_url}/api/dashboards/uid/{uid}",
+            f"{self._base_url}/api/dashboards/uid/{quote(uid, safe='')}",
             headers=self._headers(),
         )
         resp.raise_for_status()
@@ -115,7 +136,7 @@ class GrafanaModule(ToolModule):
         async with httpx.AsyncClient(timeout=15.0) as client:
             await self._verify_dashboard_folder(client, uid)
             resp = await client.get(
-                f"{self._base_url}/api/dashboards/uid/{uid}",
+                f"{self._base_url}/api/dashboards/uid/{quote(uid, safe='')}",
                 headers=self._headers(),
             )
             resp.raise_for_status()
@@ -147,10 +168,11 @@ class GrafanaModule(ToolModule):
         Returns:
             Query result dict.
         """
+        _validate_datasource_name(datasource)
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Get datasource UID by name
             resp = await client.get(
-                f"{self._base_url}/api/datasources/name/{datasource}",
+                f"{self._base_url}/api/datasources/name/{quote(datasource, safe='')}",
                 headers=self._headers(),
             )
             resp.raise_for_status()
@@ -215,7 +237,7 @@ class GrafanaModule(ToolModule):
 
             # Fetch current dashboard to preserve version and other fields
             resp = await client.get(
-                f"{self._base_url}/api/dashboards/uid/{uid}",
+                f"{self._base_url}/api/dashboards/uid/{quote(uid, safe='')}",
                 headers=self._headers(),
             )
             resp.raise_for_status()
@@ -249,7 +271,7 @@ class GrafanaModule(ToolModule):
         async with httpx.AsyncClient(timeout=15.0) as client:
             await self._verify_dashboard_folder(client, uid)
             resp = await client.delete(
-                f"{self._base_url}/api/dashboards/uid/{uid}",
+                f"{self._base_url}/api/dashboards/uid/{quote(uid, safe='')}",
                 headers=self._headers(),
             )
             resp.raise_for_status()

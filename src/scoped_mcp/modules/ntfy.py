@@ -65,12 +65,16 @@ class NtfyModule(ToolModule):
         token = self.credentials.get("NTFY_TOKEN", "")
         capped = self._cap_priority(priority)
 
+        # Strip control chars defense-in-depth — httpx/h11 also reject CRLF in headers.
+        safe_title = title.replace("\r", "").replace("\n", " ")[:250]
+        safe_tags = tags.replace("\r", "").replace("\n", " ")[:250] if tags else ""
+
         headers = {
-            "Title": title,
+            "Title": safe_title,
             "Priority": capped,
         }
-        if tags:
-            headers["Tags"] = tags
+        if safe_tags:
+            headers["Tags"] = safe_tags
         if token:
             headers["Authorization"] = f"Bearer {token}"
 

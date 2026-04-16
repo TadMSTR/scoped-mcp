@@ -39,6 +39,24 @@ jobs:
       - name: Run tests
         run: pytest --cov=scoped_mcp --cov-report=term-missing --cov-fail-under=75
 
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Audit dependencies
+        run: pip-audit --strict --disable-pip
+
   build:
     name: Build distribution
     runs-on: ubuntu-latest
