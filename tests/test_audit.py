@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
-import json
-from io import StringIO
-
 import pytest
-import structlog
 
-from scoped_mcp.audit import _sanitize_value, audited, configure_logging
+from scoped_mcp.audit import _sanitize_value, audited
 from scoped_mcp.exceptions import ScopeViolation
 from scoped_mcp.identity import AgentContext
 
-
 # ── _sanitize_value ───────────────────────────────────────────────────────────
+
 
 def test_sanitize_token_key() -> None:
     assert _sanitize_value("supersecret", "MY_TOKEN") == "<redacted>"
@@ -60,8 +56,10 @@ def test_sanitize_list_recurses() -> None:
 
 # ── @audited decorator ────────────────────────────────────────────────────────
 
+
 class _MockModule:
     """Minimal mock of a ToolModule instance for decorator tests."""
+
     def __init__(self, agent_ctx: AgentContext) -> None:
         self.agent_ctx = agent_ctx
 
@@ -71,6 +69,7 @@ async def _make_tool(module: _MockModule, raise_exc: Exception | None = None) ->
         if raise_exc:
             raise raise_exc
         return f"ok:{value}"
+
     _tool.__name__ = "test_tool"
     wrapped = audited("test_module_test_tool")(_tool)
     return await wrapped(module, value="hello")

@@ -17,8 +17,8 @@ from scoped_mcp.modules.matrix import MatrixModule
 from scoped_mcp.modules.ntfy import NtfyModule
 from scoped_mcp.modules.slack_webhook import SlackWebhookModule
 
-
 # ── NtfyModule ────────────────────────────────────────────────────────────────
+
 
 @pytest.fixture
 def ntfy_module(agent_ctx: AgentContext) -> NtfyModule:
@@ -79,6 +79,7 @@ def test_ntfy_credential_not_exposed_in_config(ntfy_module: NtfyModule) -> None:
 
 # ── MatrixModule ──────────────────────────────────────────────────────────────
 
+
 @pytest.fixture
 def matrix_module(agent_ctx: AgentContext) -> MatrixModule:
     return MatrixModule(
@@ -121,6 +122,7 @@ def test_matrix_no_allowed_rooms_raises(agent_ctx: AgentContext) -> None:
 
 # ── SlackWebhookModule ────────────────────────────────────────────────────────
 
+
 @pytest.fixture
 def slack_module(agent_ctx: AgentContext) -> SlackWebhookModule:
     return SlackWebhookModule(
@@ -143,6 +145,7 @@ def test_slack_credential_not_in_config(slack_module: SlackWebhookModule) -> Non
 
 
 # ── DiscordWebhookModule ──────────────────────────────────────────────────────
+
 
 @pytest.fixture
 def discord_module(agent_ctx: AgentContext) -> DiscordWebhookModule:
@@ -169,6 +172,7 @@ async def test_discord_truncates_long_content(discord_module: DiscordWebhookModu
     await discord_module.send(content=long_msg)
     # Verify the request body was truncated
     import json
+
     sent_body = json.loads(respx.calls[0].request.content)
     assert len(sent_body["content"]) == 2000
 

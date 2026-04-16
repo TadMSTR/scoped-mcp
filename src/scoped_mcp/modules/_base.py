@@ -16,8 +16,8 @@ from typing import Any, ClassVar, Literal
 
 from ..scoping import ScopeStrategy
 
-
 # ── @tool decorator ──────────────────────────────────────────────────────────
+
 
 def tool(mode: Literal["read", "write"]) -> Any:
     """Mark a ToolModule method as an MCP tool with the given mode.
@@ -30,6 +30,7 @@ def tool(mode: Literal["read", "write"]) -> Any:
             @tool(mode="write")
             async def my_write_tool(self, arg: str) -> bool: ...
     """
+
     def decorator(fn: Any) -> Any:
         fn._tool_mode = mode
         fn._is_tool = True
@@ -46,6 +47,7 @@ def tool(mode: Literal["read", "write"]) -> Any:
 
 
 # ── ToolModule base class ─────────────────────────────────────────────────────
+
 
 class ToolModule(ABC):
     """Base class for all scoped-mcp tool modules.

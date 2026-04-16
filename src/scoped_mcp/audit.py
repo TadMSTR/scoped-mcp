@@ -43,9 +43,7 @@ def _sanitize_value(value: Any, key: str = "") -> Any:
     return value
 
 
-def _sanitize_processor(
-    logger: Any, method: str, event_dict: dict[str, Any]
-) -> dict[str, Any]:
+def _sanitize_processor(logger: Any, method: str, event_dict: dict[str, Any]) -> dict[str, Any]:
     """structlog processor that sanitizes the 'args' field in log events."""
     if "args" in event_dict:
         raw = event_dict["args"]
@@ -55,6 +53,7 @@ def _sanitize_processor(
 
 
 # ── Logger configuration ─────────────────────────────────────────────────────
+
 
 def configure_logging(audit_log: str | None = None, ops_log: str | None = None) -> None:
     """Configure structlog. Call once at server startup.
@@ -93,6 +92,7 @@ def get_ops_logger() -> structlog.stdlib.BoundLogger:
 
 # ── @audited decorator ───────────────────────────────────────────────────────
 
+
 def audited(tool_name: str, scope_strategy: Any | None = None) -> Callable:
     """Decorator factory that wraps a tool handler with audit logging and scope enforcement.
 
@@ -103,6 +103,7 @@ def audited(tool_name: str, scope_strategy: Any | None = None) -> Callable:
         scope_strategy: optional ScopeStrategy instance. If provided, enforce()
                         is called on the primary resource argument before execution.
     """
+
     def decorator(fn: Callable) -> Callable:
         @functools.wraps(fn)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -127,6 +128,7 @@ def audited(tool_name: str, scope_strategy: Any | None = None) -> Callable:
                 return result
             except Exception as exc:
                 from .exceptions import ScopeViolation  # avoid circular at module level
+
                 elapsed_ms = round((time.monotonic() - start) * 1000, 2)
                 if isinstance(exc, ScopeViolation):
                     logger.warning(

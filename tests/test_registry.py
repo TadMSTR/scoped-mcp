@@ -10,8 +10,8 @@ from scoped_mcp.manifest import Manifest, ModuleConfig
 from scoped_mcp.modules._base import ToolModule, tool
 from scoped_mcp.registry import _discover_module_classes, build_server
 
-
 # ── Module discovery ──────────────────────────────────────────────────────────
+
 
 def test_discover_finds_builtin_modules() -> None:
     """After Phase 2+ adds real modules, this number will grow."""
@@ -21,6 +21,7 @@ def test_discover_finds_builtin_modules() -> None:
 
 
 # ── build_server rejects unknown modules ──────────────────────────────────────
+
 
 def test_build_server_unknown_module_raises(agent_ctx: AgentContext) -> None:
     manifest = Manifest(
@@ -32,6 +33,7 @@ def test_build_server_unknown_module_raises(agent_ctx: AgentContext) -> None:
 
 
 # ── ToolModule.get_tool_methods mode filtering ────────────────────────────────
+
 
 class _MockModule(ToolModule):
     name = "_test_mock"

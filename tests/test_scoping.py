@@ -6,8 +6,6 @@ the security boundary holds under normal use AND adversarial inputs.
 
 from __future__ import annotations
 
-import os
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -16,8 +14,8 @@ from scoped_mcp.exceptions import ScopeViolation
 from scoped_mcp.identity import AgentContext
 from scoped_mcp.scoping import NamespaceScope, PrefixScope, SchemaScope
 
-
 # ── PrefixScope ───────────────────────────────────────────────────────────────
+
 
 @pytest.fixture
 def tmp_base(tmp_path: Path) -> Path:
@@ -40,7 +38,9 @@ def test_prefix_scope_enforce_valid(tmp_base: Path, agent_ctx: AgentContext) -> 
     scope.enforce(valid_path, agent_ctx)
 
 
-def test_prefix_scope_enforce_cross_agent(tmp_base: Path, agent_ctx: AgentContext, other_agent_ctx: AgentContext) -> None:
+def test_prefix_scope_enforce_cross_agent(
+    tmp_base: Path, agent_ctx: AgentContext, other_agent_ctx: AgentContext
+) -> None:
     scope = PrefixScope(str(tmp_base))
     other_path = str(tmp_base / "agents" / "test-agent-2" / "secret.txt")
     with pytest.raises(ScopeViolation):
@@ -85,6 +85,7 @@ def test_prefix_scope_write_target_nonexistent(tmp_base: Path, agent_ctx: AgentC
 
 # ── SchemaScope ───────────────────────────────────────────────────────────────
 
+
 def test_schema_scope_apply(agent_ctx: AgentContext) -> None:
     scope = SchemaScope()
     assert scope.apply("", agent_ctx) == "agent_test-agent-1"
@@ -95,7 +96,9 @@ def test_schema_scope_enforce_valid(agent_ctx: AgentContext) -> None:
     scope.enforce("agent_test-agent-1", agent_ctx)
 
 
-def test_schema_scope_enforce_wrong_agent(agent_ctx: AgentContext, other_agent_ctx: AgentContext) -> None:
+def test_schema_scope_enforce_wrong_agent(
+    agent_ctx: AgentContext, other_agent_ctx: AgentContext
+) -> None:
     scope = SchemaScope()
     other_schema = scope.apply("", other_agent_ctx)
     with pytest.raises(ScopeViolation):
@@ -109,6 +112,7 @@ def test_schema_scope_enforce_unscoped(agent_ctx: AgentContext) -> None:
 
 
 # ── NamespaceScope ────────────────────────────────────────────────────────────
+
 
 def test_namespace_scope_apply(agent_ctx: AgentContext) -> None:
     scope = NamespaceScope()

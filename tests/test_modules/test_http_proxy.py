@@ -34,6 +34,7 @@ def proxy_module(agent_ctx: AgentContext) -> HttpProxyModule:
 
 # ── SSRF detection ────────────────────────────────────────────────────────────
 
+
 def test_ssrf_localhost() -> None:
     assert _is_ssrf_target("http://localhost/api") is True
 
@@ -63,15 +64,12 @@ def test_ssrf_blocked_at_init(agent_ctx: AgentContext) -> None:
         HttpProxyModule(
             agent_ctx=agent_ctx,
             credentials={},
-            config={
-                "allowed_services": [
-                    {"name": "internal", "base_url": "http://192.168.1.1"}
-                ]
-            },
+            config={"allowed_services": [{"name": "internal", "base_url": "http://192.168.1.1"}]},
         )
 
 
 # ── Service allowlist ─────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_unlisted_service_blocked(proxy_module: HttpProxyModule) -> None:
@@ -86,10 +84,13 @@ def test_no_services_raises(agent_ctx: AgentContext) -> None:
 
 # ── Credential injection ──────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_credential_injected_as_bearer(proxy_module: HttpProxyModule) -> None:
-    route = respx.get("https://api.example.com/data").mock(return_value=Response(200, json={"ok": True}))
+    route = respx.get("https://api.example.com/data").mock(
+        return_value=Response(200, json={"ok": True})
+    )
     await proxy_module.get(service="my_api", path="/data")
     auth = route.calls[0].request.headers.get("Authorization")
     assert auth == "Bearer EXAMPLE_TOKEN"
@@ -106,6 +107,7 @@ async def test_no_credential_when_not_configured(proxy_module: HttpProxyModule) 
 
 # ── HTTP methods ──────────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_get_returns_json(proxy_module: HttpProxyModule) -> None:
@@ -120,6 +122,7 @@ async def test_get_returns_json(proxy_module: HttpProxyModule) -> None:
 @respx.mock
 async def test_post_sends_body(proxy_module: HttpProxyModule) -> None:
     import json as _json
+
     route = respx.post("https://api.example.com/create").mock(
         return_value=Response(201, json={"id": "123"})
     )

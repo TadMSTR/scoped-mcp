@@ -17,7 +17,6 @@ Required credentials:
 
 from __future__ import annotations
 
-import time
 import uuid
 from typing import ClassVar
 
@@ -55,9 +54,7 @@ class MatrixModule(ToolModule):
             True on success.
         """
         if room not in self._allowed_rooms:
-            raise ScopeViolation(
-                f"Room '{room}' is not in the allowed_rooms list"
-            )
+            raise ScopeViolation(f"Room '{room}' is not in the allowed_rooms list")
 
         homeserver = self.credentials["MATRIX_HOMESERVER"].rstrip("/")
         token = self.credentials["MATRIX_ACCESS_TOKEN"]
@@ -65,6 +62,7 @@ class MatrixModule(ToolModule):
 
         # URL-encode the room ID (! and : are valid but some servers are strict)
         import urllib.parse
+
         room_encoded = urllib.parse.quote(room, safe="")
 
         url = f"{homeserver}/_matrix/client/v3/rooms/{room_encoded}/send/m.room.message/{txn_id}"

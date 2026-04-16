@@ -26,14 +26,13 @@ from ..exceptions import ScopeViolation
 from ..scoping import SchemaScope
 from ._base import ToolModule, tool
 
-
 # Statement types that are never allowed regardless of mode.
 _BLOCKED_STATEMENT_TYPES = (
-    exp.Command,   # fallback for unparsed/unknown commands
-    exp.Pragma,    # PRAGMA journal_mode=..., etc.
-    exp.Attach,    # ATTACH DATABASE
-    exp.Detach,    # DETACH DATABASE
-    exp.Drop,      # DROP TABLE — use delete_table tool instead
+    exp.Command,  # fallback for unparsed/unknown commands
+    exp.Pragma,  # PRAGMA journal_mode=..., etc.
+    exp.Attach,  # ATTACH DATABASE
+    exp.Detach,  # DETACH DATABASE
+    exp.Drop,  # DROP TABLE — use delete_table tool instead
 )
 
 
@@ -73,9 +72,7 @@ class SqliteModule(ToolModule):
         # PRAGMA, ATTACH, DETACH parse as their own node types in sqlglot; Command
         # is a fallback for anything sqlglot can't fully parse.
         if isinstance(stmt, _BLOCKED_STATEMENT_TYPES):
-            raise ScopeViolation(
-                f"{type(stmt).__name__} statements are not allowed"
-            )
+            raise ScopeViolation(f"{type(stmt).__name__} statements are not allowed")
 
         # Also walk for nested Command nodes (extra defense against obfuscation)
         for node in stmt.walk():
@@ -166,7 +163,8 @@ class SqliteModule(ToolModule):
 
         Args:
             name: Table name (unqualified — agent schema is applied automatically).
-            columns: Dict mapping column names to their SQL type strings (e.g. {"id": "INTEGER PRIMARY KEY"}).
+            columns: Dict mapping column names to their SQL type strings
+                     (e.g. {"id": "INTEGER PRIMARY KEY"}).
 
         Returns:
             True on success.
@@ -174,10 +172,7 @@ class SqliteModule(ToolModule):
         if not name.isidentifier():
             raise ValueError(f"Invalid table name: {name!r}")
 
-        col_defs = ", ".join(
-            f"{col_name} {col_type}"
-            for col_name, col_type in columns.items()
-        )
+        col_defs = ", ".join(f"{col_name} {col_type}" for col_name, col_type in columns.items())
         sql = f"CREATE TABLE IF NOT EXISTS {name} ({col_defs})"
         await self._execute_write(sql)
         return True

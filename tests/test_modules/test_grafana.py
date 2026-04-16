@@ -33,12 +33,13 @@ def _mock_folder_list(folder_uid: str = "folder-abc", title: str = "agent-test-a
 
 # ── Folder creation ───────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_ensure_folder_finds_existing(grafana_module: GrafanaModule) -> None:
     folder_uid = _mock_folder_list()
     respx.get("http://grafana.test/api/search").mock(return_value=Response(200, json=[]))
-    result = await grafana_module.list_dashboards()
+    await grafana_module.list_dashboards()
     assert grafana_module._folder_uid == folder_uid
 
 
@@ -56,10 +57,11 @@ async def test_ensure_folder_creates_if_missing(grafana_module: GrafanaModule) -
 
 # ── Dashboard CRUD ────────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_list_dashboards(grafana_module: GrafanaModule) -> None:
-    folder_uid = _mock_folder_list()
+    _mock_folder_list()
     respx.get("http://grafana.test/api/search").mock(
         return_value=Response(200, json=[{"uid": "dash-1", "title": "My Dashboard"}])
     )
@@ -74,10 +76,13 @@ async def test_get_dashboard_wrong_folder_blocked(grafana_module: GrafanaModule)
     _mock_folder_list(folder_uid="agent-folder")
     # Dashboard belongs to a different folder
     respx.get("http://grafana.test/api/dashboards/uid/dash-x").mock(
-        return_value=Response(200, json={
-            "dashboard": {"uid": "dash-x"},
-            "meta": {"folderUid": "other-folder"},
-        })
+        return_value=Response(
+            200,
+            json={
+                "dashboard": {"uid": "dash-x"},
+                "meta": {"folderUid": "other-folder"},
+            },
+        )
     )
     with pytest.raises(ScopeViolation):
         await grafana_module.get_dashboard("dash-x")
@@ -87,6 +92,7 @@ async def test_get_dashboard_wrong_folder_blocked(grafana_module: GrafanaModule)
 @respx.mock
 async def test_create_dashboard_injects_folder(grafana_module: GrafanaModule) -> None:
     import json as _json
+
     folder_uid = _mock_folder_list()
     route = respx.post("http://grafana.test/api/dashboards/db").mock(
         return_value=Response(200, json={"uid": "new-dash", "status": "success"})
@@ -101,10 +107,13 @@ async def test_create_dashboard_injects_folder(grafana_module: GrafanaModule) ->
 async def test_delete_dashboard_wrong_folder_blocked(grafana_module: GrafanaModule) -> None:
     _mock_folder_list(folder_uid="agent-folder")
     respx.get("http://grafana.test/api/dashboards/uid/dash-other").mock(
-        return_value=Response(200, json={
-            "dashboard": {"uid": "dash-other"},
-            "meta": {"folderUid": "someone-elses-folder"},
-        })
+        return_value=Response(
+            200,
+            json={
+                "dashboard": {"uid": "dash-other"},
+                "meta": {"folderUid": "someone-elses-folder"},
+            },
+        )
     )
     with pytest.raises(ScopeViolation):
         await grafana_module.delete_dashboard("dash-other")

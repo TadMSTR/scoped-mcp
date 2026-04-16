@@ -57,9 +57,7 @@ def _from_env(keys: list[str]) -> dict[str, str]:
             result[key] = value
 
     if missing:
-        raise CredentialError(
-            f"Missing required environment variable(s): {', '.join(missing)}"
-        )
+        raise CredentialError(f"Missing required environment variable(s): {', '.join(missing)}")
 
     return result
 
@@ -87,8 +85,6 @@ def _from_file(keys: list[str], file_path: str) -> dict[str, str]:
             result[key] = str(raw[key])
 
     if missing:
-        raise CredentialError(
-            f"Missing credential key(s) in '{file_path}': {', '.join(missing)}"
-        )
+        raise CredentialError(f"Missing credential key(s) in '{file_path}': {', '.join(missing)}")
 
     return result

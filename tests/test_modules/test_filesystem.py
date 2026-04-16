@@ -36,6 +36,7 @@ def other_fs_module(base_path: Path, other_agent_ctx: AgentContext) -> Filesyste
 
 # ── Happy-path read/write/delete ──────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_write_and_read_file(fs_module: FilesystemModule) -> None:
     result = await fs_module.write_file("hello.txt", "hello world")
@@ -83,6 +84,7 @@ async def test_delete_nonexistent_raises(fs_module: FilesystemModule) -> None:
 
 # ── Cross-agent isolation ─────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_cross_agent_read_blocked(
     fs_module: FilesystemModule,
@@ -108,6 +110,7 @@ async def test_cross_agent_write_blocked(
 
 
 # ── Traversal attack prevention ───────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_dotdot_traversal_blocked(
@@ -143,6 +146,7 @@ async def test_symlink_escape_blocked(
 
 
 # ── Config validation ─────────────────────────────────────────────────────────
+
 
 def test_missing_base_path_raises(agent_ctx: AgentContext) -> None:
     with pytest.raises(ValueError, match="base_path"):

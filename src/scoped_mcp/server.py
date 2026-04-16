@@ -54,7 +54,11 @@ def main(argv: list[str] | None = None) -> None:
         ops.info("identity_resolved", agent_id=agent_ctx.agent_id, agent_type=agent_ctx.agent_type)
 
         manifest = load_manifest(args.manifest)
-        ops.info("manifest_loaded", agent_type=manifest.agent_type, modules=list(manifest.modules.keys()))
+        ops.info(
+            "manifest_loaded",
+            agent_type=manifest.agent_type,
+            modules=list(manifest.modules.keys()),
+        )
 
         server = build_server(agent_ctx, manifest)
         ops.info("server_ready", transport="stdio")

@@ -9,6 +9,23 @@ description = "Per-agent scoped MCP tool proxy with credential isolation and aud
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
+keywords = ["mcp", "ai-agents", "claude-code", "fastmcp", "multi-agent", "tool-proxy", "credential-isolation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://github.com/TadMSTR/scoped-mcp"
+Repository = "https://github.com/TadMSTR/scoped-mcp"
+Issues = "https://github.com/TadMSTR/scoped-mcp/issues"
 dependencies = [
     "fastmcp>=3.2.0,<4.0.0",
     "pydantic>=2.0,<3.0",
@@ -39,6 +56,7 @@ packages = ["src/scoped_mcp"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+exclude = [".github", "docs", "examples"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
