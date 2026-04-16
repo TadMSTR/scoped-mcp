@@ -1,0 +1,36 @@
+sequenceDiagram
+    participant Env as Environment
+    participant S as server.py
+    participant Man as manifest.py
+    participant Reg as registry.py
+    participant Cred as credentials.py
+    participant Mod as ToolModule
+    participant FM as FastMCP
+
+    rect rgb(15, 52, 96)
+        Note over Env,FM: Startup
+        Env->>S: AGENT_ID, AGENT_TYPE
+        S->>Man: load(manifest_path)
+        Man-->>S: modules[], credentials config
+        S->>Reg: discover + filter modules
+        Reg->>Cred: resolve credentials for each module
+        Cred-->>Reg: injected contexts
+        Reg->>Mod: instantiate with context + scope
+        Reg->>FM: register tools (filtered by mode)
+        FM-->>S: server ready
+    end
+
+    rect rgb(26, 26, 46)
+        Note over Env,FM: Runtime (per tool call)
+        FM->>Mod: tool_call(args)
+        activate Mod
+        Note right of Mod: @audited wrapper runs first
+        Mod->>Mod: scope.enforce(args)
+        alt scope violation
+            Mod-->>FM: ScopeError (blocked + logged)
+        else within scope
+            Mod->>Mod: execute tool logic
+            Mod-->>FM: result (logged)
+        end
+        deactivate Mod
+    end

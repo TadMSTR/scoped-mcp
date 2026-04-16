@@ -1,0 +1,27 @@
+flowchart LR
+    subgraph agent["Agent Process"]
+        A["AGENT_ID=research-01\nAGENT_TYPE=research"]
+    end
+
+    subgraph proxy["scoped-mcp (single process)"]
+        direction TB
+        M["Manifest Loader\nresearch-agent.yml"]
+        R["Module Registry"]
+        C["Credential Injector"]
+        AU["Audit Logger"]
+
+        M --> R
+        R --> C
+        C --> AU
+    end
+
+    subgraph backends["Backends (scoped)"]
+        FS["Filesystem\nagents/research-01/"]
+        DB["SQLite\nschema: agent_research_01"]
+        NT["ntfy\ntopic: research-research-01"]
+    end
+
+    A -- "MCP (stdio)" --> proxy
+    AU --> FS
+    AU --> DB
+    AU --> NT
