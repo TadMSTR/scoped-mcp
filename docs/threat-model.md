@@ -16,8 +16,8 @@ An agent configured with `mode: read` cannot invoke write tools — the registry
 **Traversal attacks on filesystem paths**
 `../` traversal is caught by resolving to an absolute path before comparing against the agent root. Symlinks are followed and the resolved path is checked.
 
-**SQL injection via schema scope**
-ATTACH DATABASE, DETACH DATABASE, and PRAGMA statements are blocked at the sqlglot AST level before any query reaches the database. Cross-schema table references are rejected.
+**Cross-agent SQLite access**
+Each agent gets its own database file at `{db_dir}/agent_{agent_id}.db` — isolation is a filesystem property, not a SQL property. Two agents cannot read or write each other's data regardless of SQL shape. As defense in depth, sqlglot AST parsing blocks ATTACH, DETACH, PRAGMA, DROP, and multi-statement batches. `create_table` validates column names against `str.isidentifier()` and column types against a closed allowlist.
 
 **SSRF via http_proxy**
 Requests to RFC1918 addresses, loopback, link-local, and known cloud metadata endpoints (169.254.169.254) are blocked at proxy init time (base_url validation) and per-request (constructed URL validation).

@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **C1 (Critical) — SQLite isolation:** The sqlite module now gives each agent
+  its own database file at `{db_dir}/agent_{agent_id}.db`. Previously,
+  `SchemaScope` + SQLite `ATTACH DATABASE ':memory:'` left unqualified table
+  references resolving against the shared `main` schema — effectively no
+  isolation. Addressed by 2026-04-16 audit finding C1.
+- **M7 — sqlite `create_table` validation:** Column names must pass
+  `str.isidentifier()`; column types must match a closed allowlist
+  (`INTEGER`, `TEXT`, `REAL`, `BLOB`, `NUMERIC`, `BOOLEAN`, and common
+  `PRIMARY KEY` / `NOT NULL` / `UNIQUE` combinations). Unknown values raise
+  `ValueError` before any SQL is issued.
+
+### Breaking Changes
+
+- **`sqlite` config:** `db_path` (pointing at a file) → `db_dir` (pointing at a
+  directory). Passing `db_path` now raises a clear `ValueError` with migration
+  instructions. Each agent's data lives in `{db_dir}/agent_{agent_id}.db`.
+
+  Migration:
+  ```yaml
+  # before
+  sqlite:
+    config:
+      db_path: /data/shared.db
+  # after
+  sqlite:
+    config:
+      db_dir: /data/sqlite
+  ```
+
+### Deprecated
+
+- `scoped_mcp.scoping.SchemaScope` — retained for backwards compatibility but
+  not used by any built-in module. New modules should use `PrefixScope`,
+  `NamespaceScope`, or a per-agent file.
+
 ## [0.1.0] — 2026-04-16
 
 Initial release.

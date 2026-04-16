@@ -148,10 +148,12 @@ def test_credential_not_in_config(agent_ctx):
 | Backend type | Strategy |
 |---|---|
 | Filesystem, object storage, any prefix-addressable store | `PrefixScope` |
-| SQL database (schema-per-user) | `SchemaScope` |
+| Embedded SQL database (SQLite) | Per-agent file — `{db_dir}/agent_{agent_id}.db` |
 | Key-value store, message queue, time-series buckets | `NamespaceScope` |
 | Webhook (single-channel) | `None` — one credential = one channel |
 | REST API with allowlist | Custom — validate against declared services |
+
+`SchemaScope` is retained in `scoped_mcp.scoping` for backwards compatibility but is deprecated — no built-in module uses it (see 2026-04-16 audit, finding C1).
 
 If none of the built-in strategies fit, implement `ScopeStrategy`:
 

@@ -64,18 +64,20 @@ For filesystem paths, object storage keys, and any prefix-addressable resource.
 
 **When to use:** Any resource addressable by a path prefix.
 
-## SchemaScope
+## Per-agent file (SQLite)
 
-For SQL databases where each agent should have its own schema.
+For SQLite, each agent gets its own database file.
 
-**Pattern:** `agent_{agent_id}`
+**Pattern:** `{db_dir}/agent_{agent_id}.db`
 
 **Defenses:**
-- sqlglot AST parsing validates all table references before query execution
-- PRAGMA, ATTACH, DETACH statements blocked at the statement-type level
-- Multi-statement batches blocked
+- Isolation is filesystem-level — agents cannot address another agent's file at all
+- sqlglot AST parsing still enforces defense-in-depth: PRAGMA, ATTACH, DETACH, DROP, and multi-statement batches blocked; read-mode tools accept SELECT/WITH only
+- `create_table` validates column names against `str.isidentifier()` and column types against a closed allowlist (`INTEGER`, `TEXT`, `REAL`, `BLOB`, `NUMERIC`, `BOOLEAN`, and common `PRIMARY KEY` / `NOT NULL` / `UNIQUE` combinations)
 
-**When to use:** SQLite, PostgreSQL, MySQL — any database with schema-level isolation.
+**When to use:** SQLite and other file-backed embedded databases. For server databases (PostgreSQL, MySQL) use role-per-agent auth — not covered by a built-in strategy yet.
+
+**Deprecated:** `SchemaScope` exists in `scoped_mcp.scoping` for backwards compatibility but is not used by any built-in module. The original sqlite implementation used `SchemaScope` + SQLite `ATTACH DATABASE ':memory:'` to namespace agents, but unqualified table references resolved against the shared `main` schema regardless of the attached name — effectively no isolation. See the 2026-04-16 audit (finding C1) for the full trail.
 
 ## NamespaceScope
 
