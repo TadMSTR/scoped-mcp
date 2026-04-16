@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-04-16
+
+Security remediation release addressing all 14 findings from the 2026-04-16
+internal audit. Contains breaking config and API changes — see the Breaking
+Changes section below for migration guidance.
+
 ### Security
 
 - **C1 (Critical) — SQLite isolation:** The sqlite module now gives each agent
