@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 
 from scoped_mcp.exceptions import ManifestError
@@ -38,7 +40,7 @@ def test_build_server_unknown_module_raises(agent_ctx: AgentContext) -> None:
 class _MockModule(ToolModule):
     name = "_test_mock"
     scoping = None
-    required_credentials = []
+    required_credentials: ClassVar[list[str]] = []
 
     @tool(mode="read")
     async def read_thing(self) -> str:

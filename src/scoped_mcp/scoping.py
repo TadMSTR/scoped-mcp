@@ -87,7 +87,7 @@ class PrefixScope(ScopeStrategy):
             raise ScopeViolation(
                 f"Path '{value}' is outside the agent scope for '{agent_ctx.agent_id}'. "
                 f"Expected prefix: {agent_root}"
-            )
+            ) from None
 
         self._check_ancestor_symlinks(Path(os.path.abspath(value)), agent_root, value, agent_ctx)
 
@@ -119,7 +119,7 @@ class PrefixScope(ScopeStrategy):
                     raise ScopeViolation(
                         f"Path '{orig_value}' crosses a symlink at '{current}' that "
                         f"escapes the agent scope for '{agent_ctx.agent_id}'."
-                    )
+                    ) from None
 
 
 class SchemaScope(ScopeStrategy):

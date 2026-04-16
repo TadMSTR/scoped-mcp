@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-04-16
+
+Post-release hygiene. No API or behavior changes to any module; one breaking
+pip install-config change (see Changed).
+
+### Changed
+
+- **Ruff lint rules:** expanded selection to include `UP` (pyupgrade),
+  `B` (flake8-bugbear), `SIM` (flake8-simplify), and `RUF` (ruff-specific).
+  Fixed all resulting findings: `raise ... from None` inside except blocks
+  in `scoping.py` / `modules/filesystem.py`, `strict=False` on `zip()` in
+  `modules/influxdb.py`, ternary in `filesystem._resolve`, raw-string regex
+  in the sqlite deprecated-config test, `ClassVar` annotation in
+  `tests/test_registry.py`, and hyphen-minus (not en-dash) in the
+  identity-validation error messages.
+- **Pip extras — breaking install-config change:** removed per-service HTTP
+  extras (`[grafana]`, `[influxdb]`, `[ntfy]`, `[slack]`, `[discord]`,
+  `[matrix]`). Install `scoped-mcp[http]` instead — it enables every
+  HTTP-based module. `[smtp]`, `[sqlite]`, `[all]`, and `[dev]` are unchanged.
+- **Coverage threshold:** moved `fail_under` from the CI flag
+  (`--cov-fail-under=75`) to `[tool.coverage.report]` in `pyproject.toml` so
+  local `pytest --cov=scoped_mcp` runs enforce it too. Raised the floor from
+  75% to 80% (current is ~83%).
+
+### Fixed
+
+- Added `.ruff_cache/` to `.gitignore`.
+- Removed redundant `pythonpath = ["src"]` from the pytest config — with a
+  src-layout package and editable install, pytest resolves `scoped_mcp` from
+  installed package metadata, and the override could mask install-config bugs.
+
 ## [0.2.0] — 2026-04-16
 
 Security remediation release addressing all 14 findings from the 2026-04-16

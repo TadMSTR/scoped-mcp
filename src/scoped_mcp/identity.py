@@ -33,7 +33,7 @@ class AgentContext:
     agent_type: str
 
     @classmethod
-    def from_env(cls) -> "AgentContext":
+    def from_env(cls) -> AgentContext:
         """Build an AgentContext from environment variables.
 
         Raises ConfigError if AGENT_ID or AGENT_TYPE is missing, empty, or
@@ -50,14 +50,14 @@ class AgentContext:
         if not _AGENT_ID_PATTERN.match(agent_id):
             raise ConfigError(
                 f"AGENT_ID {agent_id!r} does not match required pattern "
-                f"{_AGENT_ID_PATTERN.pattern}. Must be 1–63 characters of "
-                f"lowercase a–z / digits / hyphen and start with a letter or digit."
+                f"{_AGENT_ID_PATTERN.pattern}. Must be 1-63 characters of "
+                f"lowercase a-z / digits / hyphen and start with a letter or digit."
             )
         if not _AGENT_TYPE_PATTERN.match(agent_type):
             raise ConfigError(
                 f"AGENT_TYPE {agent_type!r} does not match required pattern "
-                f"{_AGENT_TYPE_PATTERN.pattern}. Must be 1–63 characters of "
-                f"lowercase a–z / digits / hyphen / underscore and start with a "
+                f"{_AGENT_TYPE_PATTERN.pattern}. Must be 1-63 characters of "
+                f"lowercase a-z / digits / hyphen / underscore and start with a "
                 f"letter or digit."
             )
 

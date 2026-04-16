@@ -37,10 +37,7 @@ class FilesystemModule(ToolModule):
 
     def _resolve(self, path: str) -> str:
         """Resolve a relative path to an absolute scoped path and enforce scope."""
-        if os.path.isabs(path):
-            absolute = path
-        else:
-            absolute = self._scope.apply(path, self.agent_ctx)
+        absolute = path if os.path.isabs(path) else self._scope.apply(path, self.agent_ctx)
         self._scope.enforce(absolute, self.agent_ctx)
         return absolute
 
@@ -58,9 +55,9 @@ class FilesystemModule(ToolModule):
         try:
             return Path(absolute).read_text(encoding="utf-8")
         except FileNotFoundError:
-            raise FileNotFoundError(f"File not found: {path}")
+            raise FileNotFoundError(f"File not found: {path}") from None
         except IsADirectoryError:
-            raise IsADirectoryError(f"Path is a directory, not a file: {path}")
+            raise IsADirectoryError(f"Path is a directory, not a file: {path}") from None
 
     @tool(mode="read")
     async def list_dir(self, path: str = "") -> list[str]:

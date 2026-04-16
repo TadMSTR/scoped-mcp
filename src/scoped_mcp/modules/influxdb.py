@@ -459,6 +459,6 @@ def _parse_flux_csv(csv_text: str) -> list[dict[str, Any]]:
             headers = parts
             continue
         if len(parts) >= len(headers):
-            rows.append(dict(zip(headers, parts)))
+            rows.append(dict(zip(headers, parts, strict=False)))
 
     return rows

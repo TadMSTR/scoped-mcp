@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "scoped-mcp"
-version = "0.2.0"
+version = "0.2.1"
 description = "Per-agent scoped MCP tool proxy with credential isolation and audit logging"
 readme = "README.md"
 license = "MIT"
@@ -35,15 +35,9 @@ Repository = "https://github.com/TadMSTR/scoped-mcp"
 Issues = "https://github.com/TadMSTR/scoped-mcp/issues"
 
 [project.optional-dependencies]
-http = ["httpx"]
-smtp = ["aiosmtplib"]
-matrix = ["httpx"]
-sqlite = ["aiosqlite"]
-grafana = ["httpx"]
-influxdb = ["httpx"]
-ntfy = ["httpx"]
-slack = ["httpx"]
-discord = ["httpx"]
+http = ["httpx"]       # enables grafana, influxdb, ntfy, slack, discord, matrix, http_proxy
+smtp = ["aiosmtplib"]  # enables smtp module
+sqlite = ["aiosqlite"] # enables sqlite module
 all = ["httpx", "aiosmtplib", "aiosqlite"]
 dev = ["pytest", "pytest-asyncio", "pytest-cov", "ruff"]
 
@@ -59,9 +53,24 @@ target-version = "py311"
 exclude = [".github", "docs", "examples"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I"]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["B", "SIM"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-pythonpath = ["src"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true

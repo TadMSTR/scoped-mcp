@@ -96,9 +96,7 @@ class ToolModule(ABC):
             if not getattr(attr, "_is_tool", False):
                 continue
             tool_mode: str = getattr(attr, "_tool_mode", "")
-            if mode is None:
-                methods.append(getattr(self, attr_name))
-            elif mode == "read" and tool_mode == "read":
+            if mode is None or (mode == "read" and tool_mode == "read"):
                 methods.append(getattr(self, attr_name))
             elif mode == "write":
                 # write mode includes both read and write tools
