@@ -31,6 +31,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/TadMSTR/scoped-mcp"
+Documentation = "https://tadmstr.github.io/scoped-mcp/"
 Repository = "https://github.com/TadMSTR/scoped-mcp"
 Issues = "https://github.com/TadMSTR/scoped-mcp/issues"
 
