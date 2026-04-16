@@ -19,6 +19,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`INTEGER`, `TEXT`, `REAL`, `BLOB`, `NUMERIC`, `BOOLEAN`, and common
   `PRIMARY KEY` / `NOT NULL` / `UNIQUE` combinations). Unknown values raise
   `ValueError` before any SQL is issued.
+- **H1 (High) — Flux injection:** `influxdb.query()` no longer takes a raw
+  Flux `predicate` string. Agents now pass a list of structured
+  `{field, op, value}` filter dicts; every segment is validated (field against
+  a Flux identifier regex, op against a closed set of comparison operators)
+  and string values are rendered through `json.dumps()` so a value cannot
+  close its own literal and escape the filter. Time ranges are validated
+  against an RFC3339 / Flux-duration / `now()` grammar. Addressed by
+  2026-04-16 audit finding H1.
+- **M2 — Line-protocol escaping:** `influxdb.write_points()` now escapes tag
+  keys, tag values, and field keys per the InfluxDB v2 line-protocol spec
+  (backslash, comma, equals, space) and rejects any value containing a
+  newline or carriage return. Previously, unescaped tag values could be used
+  to inject arbitrary lines into the write batch.
+- **M3 — Measurement validation:** Measurement names are now validated
+  against `^[A-Za-z_][A-Za-z0-9_-]*$` in every tool that accepts one
+  (`query` filters on `_measurement`, `get_schema`, `write_points`,
+  `delete_points`). `delete_points` previously embedded the measurement into
+  a Flux predicate string without escaping.
 
 ### Breaking Changes
 
@@ -37,6 +55,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     config:
       db_dir: /data/sqlite
   ```
+- **`influxdb.query` signature:** `predicate: str` → `filters: list[dict]`.
+
+  Migration:
+  ```python
+  # before
+  query(bucket="metrics", predicate='r._measurement == "cpu"')
+  # after
+  query(
+      bucket="metrics",
+      filters=[{"field": "_measurement", "op": "==", "value": "cpu"}],
+  )
+  ```
+  Multiple filters are combined with the `logical_op` parameter
+  (`"and"` — default — or `"or"`).
 
 ### Deprecated
 

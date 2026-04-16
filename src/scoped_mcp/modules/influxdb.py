@@ -1,12 +1,20 @@
 """InfluxDB module — bucket-scoped time-series operations via httpx.
 
-Scope: NamespaceScope on bucket names. Every tool takes `bucket` as an explicit
-parameter; the module validates it against the agent's allowlist before building
-any Flux query. No free-form Flux is accepted — queries are built from a proxy
-template using a restricted predicate parameter.
+Scope: NamespaceScope on bucket names. Every tool takes ``bucket`` as an explicit
+parameter; the module validates it against the agent's allowlist before any HTTP
+call. No free-form Flux is ever accepted — queries are built from structured
+filter input and validated tokens.
 
-Defense in depth: proxy-layer bucket allowlist + operator-provisioned bucket-scoped
-Read/Write tokens (InfluxDB 2.x supports this natively).
+Security model (2026-04-16 audit, findings H1 / M2 / M3):
+- ``query()`` takes a list of structured filter dicts, not a raw Flux predicate.
+  Each filter's field name is matched against a Flux identifier regex, its op
+  against a closed set, and its value is rendered by type (strings go through
+  ``json.dumps`` for quote-safe escaping).
+- Time range inputs (``range_start`` / ``range_stop``) are matched against a
+  validator that accepts RFC3339 literals, Flux duration literals, and ``now()``.
+- Measurement names go through ``_MEASUREMENT_PATTERN`` wherever they're used.
+- ``write_points`` escapes tag keys, tag values, and field keys per the InfluxDB
+  line-protocol spec and rejects any value containing newline / carriage return.
 
 Config:
     org (str): required — InfluxDB organization name.
@@ -20,13 +28,98 @@ Required credentials:
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+import json
+import re
+from typing import Any, ClassVar, Literal
 
 import httpx
 
 from ..exceptions import ScopeViolation
 from ..scoping import NamespaceScope
 from ._base import ToolModule, tool
+
+_FLUX_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_MEASUREMENT_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
+_RFC3339 = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$")
+_DURATION = re.compile(r"^-?\d+(ns|us|µs|ms|s|m|h|d|w|mo|y)$")
+
+_ALLOWED_OPS: frozenset[str] = frozenset({"==", "!=", "<", "<=", ">", ">=", "=~", "!~"})
+_LOGICAL_OPS: frozenset[str] = frozenset({"and", "or"})
+
+
+def _validate_measurement(value: str) -> str:
+    if not isinstance(value, str) or not _MEASUREMENT_PATTERN.match(value):
+        raise ValueError(
+            f"Invalid measurement name: {value!r}. Must match {_MEASUREMENT_PATTERN.pattern}"
+        )
+    return value
+
+
+def _validate_identifier(value: str, kind: str = "identifier") -> str:
+    if not isinstance(value, str) or not _FLUX_IDENT.match(value):
+        raise ValueError(f"Invalid {kind}: {value!r}. Must match {_FLUX_IDENT.pattern}")
+    return value
+
+
+def _validate_time(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"Invalid time value: {value!r}")
+    v = value.strip()
+    if v == "now()":
+        return v
+    if _RFC3339.match(v) or _DURATION.match(v):
+        return v
+    raise ValueError(
+        f"Invalid time value: {value!r}. Expected RFC3339, a duration like -1h, or now()."
+    )
+
+
+def _render_filter_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        return json.dumps(value)
+    raise ValueError(f"Unsupported filter value type: {type(value).__name__}")
+
+
+def _render_filter(f: dict[str, Any]) -> str:
+    if not isinstance(f, dict):
+        raise ValueError(f"Each filter must be a dict, got {type(f).__name__}")
+    field = f.get("field")
+    op = f.get("op")
+    value = f.get("value")
+    if field is None or op is None or "value" not in f:
+        raise ValueError(f"Filter missing required keys (field, op, value): {f!r}")
+    _validate_identifier(field, kind="filter field")
+    if op not in _ALLOWED_OPS:
+        raise ValueError(f"Filter op {op!r} not allowed. Allowed: {sorted(_ALLOWED_OPS)}")
+    return f"r.{field} {op} {_render_filter_value(value)}"
+
+
+# Line-protocol escaping per
+# https://docs.influxdata.com/influxdb/v2/reference/syntax/line-protocol/
+def _escape_tag(value: str, kind: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"Line-protocol {kind} must be a string, got {type(value).__name__}")
+    if "\n" in value or "\r" in value:
+        raise ValueError(f"Line-protocol {kind} must not contain newline/carriage return")
+    return value.replace("\\", "\\\\").replace(",", "\\,").replace("=", "\\=").replace(" ", "\\ ")
+
+
+def _render_field_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return f"{value}i"
+    if isinstance(value, float):
+        return repr(value)
+    if isinstance(value, str):
+        if "\n" in value or "\r" in value:
+            raise ValueError("Field string value must not contain newline/carriage return")
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    raise ValueError(f"Unsupported field value type: {type(value).__name__}")
 
 
 class InfluxDBModule(ToolModule):
@@ -49,9 +142,7 @@ class InfluxDBModule(ToolModule):
         if not raw_buckets:
             raise ValueError("influxdb module requires at least one 'buckets' entry in config")
 
-        # Bucket allowlist — namespaced with agent_id prefix
         self._allowed_buckets: set[str] = set(raw_buckets)
-        # Track runtime-created buckets (prefixed at creation time)
         self._runtime_buckets: set[str] = set()
 
     def _headers(self) -> dict[str, str]:
@@ -68,38 +159,65 @@ class InfluxDBModule(ToolModule):
                 f"Allowed: {sorted(self._allowed_buckets)}"
             )
 
-    def _build_query(self, bucket: str, predicate: str, range_start: str, range_stop: str) -> str:
-        """Build a Flux query from a template. No free-form Flux accepted."""
-        # predicate is a filter expression only, e.g. 'r._measurement == "cpu"'
-        # It is inserted into a fixed template — agents cannot inject range() or other clauses.
+    def _build_query(
+        self,
+        bucket: str,
+        filters: list[dict[str, Any]],
+        range_start: str,
+        range_stop: str,
+        logical_op: str = "and",
+    ) -> str:
+        """Build a Flux query from structured filter input. No agent-controlled
+        string is interpolated into the Flux source — every segment is either a
+        validated token or a value rendered through ``_render_filter_value``.
+        """
+        if not isinstance(filters, list) or not filters:
+            raise ValueError("filters must be a non-empty list of {field, op, value} dicts")
+        if logical_op not in _LOGICAL_OPS:
+            raise ValueError(
+                f"logical_op {logical_op!r} not allowed. Allowed: {sorted(_LOGICAL_OPS)}"
+            )
+
+        rendered = [_render_filter(f) for f in filters]
+        filter_expr = f" {logical_op} ".join(rendered)
+        start = _validate_time(range_start)
+        stop = _validate_time(range_stop)
         return (
-            f'from(bucket: "{bucket}")\n'
-            f"  |> range(start: {range_start}, stop: {range_stop})\n"
-            f"  |> filter(fn: (r) => {predicate})"
+            f"from(bucket: {json.dumps(bucket)})\n"
+            f"  |> range(start: {start}, stop: {stop})\n"
+            f"  |> filter(fn: (r) => {filter_expr})"
         )
 
     @tool(mode="read")
     async def query(
         self,
         bucket: str,
-        predicate: str,
+        filters: list[dict[str, Any]],
         range_start: str = "-1h",
         range_stop: str = "now()",
+        logical_op: Literal["and", "or"] = "and",
     ) -> list[dict[str, Any]]:
         """Query time-series data from an allowlisted bucket.
 
         Args:
             bucket: Bucket name (must be in config.buckets).
-            predicate: Flux filter predicate (e.g. 'r._measurement == "cpu"').
-                       Only filter expressions are accepted — not full Flux queries.
-            range_start: Start of the time range (default: -1h).
-            range_stop: End of the time range (default: now()).
+            filters: Non-empty list of filter dicts. Each dict has:
+                - ``field``: Flux identifier (e.g. "_measurement", "host").
+                - ``op``: one of ``==``, ``!=``, ``<``, ``<=``, ``>``, ``>=``,
+                  ``=~``, ``!~``.
+                - ``value``: string / int / float / bool. Strings are
+                  JSON-escaped automatically.
+            range_start: RFC3339, Flux duration (e.g. ``-1h``), or ``now()``.
+                Defaults to ``-1h``.
+            range_stop: same accepted forms. Defaults to ``now()``.
+            logical_op: how to combine filters: ``and`` or ``or``. Defaults
+                to ``and``.
 
         Returns:
             List of data point dicts.
         """
         self._validate_bucket(bucket)
-        flux = self._build_query(bucket, predicate, range_start, range_stop)
+        flux = self._build_query(bucket, filters, range_start, range_stop, logical_op)
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
@@ -109,7 +227,6 @@ class InfluxDBModule(ToolModule):
                 headers={**self._headers(), "Content-Type": "application/vnd.flux"},
             )
             resp.raise_for_status()
-            # Parse annotated CSV response
             return _parse_flux_csv(resp.text)
 
     @tool(mode="read")
@@ -123,7 +240,10 @@ class InfluxDBModule(ToolModule):
             List of measurement names.
         """
         self._validate_bucket(bucket)
-        flux = f'import "influxdata/influxdb/schema"\nschema.measurements(bucket: "{bucket}")'
+        flux = (
+            'import "influxdata/influxdb/schema"\n'
+            f"schema.measurements(bucket: {json.dumps(bucket)})"
+        )
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
                 f"{self._base_url}/api/v2/query",
@@ -141,21 +261,21 @@ class InfluxDBModule(ToolModule):
 
         Args:
             bucket: Bucket name.
-            measurement: Measurement name.
+            measurement: Measurement name (strictly validated).
 
         Returns:
             Dict with "fields" and "tags" lists.
         """
         self._validate_bucket(bucket)
+        _validate_measurement(measurement)
+        predicate = f"(r) => r._measurement == {json.dumps(measurement)}"
         flux_fields = (
-            f'import "influxdata/influxdb/schema"\n'
-            f'schema.fieldKeys(bucket: "{bucket}", '
-            f'predicate: (r) => r._measurement == "{measurement}")'
+            'import "influxdata/influxdb/schema"\n'
+            f"schema.fieldKeys(bucket: {json.dumps(bucket)}, predicate: {predicate})"
         )
         flux_tags = (
-            f'import "influxdata/influxdb/schema"\n'
-            f'schema.tagKeys(bucket: "{bucket}", '
-            f'predicate: (r) => r._measurement == "{measurement}")'
+            'import "influxdata/influxdb/schema"\n'
+            f"schema.tagKeys(bucket: {json.dumps(bucket)}, predicate: {predicate})"
         )
         async with httpx.AsyncClient(timeout=15.0) as client:
             r_fields = await client.post(
@@ -187,20 +307,51 @@ class InfluxDBModule(ToolModule):
 
         Args:
             bucket: Bucket name.
-            measurement: Measurement name.
-            points: List of dicts with "tags" (dict), "fields" (dict), and optional "time" (int ns).
+            measurement: Measurement name (strictly validated).
+            points: List of dicts with "tags" (dict), "fields" (dict; non-empty),
+                and optional "time" (int ns).
 
         Returns:
             True on success.
         """
         self._validate_bucket(bucket)
-        lines = []
-        for point in points:
-            tags = ",".join(f"{k}={v}" for k, v in point.get("tags", {}).items())
-            fields = ",".join(f"{k}={v}" for k, v in point.get("fields", {}).items())
-            tag_str = f",{tags}" if tags else ""
-            ts = f" {point['time']}" if "time" in point else ""
-            lines.append(f"{measurement}{tag_str} {fields}{ts}")
+        _validate_measurement(measurement)
+
+        if not isinstance(points, list) or not points:
+            raise ValueError("points must be a non-empty list")
+
+        lines: list[str] = []
+        escaped_measurement = _escape_tag(measurement, kind="measurement")
+        for i, point in enumerate(points):
+            if not isinstance(point, dict):
+                raise ValueError(f"points[{i}] must be a dict")
+
+            fields_in = point.get("fields", {})
+            if not isinstance(fields_in, dict) or not fields_in:
+                raise ValueError(f"points[{i}].fields must be a non-empty dict")
+
+            tags_in = point.get("tags", {})
+            if not isinstance(tags_in, dict):
+                raise ValueError(f"points[{i}].tags must be a dict")
+
+            tag_parts: list[str] = []
+            for k, v in tags_in.items():
+                _validate_identifier(k, kind="tag key")
+                tag_parts.append(f"{k}={_escape_tag(str(v), kind='tag value')}")
+
+            field_parts: list[str] = []
+            for k, v in fields_in.items():
+                _validate_identifier(k, kind="field key")
+                field_parts.append(f"{k}={_render_field_value(v)}")
+
+            tag_str = f",{','.join(tag_parts)}" if tag_parts else ""
+            ts = ""
+            if "time" in point:
+                t = point["time"]
+                if not isinstance(t, int):
+                    raise ValueError(f"points[{i}].time must be an int (ns)")
+                ts = f" {t}"
+            lines.append(f"{escaped_measurement}{tag_str} {','.join(field_parts)}{ts}")
 
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
@@ -255,14 +406,18 @@ class InfluxDBModule(ToolModule):
 
         Args:
             bucket: Bucket name.
-            measurement: Measurement name to delete from.
-            start: Start time in RFC3339 format.
-            stop: Stop time in RFC3339 format.
+            measurement: Measurement name (strictly validated).
+            start: Start time (RFC3339, duration, or ``now()``).
+            stop: Stop time (same accepted forms).
 
         Returns:
             True on success.
         """
         self._validate_bucket(bucket)
+        _validate_measurement(measurement)
+        _validate_time(start)
+        _validate_time(stop)
+
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
                 f"{self._base_url}/api/v2/delete",

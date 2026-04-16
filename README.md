@@ -239,7 +239,8 @@ Notification modules are **write-only by design** — every agent needs to send 
 ┌─ ops-agent (AGENT_ID=ops-01) ────────────────────────────────────┐
 │                                                                   │
 │  1. influxdb_query(bucket="metrics",                             │
-│       predicate='r._measurement == "docker_cpu"')                │
+│       filters=[{"field": "_measurement",                         │
+│                 "op": "==", "value": "docker_cpu"}])             │
 │     → discovers container X averaging 94% CPU                    │
 │                                                                   │
 │  2. grafana_create_dashboard(                                     │
