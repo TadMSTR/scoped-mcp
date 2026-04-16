@@ -1,0 +1,32 @@
+flowchart TB
+    subgraph agents["Two agents, same backend"]
+        A1["Agent A: research-01\nfilesystem: read"]
+        A2["Agent B: build-01\nfilesystem: write"]
+    end
+
+    subgraph proxyA["scoped-mcp (Agent A)"]
+        SA["PrefixScope\nagents/research-01/"]
+        TA["Tools: read_file, list_dir"]
+    end
+
+    subgraph proxyB["scoped-mcp (Agent B)"]
+        SB["PrefixScope\nagents/build-01/"]
+        TB["Tools: read_file, list_dir,\nwrite_file, delete_file"]
+    end
+
+    subgraph storage["Shared Filesystem"]
+        FA["agents/research-01/\nnotes.md, data.json"]
+        FB["agents/build-01/\noutput.tar, log.txt"]
+        FC["agents/monitor-01/\nreport.csv"]
+    end
+
+    A1 --> SA --> TA
+    A2 --> SB --> TB
+
+    TA -- "can read" --> FA
+    TA -- "blocked" --> FB
+    TA -- "blocked" --> FC
+
+    TB -- "blocked" --> FA
+    TB -- "can read + write" --> FB
+    TB -- "blocked" --> FC
