@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "tools": {
+      "command": "scoped-mcp",
+      "args": ["--manifest", "${workspaceFolder}/manifests/research-agent.yml"],
+      "env": {
+        "AGENT_ID": "research-01",
+        "AGENT_TYPE": "research",
+        "NTFY_URL": "https://ntfy.example.com"
+      }
+    }
+  }
+}

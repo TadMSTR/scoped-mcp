@@ -1,0 +1,31 @@
+# Notifier agent manifest — all five notification modules.
+# The agent can send push notifications, email, Matrix messages, Slack and Discord.
+# No filesystem or database access.
+
+agent_type: notifier
+description: "Notification-focused agent with all notification backends"
+
+credentials:
+  source: env
+
+modules:
+  ntfy:
+    config:
+      topic: "agents-{agent_id}"
+      max_priority: high
+
+  smtp:
+    config:
+      from_address: "alerts@example.com"
+      allowed_recipients:
+        - "oncall@example.com"
+        - "team@example.com"
+
+  matrix:
+    config:
+      allowed_rooms:
+        - "!alertroom:matrix.example.com"
+
+  slack_webhook: {}
+
+  discord_webhook: {}

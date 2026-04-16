@@ -1,0 +1,31 @@
+# Monitor agent manifest — read-only infrastructure access plus alerting.
+
+agent_type: monitor
+description: "Monitoring agent with read-only infrastructure access and notification"
+
+credentials:
+  source: env
+
+modules:
+  influxdb:
+    mode: read
+    config:
+      org: "homelab"
+      buckets:
+        - "metrics"
+
+  grafana:
+    mode: read
+
+  ntfy:
+    config:
+      topic: "agents-{agent_id}"
+      max_priority: high
+
+  http_proxy:
+    mode: read
+    config:
+      allowed_services:
+        - name: "status_api"
+          base_url: "https://status.example.com"
+          credential_key: "STATUS_API_TOKEN"

@@ -9,8 +9,8 @@ import pytest
 from scoped_mcp.credentials import resolve_credentials
 from scoped_mcp.exceptions import CredentialError
 
-
 # ── env source ────────────────────────────────────────────────────────────────
+
 
 def test_env_source_success(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MY_TOKEN", "secret-value")
@@ -39,20 +39,25 @@ def test_env_source_empty_list(monkeypatch: pytest.MonkeyPatch) -> None:
 
 # ── file source ───────────────────────────────────────────────────────────────
 
+
 def test_file_source_success(tmp_path: object) -> None:
     from pathlib import Path
+
     assert isinstance(tmp_path, Path)
     secrets_file = tmp_path / "secrets.yml"
-    secrets_file.write_text(textwrap.dedent("""\
+    secrets_file.write_text(
+        textwrap.dedent("""\
         MY_TOKEN: file-secret-value
         OTHER_KEY: other-value
-    """))
+    """)
+    )
     result = resolve_credentials("file", ["MY_TOKEN"], file_path=str(secrets_file))
     assert result == {"MY_TOKEN": "file-secret-value"}
 
 
 def test_file_source_missing_key(tmp_path: object) -> None:
     from pathlib import Path
+
     assert isinstance(tmp_path, Path)
     secrets_file = tmp_path / "secrets.yml"
     secrets_file.write_text("OTHER_KEY: value\n")
@@ -72,6 +77,7 @@ def test_file_source_requires_path() -> None:
 
 def test_file_source_invalid_yaml(tmp_path: object) -> None:
     from pathlib import Path
+
     assert isinstance(tmp_path, Path)
     bad_file = tmp_path / "bad.yml"
     bad_file.write_text(": invalid: yaml: :\n")
@@ -80,6 +86,7 @@ def test_file_source_invalid_yaml(tmp_path: object) -> None:
 
 
 # ── unknown source ────────────────────────────────────────────────────────────
+
 
 def test_unknown_source_raises() -> None:
     with pytest.raises(CredentialError, match="Unknown credential source"):
