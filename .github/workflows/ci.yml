@@ -55,7 +55,7 @@ jobs:
         run: pip install pip-audit
 
       - name: Audit dependencies
-        run: pip-audit --strict --disable-pip
+        run: pip-audit --strict .
 
   build:
     name: Build distribution
