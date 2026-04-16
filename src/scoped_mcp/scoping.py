@@ -51,7 +51,10 @@ class PrefixScope(ScopeStrategy):
         """Raise ScopeViolation if the path escapes the agent's root.
 
         Resolves symlinks before checking — a symlink pointing outside the
-        root is treated as an escape attempt.
+        root is treated as an escape attempt. For paths that don't yet exist,
+        the resolve-nearest-ancestor fallback is followed by an explicit
+        walk of each existing ancestor component looking for symlinks that
+        escape (defense in depth for audit finding M8).
         """
         agent_root = self._agent_root(agent_ctx)
         target = Path(value)
@@ -79,6 +82,38 @@ class PrefixScope(ScopeStrategy):
                 f"Path '{value}' is outside the agent scope for '{agent_ctx.agent_id}'. "
                 f"Expected prefix: {agent_root}"
             )
+
+        self._check_ancestor_symlinks(Path(os.path.abspath(value)), agent_root, value, agent_ctx)
+
+    @staticmethod
+    def _check_ancestor_symlinks(
+        abs_target: Path, agent_root: Path, orig_value: str, agent_ctx: AgentContext
+    ) -> None:
+        """Walk each existing component of ``abs_target`` under ``agent_root``
+        and raise if any component is a symlink whose target escapes
+        ``agent_root``. Protects against operator-seeded symlinks in the
+        non-existent-tail case where the single ``resolve`` call would not
+        traverse them.
+        """
+        try:
+            relative = abs_target.relative_to(agent_root)
+        except ValueError:
+            return
+
+        current = agent_root
+        for part in relative.parts:
+            current = current / part
+            if not current.is_symlink() and not current.exists():
+                return
+            if current.is_symlink():
+                resolved = current.resolve()
+                try:
+                    resolved.relative_to(agent_root)
+                except ValueError:
+                    raise ScopeViolation(
+                        f"Path '{orig_value}' crosses a symlink at '{current}' that "
+                        f"escapes the agent scope for '{agent_ctx.agent_id}'."
+                    )
 
 
 class SchemaScope(ScopeStrategy):

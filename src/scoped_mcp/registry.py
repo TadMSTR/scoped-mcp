@@ -67,6 +67,7 @@ def _resolve_module_credentials(
         source=cred_cfg.source,
         required_keys=module_cls.required_credentials,
         file_path=cred_cfg.path,
+        strict_permissions=cred_cfg.strict_permissions,
     )
 
 

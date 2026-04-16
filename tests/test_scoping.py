@@ -83,6 +83,28 @@ def test_prefix_scope_write_target_nonexistent(tmp_base: Path, agent_ctx: AgentC
     scope.enforce(new_file, agent_ctx)
 
 
+def test_prefix_scope_symlink_ancestor_with_nonexistent_tail(
+    tmp_base: Path, agent_ctx: AgentContext
+) -> None:
+    """M8: operator-seeded symlink as ancestor of a non-existent tail is caught.
+
+    Without the defense-in-depth ancestor walk, a write to
+    ``{scope}/link/newfile`` where ``link`` is a symlink to ``/etc`` would
+    resolve the non-existent-tail fallback and pass the ``relative_to`` check.
+    """
+    agent_root = tmp_base / "agents" / "test-agent-1"
+    outside_dir = tmp_base / "outside"
+    outside_dir.mkdir()
+
+    link = agent_root / "escape_link"
+    link.symlink_to(outside_dir)
+
+    scope = PrefixScope(str(tmp_base))
+    new_path = str(link / "new_file.txt")
+    with pytest.raises(ScopeViolation, match="symlink"):
+        scope.enforce(new_path, agent_ctx)
+
+
 # ── SchemaScope ───────────────────────────────────────────────────────────────
 
 

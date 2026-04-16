@@ -40,29 +40,32 @@ def test_env_source_empty_list(monkeypatch: pytest.MonkeyPatch) -> None:
 # ── file source ───────────────────────────────────────────────────────────────
 
 
-def test_file_source_success(tmp_path: object) -> None:
+def _write_secrets(tmp_path: object, content: str, mode: int = 0o600) -> str:
     from pathlib import Path
 
     assert isinstance(tmp_path, Path)
     secrets_file = tmp_path / "secrets.yml"
-    secrets_file.write_text(
+    secrets_file.write_text(content)
+    secrets_file.chmod(mode)
+    return str(secrets_file)
+
+
+def test_file_source_success(tmp_path: object) -> None:
+    path = _write_secrets(
+        tmp_path,
         textwrap.dedent("""\
         MY_TOKEN: file-secret-value
         OTHER_KEY: other-value
-    """)
+    """),
     )
-    result = resolve_credentials("file", ["MY_TOKEN"], file_path=str(secrets_file))
+    result = resolve_credentials("file", ["MY_TOKEN"], file_path=path)
     assert result == {"MY_TOKEN": "file-secret-value"}
 
 
 def test_file_source_missing_key(tmp_path: object) -> None:
-    from pathlib import Path
-
-    assert isinstance(tmp_path, Path)
-    secrets_file = tmp_path / "secrets.yml"
-    secrets_file.write_text("OTHER_KEY: value\n")
+    path = _write_secrets(tmp_path, "OTHER_KEY: value\n")
     with pytest.raises(CredentialError, match="MY_TOKEN"):
-        resolve_credentials("file", ["MY_TOKEN"], file_path=str(secrets_file))
+        resolve_credentials("file", ["MY_TOKEN"], file_path=path)
 
 
 def test_file_source_file_not_found() -> None:
@@ -76,13 +79,41 @@ def test_file_source_requires_path() -> None:
 
 
 def test_file_source_invalid_yaml(tmp_path: object) -> None:
-    from pathlib import Path
-
-    assert isinstance(tmp_path, Path)
-    bad_file = tmp_path / "bad.yml"
-    bad_file.write_text(": invalid: yaml: :\n")
+    path = _write_secrets(tmp_path, ": invalid: yaml: :\n")
     with pytest.raises(CredentialError):
-        resolve_credentials("file", ["MY_TOKEN"], file_path=str(bad_file))
+        resolve_credentials("file", ["MY_TOKEN"], file_path=path)
+
+
+# ── M6: secrets file permission / ownership check ────────────────────────────
+
+
+def test_file_source_rejects_world_readable(tmp_path: object) -> None:
+    path = _write_secrets(tmp_path, "MY_TOKEN: v\n", mode=0o644)
+    with pytest.raises(CredentialError, match="insecure permissions"):
+        resolve_credentials("file", ["MY_TOKEN"], file_path=path)
+
+
+def test_file_source_rejects_group_readable(tmp_path: object) -> None:
+    path = _write_secrets(tmp_path, "MY_TOKEN: v\n", mode=0o640)
+    with pytest.raises(CredentialError, match="insecure permissions"):
+        resolve_credentials("file", ["MY_TOKEN"], file_path=path)
+
+
+def test_file_source_strict_permissions_false_warns(
+    tmp_path: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    path = _write_secrets(tmp_path, "MY_TOKEN: v\n", mode=0o644)
+    with caplog.at_level(logging.WARNING, logger="scoped_mcp.credentials"):
+        result = resolve_credentials("file", ["MY_TOKEN"], file_path=path, strict_permissions=False)
+    assert result == {"MY_TOKEN": "v"}
+    assert any("insecure permissions" in r.getMessage() for r in caplog.records)
+
+
+def test_file_source_0600_passes(tmp_path: object) -> None:
+    path = _write_secrets(tmp_path, "MY_TOKEN: v\n", mode=0o600)
+    assert resolve_credentials("file", ["MY_TOKEN"], file_path=path) == {"MY_TOKEN": "v"}
 
 
 # ── unknown source ────────────────────────────────────────────────────────────
