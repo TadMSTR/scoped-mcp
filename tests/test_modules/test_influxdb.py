@@ -25,6 +25,7 @@ def influx_module(agent_ctx: AgentContext) -> InfluxDBModule:
 
 # ── Bucket allowlist ──────────────────────────────────────────────────────────
 
+
 def test_validate_bucket_allowed(influx_module: InfluxDBModule) -> None:
     influx_module._validate_bucket("metrics")  # should not raise
 
@@ -41,16 +42,18 @@ def test_validate_bucket_traversal_attempt(influx_module: InfluxDBModule) -> Non
 
 # ── Query template ────────────────────────────────────────────────────────────
 
+
 def test_build_query_template(influx_module: InfluxDBModule) -> None:
     flux = influx_module._build_query("metrics", 'r._measurement == "cpu"', "-1h", "now()")
     assert 'from(bucket: "metrics")' in flux
-    assert 'range(start: -1h, stop: now())' in flux
+    assert "range(start: -1h, stop: now())" in flux
     assert 'r._measurement == "cpu"' in flux
     # Verify no user-injected range() could override the template
     assert flux.count("range(") == 1
 
 
 # ── Write points ──────────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 @respx.mock
@@ -78,6 +81,7 @@ async def test_write_points_blocked_bucket(influx_module: InfluxDBModule) -> Non
 
 # ── Delete points ─────────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_delete_points_success(influx_module: InfluxDBModule) -> None:
@@ -104,6 +108,7 @@ async def test_delete_points_blocked_bucket(influx_module: InfluxDBModule) -> No
 
 # ── Config validation ─────────────────────────────────────────────────────────
 
+
 def test_missing_org_raises(agent_ctx: AgentContext) -> None:
     with pytest.raises(ValueError, match="org"):
         InfluxDBModule(
@@ -123,6 +128,7 @@ def test_empty_buckets_raises(agent_ctx: AgentContext) -> None:
 
 
 # ── CSV parser ────────────────────────────────────────────────────────────────
+
 
 def test_parse_flux_csv_basic() -> None:
     csv = "#group,false,false\n_measurement,_value\ncpu,0.75\n"

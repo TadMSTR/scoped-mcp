@@ -39,9 +39,7 @@ class GrafanaModule(ToolModule):
 
     def __init__(self, agent_ctx, credentials, config):
         super().__init__(agent_ctx, credentials, config)
-        self._base_url = (
-            config.get("grafana_url") or credentials["GRAFANA_URL"]
-        ).rstrip("/")
+        self._base_url = (config.get("grafana_url") or credentials["GRAFANA_URL"]).rstrip("/")
         self._token = credentials["GRAFANA_SERVICE_ACCOUNT_TOKEN"]
         self._folder_title = f"agent-{agent_ctx.agent_id}"
         self._folder_uid: str | None = None  # resolved at first use

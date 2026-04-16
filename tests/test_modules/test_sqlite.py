@@ -25,6 +25,7 @@ def db_module(tmp_path, agent_ctx: AgentContext) -> SqliteModule:
 
 # ── SQL validation — read-only mode ──────────────────────────────────────────
 
+
 def test_valid_select_passes(db_module: SqliteModule) -> None:
     db_module._validate_sql("SELECT * FROM my_table", read_only=True)
 
@@ -46,6 +47,7 @@ def test_delete_in_read_mode_blocked(db_module: SqliteModule) -> None:
 
 # ── SQL validation — write mode ───────────────────────────────────────────────
 
+
 def test_valid_insert_passes(db_module: SqliteModule) -> None:
     db_module._validate_sql("INSERT INTO my_table (col) VALUES ('hello')", read_only=False)
 
@@ -55,6 +57,7 @@ def test_valid_update_passes(db_module: SqliteModule) -> None:
 
 
 # ── Blocked statement types ───────────────────────────────────────────────────
+
 
 def test_pragma_blocked(db_module: SqliteModule) -> None:
     with pytest.raises(ScopeViolation):
@@ -73,6 +76,7 @@ def test_detach_blocked(db_module: SqliteModule) -> None:
 
 # ── Multi-statement batch prevention ─────────────────────────────────────────
 
+
 def test_multi_statement_blocked(db_module: SqliteModule) -> None:
     with pytest.raises(ScopeViolation, match="Multi-statement"):
         db_module._validate_sql(
@@ -83,12 +87,14 @@ def test_multi_statement_blocked(db_module: SqliteModule) -> None:
 
 # ── Cross-schema reference prevention ────────────────────────────────────────
 
+
 def test_cross_schema_reference_blocked(db_module: SqliteModule) -> None:
     with pytest.raises(ScopeViolation):
         db_module._validate_sql("SELECT * FROM other_agent.some_table", read_only=True)
 
 
 # ── create_table input validation ────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_create_table_invalid_name(db_module: SqliteModule) -> None:
@@ -97,6 +103,7 @@ async def test_create_table_invalid_name(db_module: SqliteModule) -> None:
 
 
 # ── Config validation ─────────────────────────────────────────────────────────
+
 
 def test_missing_db_path_raises(agent_ctx: AgentContext) -> None:
     with pytest.raises(ValueError, match="db_path"):

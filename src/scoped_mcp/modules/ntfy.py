@@ -47,7 +47,9 @@ class NtfyModule(ToolModule):
             return "default"
 
     @tool(mode="write")
-    async def send(self, title: str, message: str, priority: str = "default", tags: str = "") -> bool:
+    async def send(
+        self, title: str, message: str, priority: str = "default", tags: str = ""
+    ) -> bool:
         """Send a push notification to the configured ntfy topic.
 
         Args:

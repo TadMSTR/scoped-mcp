@@ -41,9 +41,7 @@ class InfluxDBModule(ToolModule):
         super().__init__(agent_ctx, credentials, config)
         self._base_url = credentials["INFLUXDB_URL"].rstrip("/")
         self._token = credentials["INFLUXDB_TOKEN"]
-        self._org = (
-            credentials.get("INFLUXDB_ORG") or config.get("org")
-        )
+        self._org = credentials.get("INFLUXDB_ORG") or config.get("org")
         if not self._org:
             raise ValueError("influxdb module requires 'org' in config or INFLUXDB_ORG credential")
 
@@ -76,8 +74,8 @@ class InfluxDBModule(ToolModule):
         # It is inserted into a fixed template — agents cannot inject range() or other clauses.
         return (
             f'from(bucket: "{bucket}")\n'
-            f'  |> range(start: {range_start}, stop: {range_stop})\n'
-            f'  |> filter(fn: (r) => {predicate})'
+            f"  |> range(start: {range_start}, stop: {range_stop})\n"
+            f"  |> filter(fn: (r) => {predicate})"
         )
 
     @tool(mode="read")
@@ -125,10 +123,7 @@ class InfluxDBModule(ToolModule):
             List of measurement names.
         """
         self._validate_bucket(bucket)
-        flux = (
-            f'import "influxdata/influxdb/schema"\n'
-            f'schema.measurements(bucket: "{bucket}")'
-        )
+        flux = f'import "influxdata/influxdb/schema"\nschema.measurements(bucket: "{bucket}")'
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
                 f"{self._base_url}/api/v2/query",
@@ -154,11 +149,13 @@ class InfluxDBModule(ToolModule):
         self._validate_bucket(bucket)
         flux_fields = (
             f'import "influxdata/influxdb/schema"\n'
-            f'schema.fieldKeys(bucket: "{bucket}", predicate: (r) => r._measurement == "{measurement}")'
+            f'schema.fieldKeys(bucket: "{bucket}", '
+            f'predicate: (r) => r._measurement == "{measurement}")'
         )
         flux_tags = (
             f'import "influxdata/influxdb/schema"\n'
-            f'schema.tagKeys(bucket: "{bucket}", predicate: (r) => r._measurement == "{measurement}")'
+            f'schema.tagKeys(bucket: "{bucket}", '
+            f'predicate: (r) => r._measurement == "{measurement}")'
         )
         async with httpx.AsyncClient(timeout=15.0) as client:
             r_fields = await client.post(
@@ -200,7 +197,7 @@ class InfluxDBModule(ToolModule):
         lines = []
         for point in points:
             tags = ",".join(f"{k}={v}" for k, v in point.get("tags", {}).items())
-            fields = ",".join(f'{k}={v}' for k, v in point.get("fields", {}).items())
+            fields = ",".join(f"{k}={v}" for k, v in point.get("fields", {}).items())
             tag_str = f",{tags}" if tags else ""
             ts = f" {point['time']}" if "time" in point else ""
             lines.append(f"{measurement}{tag_str} {fields}{ts}")

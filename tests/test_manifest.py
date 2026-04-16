@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from scoped_mcp.exceptions import ManifestError
-from scoped_mcp.manifest import Manifest, load_manifest
+from scoped_mcp.manifest import load_manifest
 
 
 def write_manifest(tmp_path: Path, content: str) -> str:
@@ -18,7 +18,9 @@ def write_manifest(tmp_path: Path, content: str) -> str:
 
 
 def test_load_valid_manifest(tmp_path: Path) -> None:
-    path = write_manifest(tmp_path, """\
+    path = write_manifest(
+        tmp_path,
+        """\
         agent_type: research
         description: A research agent
         modules:
@@ -26,7 +28,8 @@ def test_load_valid_manifest(tmp_path: Path) -> None:
             mode: read
             config:
               base_path: /tmp/agents
-    """)
+    """,
+    )
     manifest = load_manifest(path)
     assert manifest.agent_type == "research"
     assert "filesystem" in manifest.modules
@@ -34,36 +37,45 @@ def test_load_valid_manifest(tmp_path: Path) -> None:
 
 
 def test_load_manifest_write_mode(tmp_path: Path) -> None:
-    path = write_manifest(tmp_path, """\
+    path = write_manifest(
+        tmp_path,
+        """\
         agent_type: build
         modules:
           filesystem:
             mode: write
-    """)
+    """,
+    )
     manifest = load_manifest(path)
     assert manifest.modules["filesystem"].mode == "write"
 
 
 def test_load_manifest_no_mode(tmp_path: Path) -> None:
     """Modules with no mode declared (e.g. notification modules) should be valid."""
-    path = write_manifest(tmp_path, """\
+    path = write_manifest(
+        tmp_path,
+        """\
         agent_type: notifier
         modules:
           ntfy: {}
-    """)
+    """,
+    )
     manifest = load_manifest(path)
     assert manifest.modules["ntfy"].mode is None
 
 
 def test_load_manifest_file_credentials(tmp_path: Path) -> None:
-    path = write_manifest(tmp_path, """\
+    path = write_manifest(
+        tmp_path,
+        """\
         agent_type: build
         credentials:
           source: file
           path: /run/secrets/agent.yml
         modules:
           ntfy: {}
-    """)
+    """,
+    )
     manifest = load_manifest(path)
     assert manifest.credentials.source == "file"
     assert manifest.credentials.path == "/run/secrets/agent.yml"
@@ -82,31 +94,40 @@ def test_load_manifest_invalid_yaml(tmp_path: Path) -> None:
 
 
 def test_load_manifest_missing_agent_type(tmp_path: Path) -> None:
-    path = write_manifest(tmp_path, """\
+    path = write_manifest(
+        tmp_path,
+        """\
         modules:
           filesystem:
             mode: read
-    """)
+    """,
+    )
     with pytest.raises(ManifestError):
         load_manifest(path)
 
 
 def test_load_manifest_empty_modules(tmp_path: Path) -> None:
-    path = write_manifest(tmp_path, """\
+    path = write_manifest(
+        tmp_path,
+        """\
         agent_type: research
         modules: {}
-    """)
+    """,
+    )
     with pytest.raises(ManifestError):
         load_manifest(path)
 
 
 def test_load_manifest_file_credentials_missing_path(tmp_path: Path) -> None:
-    path = write_manifest(tmp_path, """\
+    path = write_manifest(
+        tmp_path,
+        """\
         agent_type: build
         credentials:
           source: file
         modules:
           ntfy: {}
-    """)
+    """,
+    )
     with pytest.raises(ManifestError):
         load_manifest(path)

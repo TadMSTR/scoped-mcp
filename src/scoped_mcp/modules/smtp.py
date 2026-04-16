@@ -57,9 +57,7 @@ class SmtpModule(ToolModule):
             True on success.
         """
         if to not in self._allowed:
-            raise ScopeViolation(
-                f"Recipient '{to}' is not in the allowed_recipients list"
-            )
+            raise ScopeViolation(f"Recipient '{to}' is not in the allowed_recipients list")
 
         msg = EmailMessage()
         msg["From"] = self._from

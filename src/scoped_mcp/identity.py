@@ -28,7 +28,8 @@ class AgentContext:
         agent_id = os.environ.get("AGENT_ID", "").strip()
         agent_type = os.environ.get("AGENT_TYPE", "").strip()
 
-        missing = [name for name, val in [("AGENT_ID", agent_id), ("AGENT_TYPE", agent_type)] if not val]
+        pairs = [("AGENT_ID", agent_id), ("AGENT_TYPE", agent_type)]
+        missing = [name for name, val in pairs if not val]
         if missing:
             raise ConfigError(f"Required environment variable(s) not set: {', '.join(missing)}")
 

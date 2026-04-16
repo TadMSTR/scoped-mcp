@@ -18,7 +18,6 @@ from __future__ import annotations
 import importlib
 import inspect
 import pkgutil
-from typing import Any
 
 import structlog
 from fastmcp import FastMCP
@@ -43,11 +42,7 @@ def _discover_module_classes() -> dict[str, type[ToolModule]]:
             continue
         module = importlib.import_module(f"scoped_mcp.modules.{mod_info.name}")
         for _attr_name, obj in inspect.getmembers(module, inspect.isclass):
-            if (
-                issubclass(obj, ToolModule)
-                and obj is not ToolModule
-                and hasattr(obj, "name")
-            ):
+            if issubclass(obj, ToolModule) and obj is not ToolModule and hasattr(obj, "name"):
                 name = obj.name
                 if name in discovered:
                     raise ManifestError(

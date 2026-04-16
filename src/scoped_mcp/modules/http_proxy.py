@@ -15,7 +15,6 @@ Required credentials: per service — keys named in allowed_services[*].credenti
 from __future__ import annotations
 
 import ipaddress
-import re
 from typing import Any, ClassVar
 from urllib.parse import urlparse
 
