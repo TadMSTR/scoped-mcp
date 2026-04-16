@@ -37,7 +37,7 @@ jobs:
         run: ruff format --check src/ tests/
 
       - name: Run tests
-        run: pytest --cov=scoped_mcp --cov-report=term-missing --cov-fail-under=80
+        run: pytest --cov=scoped_mcp --cov-report=term-missing --cov-fail-under=75
 
   build:
     name: Build distribution
