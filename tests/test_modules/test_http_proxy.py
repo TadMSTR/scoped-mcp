@@ -1,6 +1,15 @@
-"""Tests for modules/http_proxy.py — service allowlist, SSRF prevention, credential injection."""
+"""Tests for modules/http_proxy.py — service allowlist, SSRF prevention, credential injection.
+
+SSRF tests cover the 2026-04-16 audit finding H2: IPv4-mapped IPv6,
+IPv6 link-local, unspecified (``::``), NAT64, CGNAT, and ``0.0.0.0/8``
+must all be blocked, and hostnames must be re-resolved at request time to
+defeat DNS rebinding.
+"""
 
 from __future__ import annotations
+
+import socket
+from typing import Any
 
 import pytest
 import respx
@@ -8,7 +17,24 @@ from httpx import Response
 
 from scoped_mcp.exceptions import ScopeViolation
 from scoped_mcp.identity import AgentContext
-from scoped_mcp.modules.http_proxy import HttpProxyModule, _is_ssrf_target
+from scoped_mcp.modules.http_proxy import (
+    HttpProxyModule,
+    _is_ssrf_target,
+    _resolve_and_check,
+)
+
+
+@pytest.fixture
+def _mock_public_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route every getaddrinfo to a public IP so H2's DNS check passes in tests
+    that use respx to mock httpx. Only applies to tests that request this
+    fixture explicitly — rebinding-defense tests override it per-test.
+    """
+
+    def fake_getaddrinfo(host: str, port: Any, *args: Any, **kwargs: Any):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
 
 
 @pytest.fixture
@@ -59,6 +85,84 @@ def test_public_url_not_ssrf() -> None:
     assert _is_ssrf_target("https://api.example.com/v1") is False
 
 
+# ── H2: extended IP blocklist ────────────────────────────────────────────────
+
+
+def test_ssrf_ipv4_mapped_ipv6() -> None:
+    assert _is_ssrf_target("http://[::ffff:127.0.0.1]/x") is True
+
+
+def test_ssrf_ipv6_link_local() -> None:
+    assert _is_ssrf_target("http://[fe80::1]/x") is True
+
+
+def test_ssrf_ipv6_unspecified() -> None:
+    assert _is_ssrf_target("http://[::]/x") is True
+
+
+def test_ssrf_nat64() -> None:
+    assert _is_ssrf_target("http://[64:ff9b::1]/x") is True
+
+
+def test_ssrf_cgnat() -> None:
+    assert _is_ssrf_target("http://100.64.0.1/x") is True
+
+
+def test_ssrf_zero_block() -> None:
+    assert _is_ssrf_target("http://0.0.0.0/x") is True
+
+
+# ── H2: DNS-rebinding defense via async resolve_and_check ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_resolve_and_check_literal_public_ip_passes() -> None:
+    await _resolve_and_check("93.184.216.34")  # example.com — public
+
+
+@pytest.mark.asyncio
+async def test_resolve_and_check_literal_private_ip_blocked() -> None:
+    with pytest.raises(ScopeViolation, match="blocked"):
+        await _resolve_and_check("10.0.0.1")
+
+
+@pytest.mark.asyncio
+async def test_resolve_and_check_resolves_to_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hostname whose DNS points at an internal IP at request time is blocked."""
+
+    def fake_getaddrinfo(host: str, port: Any, *args: Any, **kwargs: Any):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.1.2.3", 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    with pytest.raises(ScopeViolation, match="resolves to a blocked address"):
+        await _resolve_and_check("evil.example.com")
+
+
+@pytest.mark.asyncio
+async def test_resolve_and_check_public_hostname_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_getaddrinfo(host: str, port: Any, *args: Any, **kwargs: Any):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    await _resolve_and_check("api.example.com")
+
+
+@pytest.mark.asyncio
+async def test_get_blocks_rebound_host(
+    monkeypatch: pytest.MonkeyPatch, proxy_module: HttpProxyModule
+) -> None:
+    """A request to a whitelisted service is rejected if DNS returns an internal IP."""
+
+    def fake_getaddrinfo(host: str, port: Any, *args: Any, **kwargs: Any):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("192.168.0.1", 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    with pytest.raises(ScopeViolation, match="resolves to a blocked address"):
+        await proxy_module.get(service="my_api", path="/x")
+
+
 def test_ssrf_blocked_at_init(agent_ctx: AgentContext) -> None:
     with pytest.raises(ValueError, match="blocked base_url"):
         HttpProxyModule(
@@ -87,7 +191,9 @@ def test_no_services_raises(agent_ctx: AgentContext) -> None:
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_credential_injected_as_bearer(proxy_module: HttpProxyModule) -> None:
+async def test_credential_injected_as_bearer(
+    proxy_module: HttpProxyModule, _mock_public_dns: None
+) -> None:
     route = respx.get("https://api.example.com/data").mock(
         return_value=Response(200, json={"ok": True})
     )
@@ -98,7 +204,9 @@ async def test_credential_injected_as_bearer(proxy_module: HttpProxyModule) -> N
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_no_credential_when_not_configured(proxy_module: HttpProxyModule) -> None:
+async def test_no_credential_when_not_configured(
+    proxy_module: HttpProxyModule, _mock_public_dns: None
+) -> None:
     route = respx.get("https://public.example.com/data").mock(return_value=Response(200, json={}))
     await proxy_module.get(service="public_api", path="/data")
     auth = route.calls[0].request.headers.get("Authorization")
@@ -110,7 +218,7 @@ async def test_no_credential_when_not_configured(proxy_module: HttpProxyModule) 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_get_returns_json(proxy_module: HttpProxyModule) -> None:
+async def test_get_returns_json(proxy_module: HttpProxyModule, _mock_public_dns: None) -> None:
     respx.get("https://api.example.com/items").mock(
         return_value=Response(200, json={"items": [1, 2, 3]})
     )
@@ -120,7 +228,7 @@ async def test_get_returns_json(proxy_module: HttpProxyModule) -> None:
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_post_sends_body(proxy_module: HttpProxyModule) -> None:
+async def test_post_sends_body(proxy_module: HttpProxyModule, _mock_public_dns: None) -> None:
     import json as _json
 
     route = respx.post("https://api.example.com/create").mock(
@@ -134,7 +242,7 @@ async def test_post_sends_body(proxy_module: HttpProxyModule) -> None:
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_delete_empty_response(proxy_module: HttpProxyModule) -> None:
+async def test_delete_empty_response(proxy_module: HttpProxyModule, _mock_public_dns: None) -> None:
     respx.delete("https://api.example.com/item/1").mock(return_value=Response(204))
     result = await proxy_module.delete(service="my_api", path="/item/1")
     assert result == {"status": "deleted"}

@@ -37,6 +37,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`query` filters on `_measurement`, `get_schema`, `write_points`,
   `delete_points`). `delete_points` previously embedded the measurement into
   a Flux predicate string without escaping.
+- **H2 (High) — SSRF defense in http_proxy:** The blocklist now covers
+  IPv4-mapped IPv6 (`::ffff:0:0/96`), IPv6 link-local (`fe80::/10`),
+  IPv6 unspecified (`::/128`), NAT64 (`64:ff9b::/96`), CGNAT
+  (`100.64.0.0/10`), and the `0.0.0.0/8` range — in addition to the
+  existing loopback / RFC1918 / 169.254.0.0/16 / unique-local sets.
+  Every request now re-resolves the hostname via `getaddrinfo` at request
+  time and rejects the call if any returned address is in the blocklist,
+  defeating DNS-rebinding attacks where a whitelisted hostname flips to an
+  internal IP between init and tool invocation. Addressed by 2026-04-16
+  audit finding H2.
+- **M5 — Identity validation:** `AgentContext.from_env()` now validates
+  `AGENT_ID` against `^[a-z0-9][a-z0-9-]{0,62}$` and `AGENT_TYPE` against
+  `^[a-z0-9][a-z0-9_-]{0,62}$`. Values containing slashes, spaces,
+  uppercase, leading hyphens, or exceeding 63 characters raise
+  `ConfigError` before any scope is applied. Prevents an operator
+  misconfiguration from injecting path traversal or unexpected characters
+  into filesystem / schema / namespace scopes downstream.
+- **M6 — Credential file permissions:** `resolve_credentials("file", ...)`
+  now checks that the secrets file is mode `0600` (or stricter) and owned
+  by the invoking uid. Group- or world-readable files raise
+  `CredentialError` by default. Operators who explicitly accept the risk
+  can pass `strict_permissions: false` on the credential source config in
+  the manifest; `scoped-mcp` will log a `WARNING` and proceed.
+- **M8 — PrefixScope ancestor-walk defense:** `enforce()` now walks each
+  existing component of the resolved path between the agent root and the
+  target, and rejects the call if any component is a symlink that
+  resolves outside the agent root. Previously, an operator-seeded symlink
+  used as an ancestor of a non-existent write target could pass the
+  `relative_to` check because the non-existent-tail fallback resolved the
+  nearest existing ancestor without inspecting the intermediate
+  components. The `docs/scoping-strategies.md` operator guidance now
+  calls out that scope directories should not contain pre-seeded symlinks.
 
 ### Breaking Changes
 

@@ -59,8 +59,10 @@ For filesystem paths, object storage keys, and any prefix-addressable resource.
 
 **Defenses:**
 - Resolves symlinks before checking scope — a symlink pointing outside the prefix is an escape attempt
-- Handles non-existent paths (write targets) by resolving the nearest existing ancestor
+- Handles non-existent paths (write targets) by resolving the nearest existing ancestor, then walks each existing ancestor component to catch operator-seeded symlinks that escape
 - Catches `../` traversal by resolving to absolute path before comparing
+
+**Operator guidance:** Do not pre-seed symbolic links inside an agent scope directory. The built-in filesystem module does not create symlinks; if your deployment process does, place them outside any agent scope. The defense-in-depth ancestor-walk catches the common case, but the safest posture is to keep scope directories free of links entirely.
 
 **When to use:** Any resource addressable by a path prefix.
 

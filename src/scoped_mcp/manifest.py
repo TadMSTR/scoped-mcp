@@ -24,6 +24,9 @@ class CredentialSourceConfig(BaseModel):
     source: Literal["env", "file"] = "env"
     # Required when source == "file"
     path: str | None = None
+    # Enforce mode 0600 + matching owner on the secrets file. Set to False
+    # to downgrade the check to a warning (operator opt-out, audit M6).
+    strict_permissions: bool = True
 
     @model_validator(mode="after")
     def _check_file_has_path(self) -> "CredentialSourceConfig":
