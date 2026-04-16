@@ -115,8 +115,8 @@ See `examples/claude-code/` for a complete multi-agent setup.
 
 **Scoping Strategies** — reusable patterns for resource isolation:
 - `PrefixScope` — file paths, object store keys, cache keys scoped to `agents/{agent_id}/`
-- `SchemaScope` — database queries restricted to agent's schema/namespace
 - `NamespaceScope` — key-value operations prefixed with agent's namespace
+- Per-agent file — e.g. SQLite gives each agent its own database file at `{db_dir}/agent_{agent_id}.db`
 - Custom — implement `ScopeStrategy` for your backend's isolation model
 
 **Credential Injection** — backend credentials (API keys, DSNs, tokens) loaded once by the proxy process from environment variables or a secrets file. Modules receive credentials through their context — the agent process never sees them.
@@ -144,7 +144,7 @@ modules:
   sqlite:
     mode: read
     config:
-      db_path: /data/shared.db
+      db_dir: /data/sqlite     # each agent gets /data/sqlite/agent_{agent_id}.db
 
   ntfy:                       # write-only — no mode field needed
     config:
@@ -209,7 +209,7 @@ flowchart LR
 | Module | Scope | Read tools | Write tools |
 |--------|-------|-----------|-------------|
 | `filesystem` | `PrefixScope` — `agents/{agent_id}/` | `read_file`, `list_dir` | `write_file`, `delete_file` |
-| `sqlite` | `SchemaScope` — `agent_{agent_id}` | `query`, `list_tables` | `execute`, `create_table` |
+| `sqlite` | Per-agent DB file — `{db_dir}/agent_{agent_id}.db` | `query`, `list_tables` | `execute`, `create_table` |
 
 ### Notifications
 

@@ -63,13 +63,13 @@ base_path/agents/{agent_id}/subpath
 
 PrefixScope resolves symlinks before checking, so a symlink pointing outside the prefix is treated as a scope escape. Traversal (`../`) is caught by resolving to an absolute path before comparing against the agent root.
 
-**SchemaScope** — for SQL databases that support schema-per-user isolation.
+**Per-agent file** — used by the sqlite module for real isolation.
 
 ```
-agent_{agent_id}.table_name
+{db_dir}/agent_{agent_id}.db
 ```
 
-The sqlite module uses sqlglot to parse SQL at the AST level. All table references are extracted and checked against the agent's schema before any query reaches the database.
+Each agent gets its own SQLite file, so two agents cannot read or write each other's data regardless of SQL shape. The sqlite module also parses SQL with sqlglot to block PRAGMA, ATTACH, DETACH, DROP, and multi-statement batches as defense in depth. (A previous `SchemaScope` strategy targeted this use case but did not actually isolate — see the 2026-04-16 audit, finding C1. The class remains in `scoped_mcp.scoping` for backwards compatibility only.)
 
 **NamespaceScope** — for key-value stores, message queue topics, time-series buckets.
 

@@ -82,11 +82,15 @@ class PrefixScope(ScopeStrategy):
 
 
 class SchemaScope(ScopeStrategy):
-    """Database schema restriction.
+    """Database schema restriction — deprecated, no built-in module uses it.
 
-    Enforces that all table references belong to the agent's schema.
-    SQL parsing (AST-level enforcement) is the responsibility of the
-    sqlite module — this strategy provides the schema name and enforce check.
+    The sqlite module originally used SchemaScope + SQLite ATTACH to isolate
+    agents within a single DB file. That pattern did not actually isolate
+    (audit 2026-04-16, finding C1): unqualified table references resolved
+    against the shared ``main`` schema regardless of the attached namespace.
+    The sqlite module now uses a per-agent DB file instead. This class remains
+    as public API for backwards compatibility only — new modules should use
+    PrefixScope (file-per-agent) or NamespaceScope (key-prefix) instead.
     """
 
     def apply(self, value: str, agent_ctx: AgentContext) -> str:

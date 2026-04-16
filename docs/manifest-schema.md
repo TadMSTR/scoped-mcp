@@ -56,7 +56,7 @@ modules:
   sqlite:
     mode: write
     config:
-      db_path: /data/shared.db
+      db_dir: /data/sqlite       # each agent gets /data/sqlite/agent_{agent_id}.db
 
   influxdb:
     mode: write

@@ -16,4 +16,4 @@ modules:
   sqlite:
     mode: write
     config:
-      db_path: /tmp/scoped-mcp-data/shared.db
+      db_dir: /tmp/scoped-mcp-data/sqlite
