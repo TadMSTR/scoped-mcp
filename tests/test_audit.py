@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from scoped_mcp.audit import _sanitize_value, audited
+from scoped_mcp.audit import _sanitize_processor, _sanitize_value, audited
 from scoped_mcp.exceptions import ScopeViolation
 from scoped_mcp.identity import AgentContext
 
@@ -29,7 +29,8 @@ def test_sanitize_binary() -> None:
 
 
 def test_sanitize_long_string() -> None:
-    long_str = "a" * 600
+    # Use a non-hex char so the long-hex pattern redactor (L1) doesn't consume it.
+    long_str = "z" * 600
     result = _sanitize_value(long_str)
     assert isinstance(result, str)
     assert "truncated" in result
@@ -94,3 +95,82 @@ async def test_audited_reraises_general_exception(agent_ctx: AgentContext) -> No
     module = _MockModule(agent_ctx)
     with pytest.raises(ValueError, match="bad input"):
         await _make_tool(module, raise_exc=ValueError("bad input"))
+
+
+# ── L1: expanded redaction ────────────────────────────────────────────────────
+
+
+def test_sanitize_authorization_key() -> None:
+    assert _sanitize_value("Bearer abc", "authorization") == "<redacted>"
+
+
+def test_sanitize_cookie_key() -> None:
+    assert _sanitize_value("sid=xyz", "cookie") == "<redacted>"
+
+
+def test_sanitize_pwd_suffix() -> None:
+    assert _sanitize_value("hunter2", "DB_PWD") == "<redacted>"
+
+
+def test_sanitize_pass_suffix() -> None:
+    assert _sanitize_value("hunter2", "USER_PASS") == "<redacted>"
+
+
+def test_sanitize_auth_suffix() -> None:
+    assert _sanitize_value("abc", "HTTP_AUTH") == "<redacted>"
+
+
+def test_sanitize_jwt_pattern_in_error_message() -> None:
+    msg = "upstream rejected: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.abcdefghij"
+    result = _sanitize_value(msg)
+    assert "eyJ" not in result
+    assert "<redacted-jwt>" in result
+
+
+def test_sanitize_bearer_pattern_in_error_message() -> None:
+    msg = "401 from api: Bearer sk-abcd1234efgh5678"
+    result = _sanitize_value(msg)
+    assert "sk-abcd1234efgh5678" not in result
+    assert "<redacted-bearer>" in result
+
+
+def test_sanitize_long_hex_in_message() -> None:
+    msg = "session cookie was aabbccddeeff00112233445566778899aabbccdd"
+    result = _sanitize_value(msg)
+    assert "aabbccddeeff00112233445566778899aabbccdd" not in result
+    assert "<redacted-hex>" in result
+
+
+def test_sanitize_processor_walks_whole_event() -> None:
+    event = {
+        "event": "tool_call",
+        "tool": "foo_bar",
+        "error": "Bearer sk-supersecret-token-abcdef",
+        "detail": {"MY_TOKEN": "leak"},
+    }
+    result = _sanitize_processor(None, "info", event)
+    assert result["event"] == "tool_call"  # preserved
+    assert result["tool"] == "foo_bar"  # preserved (not key-match, no patterns)
+    assert "sk-supersecret-token-abcdef" not in result["error"]
+    assert result["detail"]["MY_TOKEN"] == "<redacted>"
+
+
+def test_sanitize_processor_preserves_event_field_even_if_sensitive_looking() -> None:
+    # The literal string 'scope_violation' in event must not be accidentally redacted.
+    event = {"event": "scope_violation", "level": "warning"}
+    result = _sanitize_processor(None, "warning", event)
+    assert result["event"] == "scope_violation"
+
+
+# ── H3: @audited signature no longer accepts scope_strategy ──────────────────
+
+
+def test_audited_rejects_scope_strategy_kwarg() -> None:
+    """The scope_strategy param was removed per 2026-04-16 audit finding H3.
+
+    Modules are responsible for calling ``self.scoping.enforce`` themselves.
+    A caller that was relying on the decorator to do that needs to know
+    immediately, not silently get an un-enforced tool.
+    """
+    with pytest.raises(TypeError):
+        audited("foo_tool", scope_strategy=object())  # type: ignore[call-arg]

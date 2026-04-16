@@ -58,12 +58,18 @@ class ToolModule(ABC):
     Class variables to declare in subclasses:
         name: unique module identifier used in manifests and tool name prefixes.
         scoping: the ScopeStrategy to apply, or None for no scoping (e.g. webhooks).
-        required_credentials: list of credential key names needed by this module.
+        required_credentials: list of credential key names the module cannot
+            start without — registry raises CredentialError if any are missing.
+        optional_credentials: list of credential key names that are loaded if
+            present but do not block startup if absent. Values are resolved by
+            the same source (env or file) as required_credentials; if absent
+            the key is simply missing from ``self.credentials`` at runtime.
     """
 
     name: ClassVar[str]
     scoping: ClassVar[ScopeStrategy | None] = None
     required_credentials: ClassVar[list[str]] = []
+    optional_credentials: ClassVar[list[str]] = []
 
     def __init__(
         self,

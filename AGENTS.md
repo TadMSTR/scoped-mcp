@@ -88,7 +88,17 @@ must have tests verifying that:
   backend client library.
 - **Audit logging is not optional** — the `@audited` decorator is applied
   by the registry at registration time. Module authors don't need to add
-  it manually, but they must not suppress or bypass it.
+  it manually, but they must not suppress or bypass it. `@audited` handles
+  logging only; it does NOT call `scope.enforce()`.
+- **Scope enforcement is the module's responsibility** — every tool method
+  MUST either (a) call `self.scoping.enforce(value, self.agent_ctx)` on
+  each argument that addresses a backend resource, or (b) validate the
+  argument against an explicit allowlist held in `self.config` (e.g. the
+  Grafana `allowed_datasources`, SMTP `allowed_recipients`, InfluxDB
+  `allowed_buckets`, http_proxy `allowed_services`, matrix `allowed_rooms`
+  patterns). Every new module MUST include tests that verify a
+  cross-agent / out-of-scope request raises `ScopeViolation` (or the
+  module-specific equivalent) before any backend call is made.
 - **Manifest is the source of truth** — if a module isn't in the manifest,
   it doesn't load. The registry refuses to register unlisted modules even
   if they exist in the modules directory.

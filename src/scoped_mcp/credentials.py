@@ -30,39 +30,49 @@ def resolve_credentials(
     required_keys: list[str],
     file_path: str | None = None,
     strict_permissions: bool = True,
+    optional_keys: list[str] | None = None,
 ) -> dict[str, str]:
     """Resolve a list of credential keys from the configured source.
 
     Args:
         source: "env" to read from environment variables, "file" to read
                 from a YAML secrets file.
-        required_keys: list of credential key names to resolve.
+        required_keys: credential keys the module cannot start without — a
+                missing required key raises ``CredentialError``.
         file_path: path to the YAML secrets file (required when source="file").
         strict_permissions: when True (default), require a secrets file to
                 be mode 0600 (no group/other access) and owned by the running
                 user. Only applies when source="file".
+        optional_keys: credential keys that are loaded if present but do not
+                raise if absent. Absent optional keys are simply omitted from
+                the returned dict.
 
     Returns:
-        Dict mapping key names to their resolved values.
+        Dict mapping key names to their resolved values. Contains every
+        required key; contains optional keys only when the source provided
+        a value.
 
     Raises:
         CredentialError: if a required key is missing or the source is misconfigured.
     """
+    opts = list(optional_keys or [])
     if source == "env":
-        return _from_env(required_keys)
+        return _from_env(required_keys, opts)
     elif source == "file":
         if not file_path:
             raise CredentialError("Credential source is 'file' but no path was provided")
-        return _from_file(required_keys, file_path, strict_permissions=strict_permissions)
+        return _from_file(
+            required_keys, file_path, strict_permissions=strict_permissions, optional_keys=opts
+        )
     else:
         raise CredentialError(f"Unknown credential source: '{source}'. Expected 'env' or 'file'")
 
 
-def _from_env(keys: list[str]) -> dict[str, str]:
+def _from_env(required_keys: list[str], optional_keys: list[str]) -> dict[str, str]:
     result: dict[str, str] = {}
     missing: list[str] = []
 
-    for key in keys:
+    for key in required_keys:
         value = os.environ.get(key)
         if value is None:
             missing.append(key)
@@ -72,10 +82,20 @@ def _from_env(keys: list[str]) -> dict[str, str]:
     if missing:
         raise CredentialError(f"Missing required environment variable(s): {', '.join(missing)}")
 
+    for key in optional_keys:
+        value = os.environ.get(key)
+        if value is not None:
+            result[key] = value
+
     return result
 
 
-def _from_file(keys: list[str], file_path: str, strict_permissions: bool = True) -> dict[str, str]:
+def _from_file(
+    required_keys: list[str],
+    file_path: str,
+    strict_permissions: bool = True,
+    optional_keys: list[str] | None = None,
+) -> dict[str, str]:
     path = Path(file_path)
     if not path.exists():
         raise CredentialError(f"Secrets file not found: {file_path}")
@@ -93,7 +113,7 @@ def _from_file(keys: list[str], file_path: str, strict_permissions: bool = True)
     result: dict[str, str] = {}
     missing: list[str] = []
 
-    for key in keys:
+    for key in required_keys:
         if key not in raw:
             missing.append(key)
         else:
@@ -101,6 +121,10 @@ def _from_file(keys: list[str], file_path: str, strict_permissions: bool = True)
 
     if missing:
         raise CredentialError(f"Missing credential key(s) in '{file_path}': {', '.join(missing)}")
+
+    for key in optional_keys or []:
+        if key in raw:
+            result[key] = str(raw[key])
 
     return result
 

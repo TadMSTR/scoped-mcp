@@ -33,8 +33,8 @@ sequenceDiagram
         Note over Env,FM: Runtime (per tool call)
         FM->>Mod: tool_call(args)
         activate Mod
-        Note right of Mod: @audited wrapper runs first
-        Mod->>Mod: scope.enforce(args)
+        Note right of Mod: @audited wrapper logs the call
+        Mod->>Mod: scope.enforce(args) inside tool method
         alt scope violation
             Mod-->>FM: ScopeError (blocked + logged)
         else within scope
@@ -49,9 +49,9 @@ sequenceDiagram
 
 ## How Scoping Works
 
-Scope enforcement is the security boundary. Every tool call passes through `enforce()` before any backend operation.
+Scope enforcement is the security boundary. Every tool method must call its scope strategy's `enforce()` — or validate the argument against an explicit allowlist for modules where the scope is an allowlist rather than a transformable value (Grafana datasource names, SMTP recipients, ntfy topics) — before any backend operation.
 
-The `@audited` decorator — applied by the registry, never by module authors — calls `enforce()`. This prevents accidental omission.
+The `@audited` decorator — applied by the registry, never by module authors — wraps every tool call with structured audit logging. It does NOT enforce scope: each module is responsible for scope enforcement in its own tool methods. See `AGENTS.md` for the module-author enforcement checklist.
 
 ### Three built-in strategies
 

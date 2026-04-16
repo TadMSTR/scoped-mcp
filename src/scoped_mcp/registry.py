@@ -59,7 +59,7 @@ def _resolve_module_credentials(
     manifest: Manifest,
 ) -> dict[str, str]:
     """Resolve credentials for a single module."""
-    if not module_cls.required_credentials:
+    if not module_cls.required_credentials and not module_cls.optional_credentials:
         return {}
 
     cred_cfg = manifest.credentials
@@ -68,6 +68,7 @@ def _resolve_module_credentials(
         required_keys=module_cls.required_credentials,
         file_path=cred_cfg.path,
         strict_permissions=cred_cfg.strict_permissions,
+        optional_keys=module_cls.optional_credentials,
     )
 
 

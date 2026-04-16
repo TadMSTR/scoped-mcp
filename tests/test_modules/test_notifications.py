@@ -77,6 +77,34 @@ def test_ntfy_credential_not_exposed_in_config(ntfy_module: NtfyModule) -> None:
     assert "NTFY_TOKEN" not in ntfy_module.config
 
 
+def test_ntfy_declares_ntfy_token_as_optional() -> None:
+    assert "NTFY_TOKEN" in NtfyModule.optional_credentials
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_ntfy_attaches_bearer_when_token_present(agent_ctx: AgentContext) -> None:
+    """L2: when NTFY_TOKEN is supplied, send() must attach Authorization header."""
+    mod = NtfyModule(
+        agent_ctx=agent_ctx,
+        credentials={"NTFY_URL": "http://ntfy.test", "NTFY_TOKEN": "tk-ntfy-example"},
+        config={"topic": "t"},
+    )
+    route = respx.post("http://ntfy.test/t").mock(return_value=Response(200))
+    await mod.send(title="x", message="y")
+    auth = route.calls[0].request.headers.get("Authorization")
+    assert auth == "Bearer tk-ntfy-example"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_ntfy_no_auth_header_when_token_absent(ntfy_module: NtfyModule) -> None:
+    """Without NTFY_TOKEN in credentials, no Authorization header is sent."""
+    route = respx.post("http://ntfy.test/test-topic").mock(return_value=Response(200))
+    await ntfy_module.send(title="x", message="y")
+    assert route.calls[0].request.headers.get("Authorization") is None
+
+
 # ── MatrixModule ──────────────────────────────────────────────────────────────
 
 

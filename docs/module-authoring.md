@@ -14,6 +14,17 @@ A tool module is a Python class that:
 
 The registry does the rest: discovery, instantiation, credential injection, tool registration with FastMCP, and `@audited` wrapping.
 
+## Scope enforcement is your responsibility
+
+`@audited` (applied by the registry) provides structured audit logging only — it does NOT call `scope.enforce()` for you. Every tool method you write MUST either:
+
+1. Call `self.scoping.apply(value, self.agent_ctx)` and/or `self.scoping.enforce(value, self.agent_ctx)` on each argument that addresses a backend resource (paths, keys, bucket names), OR
+2. Validate the argument against an explicit allowlist held in `self.config` when the scope is not a transformable value (e.g. a REST service name, a queue topic, a datasource name).
+
+If neither applies to your module, you have no scope boundary and should declare `scoping = None` AND gate access at the credential level (the built-in write-only notifiers — Slack, Discord, ntfy — use this pattern: one credential = one channel).
+
+Every new module MUST ship with at least one test that a cross-agent or out-of-scope argument raises `ScopeViolation` (or the module-specific equivalent) before any backend call is made. See the `test_cross_agent_blocked` pattern below.
+
 ## Example: Redis module
 
 ```python
