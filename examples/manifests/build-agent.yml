@@ -1,0 +1,19 @@
+# Build agent manifest — full read/write access to filesystem and sqlite.
+# The agent can create files, write data, and manage its own workspace.
+
+agent_type: build
+description: "Build agent with read/write filesystem and database access"
+
+credentials:
+  source: env
+
+modules:
+  filesystem:
+    mode: write
+    config:
+      base_path: /tmp/scoped-mcp-data
+
+  sqlite:
+    mode: write
+    config:
+      db_path: /tmp/scoped-mcp-data/shared.db

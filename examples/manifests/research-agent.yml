@@ -1,0 +1,19 @@
+# Research agent manifest — read-only filesystem and sqlite access.
+# The agent can read files and query data but cannot write.
+
+agent_type: research
+description: "Read-only research agent with filesystem and database access"
+
+credentials:
+  source: env  # reads from environment variables
+
+modules:
+  filesystem:
+    mode: read
+    config:
+      base_path: /tmp/scoped-mcp-data
+
+  sqlite:
+    mode: read
+    config:
+      db_path: /tmp/scoped-mcp-data/shared.db
