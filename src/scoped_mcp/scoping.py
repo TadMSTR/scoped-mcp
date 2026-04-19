@@ -59,11 +59,10 @@ class PrefixScope(ScopeStrategy):
     def enforce(self, value: str, agent_ctx: AgentContext) -> None:
         """Raise ScopeViolation if the path escapes the agent's root.
 
-        Resolves symlinks before checking — a symlink pointing outside the
-        root is treated as an escape attempt. For paths that don't yet exist,
-        the resolve-nearest-ancestor fallback is followed by an explicit
-        walk of each existing ancestor component looking for symlinks that
-        escape (defense in depth for audit finding M8).
+        Resolves symlinks before checking — a symlink pointing outside the root
+        is treated as an escape attempt. For non-existent write targets, see
+        ``_check_ancestor_symlinks`` for the defense-in-depth pass against
+        operator-seeded symlinks (audit finding M8).
         """
         agent_root = self._agent_root(agent_ctx)
         target = Path(value)
