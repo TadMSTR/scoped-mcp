@@ -22,6 +22,13 @@ Existing solutions solve pieces:
 
 None combine all four: **tool filtering + resource scoping + credential isolation + audit logging**.
 
+scoped-mcp was built using the same multi-agent pattern it's designed to
+secure — a research agent evaluated the problem space, a dev agent implemented
+the code, each with scoped access to only the resources it needed. It runs
+in production as part of [homelab-agent](https://github.com/TadMSTR/homelab-agent),
+a self-hosted Claude Code platform with purpose-built agents for different
+infrastructure domains.
+
 ---
 
 ## How It Works
@@ -237,6 +244,32 @@ Notification modules are **write-only by design** — every agent needs to send 
 | `grafana` | Folder-based (`agent-{agent_id}/`) | `list_dashboards`, `get_dashboard`, `query_datasource`, `list_datasources` | `create_dashboard`, `update_dashboard`, `create_alert_rule`, `delete_dashboard` |
 | `influxdb` | Bucket allowlist + `NamespaceScope` | `query`, `list_measurements`, `get_schema` | `write_points`, `create_bucket`, `delete_points` |
 
+### Credentials
+
+Every module declares its required and optional environment variables. scoped-mcp
+fails at startup with a clear error listing any missing required keys — it will not
+start partially configured.
+
+| Module | Required env vars | Optional env vars |
+|--------|------------------|-------------------|
+| `filesystem` | — | — |
+| `sqlite` | — | — |
+| `ntfy` | `NTFY_URL` | `NTFY_TOKEN` |
+| `smtp` | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` | — |
+| `matrix` | `MATRIX_HOMESERVER`, `MATRIX_ACCESS_TOKEN` | — |
+| `slack_webhook` | `SLACK_WEBHOOK_URL` | — |
+| `discord_webhook` | `DISCORD_WEBHOOK_URL` | — |
+| `http_proxy` | — (dynamic; see module config) | — |
+| `grafana` | `GRAFANA_URL`, `GRAFANA_SERVICE_ACCOUNT_TOKEN` | — |
+| `influxdb` | `INFLUXDB_URL`, `INFLUXDB_TOKEN` | `INFLUXDB_ORG` (overrides `config.org`) |
+
+Credentials are passed in `settings.json` under `env` (for Claude Code) or exported
+in the shell before running `scoped-mcp`. They are loaded once at startup, injected
+into module contexts, and never returned in tool responses or logged.
+
+For integration with a secrets manager such as Vaultwarden, see
+`examples/vaultwarden/`.
+
 ---
 
 ## Three-Module Workflow
@@ -322,6 +355,23 @@ See `examples/custom-module/` for a full walkthrough and `docs/module-authoring.
 
 ---
 
+## Security
+
+scoped-mcp's core value is security — tool scoping, credential isolation, and
+audit logging. To back that up:
+
+- **Threat model:** `docs/threat-model.md` documents the attack surface,
+  trust boundaries, and what scoped-mcp does and does not protect against.
+- **Audit history:** `docs/security-audit.md` tracks every internal audit,
+  including the v0.1.0 audit that found 18 findings (1 critical, 3 high, 8
+  medium, 6 low) and their remediation in v0.2.0. v0.2.1 and v0.3.0 audits
+  returned clean.
+- **Verifiable isolation:** the `examples/claude-code/multi-agent-setup.md`
+  includes a step-by-step verification walkthrough — you can confirm filesystem
+  isolation and credential non-exposure yourself in under five minutes.
+
+---
+
 ## Non-Goals
 
 - **Not an enterprise gateway** — no OAuth, no multi-tenant SaaS, no Kubernetes. For self-hosters running multi-agent setups.
@@ -349,6 +399,8 @@ pip install "scoped-mcp[sqlite]"
 # Everything
 pip install "scoped-mcp[all]"
 ```
+
+If something isn't working, see [Troubleshooting](docs/troubleshooting.md).
 
 ## License
 
