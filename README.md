@@ -348,6 +348,23 @@ See `examples/custom-module/` for a full walkthrough and `docs/module-authoring.
 
 ---
 
+## Security
+
+scoped-mcp's core value is security — tool scoping, credential isolation, and
+audit logging. To back that up:
+
+- **Threat model:** `docs/threat-model.md` documents the attack surface,
+  trust boundaries, and what scoped-mcp does and does not protect against.
+- **Audit history:** `docs/security-audit.md` tracks every internal audit,
+  including the v0.1.0 audit that found 18 findings (1 critical, 3 high, 8
+  medium, 6 low) and their remediation in v0.2.0. v0.2.1 and v0.3.0 audits
+  returned clean.
+- **Verifiable isolation:** the `examples/claude-code/multi-agent-setup.md`
+  includes a step-by-step verification walkthrough — you can confirm filesystem
+  isolation and credential non-exposure yourself in under five minutes.
+
+---
+
 ## Non-Goals
 
 - **Not an enterprise gateway** — no OAuth, no multi-tenant SaaS, no Kubernetes. For self-hosters running multi-agent setups.
