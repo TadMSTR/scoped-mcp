@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `PrefixScope.enforce` docstring tightened — removes redundant re-explanation of the
+  symlink-walk logic; adds forward reference to `_check_ancestor_symlinks`.
+
 ### Removed
 
 - `SchemaScope` — removed at alpha; the sqlite module deprecated it in v0.2.0
@@ -14,6 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   should use `PrefixScope` (file-per-agent) or `NamespaceScope` (key-prefix).
 
 ### Added
+
+- `modules/_influxdb_validators.py` — private helper module extracted from `influxdb.py`
+  (8 functions + 6 constants). No behavior change; `influxdb.py` imports from it.
+- CI: `create-github-release` job added to `release.yml`. On each version tag, attaches
+  the wheel and sdist to a GitHub Release and auto-generates release notes from commits.
+  Requires no secrets (uses built-in `github.token`).
+- Claude Code badge added to README header.
+
+### Added (previous)
 
 - `SECURITY.md` — vulnerability disclosure policy covering private reporting channels,
   scope definition, and response SLA. Required for showcase-tier compliance.
