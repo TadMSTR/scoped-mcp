@@ -22,6 +22,13 @@ Existing solutions solve pieces:
 
 None combine all four: **tool filtering + resource scoping + credential isolation + audit logging**.
 
+scoped-mcp was built using the same multi-agent pattern it's designed to
+secure — a research agent evaluated the problem space, a dev agent implemented
+the code, each with scoped access to only the resources it needed. It runs
+in production as part of [homelab-agent](https://github.com/TadMSTR/homelab-agent),
+a self-hosted Claude Code platform with purpose-built agents for different
+infrastructure domains.
+
 ---
 
 ## How It Works
