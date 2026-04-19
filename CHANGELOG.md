@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-04-19
+
+### Added
+
+- Credential reference table in README — lists required and optional env vars for all
+  10 built-in modules, with startup-fail behavior note and pointer to Vaultwarden example.
+- Process management section in `examples/claude-code/multi-agent-setup.md` — covers
+  Claude Code native (recommended), PM2 with `ecosystem.config.js` example, and systemd
+  pointer.
+- `## Security` section in README — links to `docs/threat-model.md` and
+  `docs/security-audit.md`; replaces thin 3-bullet verification section with a full
+  walkthrough covering filesystem isolation, credential non-exposure, and audit log
+  confirmation.
+- Provenance note in README intro — 2 sentences noting scoped-mcp was built using the
+  same multi-agent pattern it secures, with link to TadMSTR/homelab-agent.
+- `examples/vaultwarden/README.md` — Pattern A (secrets file via `bw` CLI, recommended
+  for headless agents) and Pattern B (env vars for interactive Claude Code sessions),
+  headless unlock options, and Vaultwarden item naming convention. Surfaces
+  `--audit-log` and `--ops-log` CLI flags in Pattern A script.
+- `docs/troubleshooting.md` — startup errors, clean startup event sequence, scope
+  violation log format and jq filter patterns, `--audit-log`/`--ops-log` flag usage,
+  tools-not-appearing checklist, and credential sanitization assurance.
+- `examples/audit-log/README.md` — Alloy (Flow/HCL) and Promtail configs with
+  `agent_id`/`event`/`status` label promotion, log directory setup, logrotate
+  (`copytruncate`), LogQL query library, and Grafana dashboard panel table.
+
 ## [0.3.0] — 2026-04-19
 
 ### Added
