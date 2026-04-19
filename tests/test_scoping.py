@@ -12,7 +12,7 @@ import pytest
 
 from scoped_mcp.exceptions import ScopeViolation
 from scoped_mcp.identity import AgentContext
-from scoped_mcp.scoping import NamespaceScope, PrefixScope, SchemaScope
+from scoped_mcp.scoping import NamespaceScope, PrefixScope
 
 # ── PrefixScope ───────────────────────────────────────────────────────────────
 
@@ -103,34 +103,6 @@ def test_prefix_scope_symlink_ancestor_with_nonexistent_tail(
     new_path = str(link / "new_file.txt")
     with pytest.raises(ScopeViolation, match="symlink"):
         scope.enforce(new_path, agent_ctx)
-
-
-# ── SchemaScope ───────────────────────────────────────────────────────────────
-
-
-def test_schema_scope_apply(agent_ctx: AgentContext) -> None:
-    scope = SchemaScope()
-    assert scope.apply("", agent_ctx) == "agent_test-agent-1"
-
-
-def test_schema_scope_enforce_valid(agent_ctx: AgentContext) -> None:
-    scope = SchemaScope()
-    scope.enforce("agent_test-agent-1", agent_ctx)
-
-
-def test_schema_scope_enforce_wrong_agent(
-    agent_ctx: AgentContext, other_agent_ctx: AgentContext
-) -> None:
-    scope = SchemaScope()
-    other_schema = scope.apply("", other_agent_ctx)
-    with pytest.raises(ScopeViolation):
-        scope.enforce(other_schema, agent_ctx)
-
-
-def test_schema_scope_enforce_unscoped(agent_ctx: AgentContext) -> None:
-    scope = SchemaScope()
-    with pytest.raises(ScopeViolation):
-        scope.enforce("public", agent_ctx)
 
 
 # ── NamespaceScope ────────────────────────────────────────────────────────────

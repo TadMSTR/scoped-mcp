@@ -12,6 +12,9 @@ recipients, ntfy topics), validate the argument against that allowlist
 before issuing the backend call. The ``@audited`` decorator applied by the
 registry provides logging; it does NOT enforce scope. See ``AGENTS.md`` for
 the module-author enforcement checklist.
+
+Two built-in strategies are provided: ``PrefixScope`` (file-per-agent path
+enforcement) and ``NamespaceScope`` (key-prefix enforcement for shared stores).
 """
 
 from __future__ import annotations
@@ -56,11 +59,10 @@ class PrefixScope(ScopeStrategy):
     def enforce(self, value: str, agent_ctx: AgentContext) -> None:
         """Raise ScopeViolation if the path escapes the agent's root.
 
-        Resolves symlinks before checking — a symlink pointing outside the
-        root is treated as an escape attempt. For paths that don't yet exist,
-        the resolve-nearest-ancestor fallback is followed by an explicit
-        walk of each existing ancestor component looking for symlinks that
-        escape (defense in depth for audit finding M8).
+        Resolves symlinks before checking — a symlink pointing outside the root
+        is treated as an escape attempt. For non-existent write targets, see
+        ``_check_ancestor_symlinks`` for the defense-in-depth pass against
+        operator-seeded symlinks (audit finding M8).
         """
         agent_root = self._agent_root(agent_ctx)
         target = Path(value)
@@ -120,32 +122,6 @@ class PrefixScope(ScopeStrategy):
                         f"Path '{orig_value}' crosses a symlink at '{current}' that "
                         f"escapes the agent scope for '{agent_ctx.agent_id}'."
                     ) from None
-
-
-class SchemaScope(ScopeStrategy):
-    """Database schema restriction — deprecated, no built-in module uses it.
-
-    The sqlite module originally used SchemaScope + SQLite ATTACH to isolate
-    agents within a single DB file. That pattern did not actually isolate
-    (audit 2026-04-16, finding C1): unqualified table references resolved
-    against the shared ``main`` schema regardless of the attached namespace.
-    The sqlite module now uses a per-agent DB file instead. This class remains
-    as public API for backwards compatibility only — new modules should use
-    PrefixScope (file-per-agent) or NamespaceScope (key-prefix) instead.
-    """
-
-    def apply(self, value: str, agent_ctx: AgentContext) -> str:
-        """Return the schema name for this agent."""
-        return f"agent_{agent_ctx.agent_id}"
-
-    def enforce(self, value: str, agent_ctx: AgentContext) -> None:
-        """Raise ScopeViolation if schema name does not match the agent's schema."""
-        expected = self.apply("", agent_ctx)
-        if value != expected:
-            raise ScopeViolation(
-                f"Schema '{value}' is outside the agent scope for '{agent_ctx.agent_id}'. "
-                f"Expected: {expected}"
-            )
 
 
 class NamespaceScope(ScopeStrategy):

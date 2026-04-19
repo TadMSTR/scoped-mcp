@@ -1,5 +1,6 @@
 # scoped-mcp
 
+[![Built with Claude Code](https://img.shields.io/badge/Built_with-Claude_Code-6B57FF?logo=claude&logoColor=white)](https://claude.ai/code)
 [![CI](https://github.com/TadMSTR/scoped-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/TadMSTR/scoped-mcp/actions/workflows/ci.yml)
 [![PyPI version](https://img.shields.io/pypi/v/scoped-mcp.svg)](https://pypi.org/project/scoped-mcp/)
 [![Python versions](https://img.shields.io/pypi/pyversions/scoped-mcp.svg)](https://pypi.org/project/scoped-mcp/)
