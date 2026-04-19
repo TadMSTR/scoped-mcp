@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- `SchemaScope` — removed at alpha; the sqlite module deprecated it in v0.2.0
+  (audit finding C1) and there is no installed base to protect. New modules
+  should use `PrefixScope` (file-per-agent) or `NamespaceScope` (key-prefix).
+
 ### Added
 
 - `SECURITY.md` — vulnerability disclosure policy covering private reporting channels,
