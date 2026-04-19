@@ -101,7 +101,7 @@ class SqliteModule(ToolModule):
                 if cmd_name in ("PRAGMA", "ATTACH", "DETACH"):
                     raise ScopeViolation(f"{cmd_name} statements are not allowed")
 
-        if read_only and not isinstance(stmt, (exp.Select, exp.With)):
+        if read_only and not isinstance(stmt, exp.Select | exp.With):
             raise ScopeViolation(
                 f"Read-only mode: only SELECT statements are allowed, got {type(stmt).__name__}"
             )
