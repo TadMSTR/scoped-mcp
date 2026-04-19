@@ -1,8 +1,3 @@
----
-tier: showcase
-promoted: null
----
-
 # AGENTS.md — scoped-mcp
 
 A per-agent scoped MCP tool proxy built on FastMCP. One server process per
