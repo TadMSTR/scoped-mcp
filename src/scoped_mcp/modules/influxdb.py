@@ -370,5 +370,3 @@ class InfluxDBModule(ToolModule):
         if not orgs:
             raise ValueError(f"Organization '{self._org}' not found in InfluxDB")
         return orgs[0]["id"]
-
-
