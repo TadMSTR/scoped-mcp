@@ -69,7 +69,7 @@ PrefixScope resolves symlinks before checking, so a symlink pointing outside the
 {db_dir}/agent_{agent_id}.db
 ```
 
-Each agent gets its own SQLite file, so two agents cannot read or write each other's data regardless of SQL shape. The sqlite module also parses SQL with sqlglot to block PRAGMA, ATTACH, DETACH, DROP, and multi-statement batches as defense in depth. (A previous `SchemaScope` strategy targeted this use case but did not actually isolate — see the 2026-04-16 audit, finding C1. The class remains in `scoped_mcp.scoping` for backwards compatibility only.)
+Each agent gets its own SQLite file, so two agents cannot read or write each other's data regardless of SQL shape. The sqlite module also parses SQL with sqlglot to block PRAGMA, ATTACH, DETACH, DROP, and multi-statement batches as defense in depth. (A previous `SchemaScope` strategy targeted this use case but did not actually isolate — see the 2026-04-16 audit, finding C1. The class was removed in the 2026-04-19 cleanup build (no installed base).)
 
 **NamespaceScope** — for key-value stores, message queue topics, time-series buckets.
 

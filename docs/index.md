@@ -17,6 +17,6 @@ pip install scoped-mcp
 ## Documentation
 
 - [Manifest Schema Reference](manifest-schema) — all manifest fields and options
-- [Scoping Strategies](scoping-strategies) — PrefixScope, NamespaceScope, SchemaScope, and custom strategies
+- [Scoping Strategies](scoping-strategies) — PrefixScope, NamespaceScope, and custom strategies
 - [Module Authoring Guide](module-authoring) — write a custom tool module
 - [Threat Model](threat-model) — security boundaries and assumptions

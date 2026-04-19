@@ -79,7 +79,7 @@ For SQLite, each agent gets its own database file.
 
 **When to use:** SQLite and other file-backed embedded databases. For server databases (PostgreSQL, MySQL) use role-per-agent auth — not covered by a built-in strategy yet.
 
-**Deprecated:** `SchemaScope` exists in `scoped_mcp.scoping` for backwards compatibility but is not used by any built-in module. The original sqlite implementation used `SchemaScope` + SQLite `ATTACH DATABASE ':memory:'` to namespace agents, but unqualified table references resolved against the shared `main` schema regardless of the attached name — effectively no isolation. See the 2026-04-16 audit (finding C1) for the full trail.
+**Removed:** `SchemaScope` was deleted in the 2026-04-19 cleanup build. The original sqlite implementation used `SchemaScope` + SQLite `ATTACH DATABASE ':memory:'` to namespace agents, but unqualified table references resolved against the shared `main` schema regardless of the attached name — effectively no isolation. See the 2026-04-16 audit (finding C1) for the full trail.
 
 ## NamespaceScope
 

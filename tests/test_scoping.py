@@ -1,4 +1,4 @@
-"""Tests for scoping.py — PrefixScope, SchemaScope, NamespaceScope.
+"""Tests for scoping.py — PrefixScope, NamespaceScope.
 
 Scoping tests are the most critical tests in this repo. They verify that
 the security boundary holds under normal use AND adversarial inputs.

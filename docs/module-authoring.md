@@ -164,7 +164,7 @@ def test_credential_not_in_config(agent_ctx):
 | Webhook (single-channel) | `None` — one credential = one channel |
 | REST API with allowlist | Custom — validate against declared services |
 
-`SchemaScope` is retained in `scoped_mcp.scoping` for backwards compatibility but is deprecated — no built-in module uses it (see 2026-04-16 audit, finding C1).
+`SchemaScope` was removed in the 2026-04-19 cleanup build — do not reference it. See the 2026-04-16 audit (finding C1) for background.
 
 If none of the built-in strategies fit, implement `ScopeStrategy`:
 

@@ -34,7 +34,7 @@ audit.py           @audited decorator. Wraps every tool call with
 scoping.py         Reusable scope strategies:
                    - PrefixScope: path/key prefix enforcement
                    - NamespaceScope: key-value namespace prefixing
-                   - SchemaScope: deprecated — no built-in module uses it
+                   - SchemaScope: removed (deprecated v0.2.0, deleted 2026-04-19)
                    Module authors pick a strategy or implement ScopeStrategy.
                    The sqlite module does not use a ScopeStrategy — each agent
                    gets its own database file at {db_dir}/agent_{agent_id}.db.
