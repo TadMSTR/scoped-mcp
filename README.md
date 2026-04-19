@@ -400,6 +400,8 @@ pip install "scoped-mcp[sqlite]"
 pip install "scoped-mcp[all]"
 ```
 
+If something isn't working, see [Troubleshooting](docs/troubleshooting.md).
+
 ## License
 
 MIT
