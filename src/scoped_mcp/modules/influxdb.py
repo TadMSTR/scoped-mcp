@@ -77,7 +77,7 @@ def _validate_time(value: str) -> str:
 def _render_filter_value(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
-    if isinstance(value, (int, float)):
+    if isinstance(value, int | float):
         return repr(value)
     if isinstance(value, str):
         return json.dumps(value)

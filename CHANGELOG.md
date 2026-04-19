@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `SECURITY.md` — vulnerability disclosure policy covering private reporting channels,
+  scope definition, and response SLA. Required for showcase-tier compliance.
+- `.pre-commit-config.yaml` — local pre-commit hooks: ruff lint+format,
+  trailing-whitespace, end-of-file-fixer, check-yaml, check-toml.
+
+### Fixed
+
+- `src/scoped_mcp/__init__.py`: `__version__` was `0.1.0`; bumped to `0.2.1` to match
+  `pyproject.toml`. The mismatch was a stale artifact from before 0.2.x releases.
+- `modules/influxdb.py`, `modules/sqlite.py`: two `UP038` ruff violations
+  (isinstance tuple syntax — `(X, Y)` → `X | Y`), surfaced by pre-commit run.
+
 ## [0.2.1] — 2026-04-16
 
 Post-release hygiene. No API or behavior changes to any module; one breaking
