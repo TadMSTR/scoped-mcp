@@ -237,6 +237,32 @@ Notification modules are **write-only by design** — every agent needs to send 
 | `grafana` | Folder-based (`agent-{agent_id}/`) | `list_dashboards`, `get_dashboard`, `query_datasource`, `list_datasources` | `create_dashboard`, `update_dashboard`, `create_alert_rule`, `delete_dashboard` |
 | `influxdb` | Bucket allowlist + `NamespaceScope` | `query`, `list_measurements`, `get_schema` | `write_points`, `create_bucket`, `delete_points` |
 
+### Credentials
+
+Every module declares its required and optional environment variables. scoped-mcp
+fails at startup with a clear error listing any missing required keys — it will not
+start partially configured.
+
+| Module | Required env vars | Optional env vars |
+|--------|------------------|-------------------|
+| `filesystem` | — | — |
+| `sqlite` | — | — |
+| `ntfy` | `NTFY_URL` | `NTFY_TOKEN` |
+| `smtp` | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` | — |
+| `matrix` | `MATRIX_HOMESERVER`, `MATRIX_ACCESS_TOKEN` | — |
+| `slack_webhook` | `SLACK_WEBHOOK_URL` | — |
+| `discord_webhook` | `DISCORD_WEBHOOK_URL` | — |
+| `http_proxy` | — (dynamic; see module config) | — |
+| `grafana` | `GRAFANA_URL`, `GRAFANA_SERVICE_ACCOUNT_TOKEN` | — |
+| `influxdb` | `INFLUXDB_URL`, `INFLUXDB_TOKEN` | `INFLUXDB_ORG` (overrides `config.org`) |
+
+Credentials are passed in `settings.json` under `env` (for Claude Code) or exported
+in the shell before running `scoped-mcp`. They are loaded once at startup, injected
+into module contexts, and never returned in tool responses or logged.
+
+For integration with a secrets manager such as Vaultwarden, see
+`examples/vaultwarden/`.
+
 ---
 
 ## Three-Module Workflow
