@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-04-19
+
+### Added
+
+- `SECURITY.md` — vulnerability disclosure policy covering private reporting channels,
+  scope definition, and response SLA. Required for showcase-tier compliance.
+- `.pre-commit-config.yaml` — local pre-commit hooks: ruff lint+format,
+  trailing-whitespace, end-of-file-fixer, check-yaml, check-toml.
+- `modules/_influxdb_validators.py` — private helper module extracted from `influxdb.py`
+  (8 functions + 6 constants). No behavior change; `influxdb.py` imports from it.
+- CI: `create-github-release` job added to `release.yml`. On each version tag, attaches
+  the wheel and sdist to a GitHub Release and auto-generates release notes from commits.
+  Requires no secrets (uses built-in `github.token`).
+- Claude Code badge added to README header.
+
 ### Changed
 
 - `PrefixScope.enforce` docstring tightened — removes redundant re-explanation of the
@@ -17,22 +32,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SchemaScope` — removed at alpha; the sqlite module deprecated it in v0.2.0
   (audit finding C1) and there is no installed base to protect. New modules
   should use `PrefixScope` (file-per-agent) or `NamespaceScope` (key-prefix).
-
-### Added
-
-- `modules/_influxdb_validators.py` — private helper module extracted from `influxdb.py`
-  (8 functions + 6 constants). No behavior change; `influxdb.py` imports from it.
-- CI: `create-github-release` job added to `release.yml`. On each version tag, attaches
-  the wheel and sdist to a GitHub Release and auto-generates release notes from commits.
-  Requires no secrets (uses built-in `github.token`).
-- Claude Code badge added to README header.
-
-### Added (previous)
-
-- `SECURITY.md` — vulnerability disclosure policy covering private reporting channels,
-  scope definition, and response SLA. Required for showcase-tier compliance.
-- `.pre-commit-config.yaml` — local pre-commit hooks: ruff lint+format,
-  trailing-whitespace, end-of-file-fixer, check-yaml, check-toml.
 
 ### Fixed
 
