@@ -181,3 +181,6 @@ docker logs research-01 2>&1 | grep '"logger":"audit"'
 ```
 
 For Loki, configure Alloy or Promtail to scrape the stdout streams and add `agent_id` as a label.
+
+For a complete Loki integration with Grafana dashboards, see
+`examples/audit-log/`.
