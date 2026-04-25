@@ -190,14 +190,20 @@ def audited(tool_name: str) -> Callable:
     """
 
     def decorator(fn: Callable) -> Callable:
+        # Capture agent_ctx at decoration time from the bound method's __self__.
+        # get_tool_methods() returns bound methods, so __self__ is the module instance.
+        # Falling back to args[0] at call time handles the unbound case in tests.
+        _bound_self = getattr(fn, "__self__", None)
+        _agent_ctx_from_binding = getattr(_bound_self, "agent_ctx", None)
+
         @functools.wraps(fn)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
             logger = get_audit_logger()
             start = time.monotonic()
 
-            # Extract agent_ctx from the bound method's self (first positional arg).
-            # Module tool methods are always bound, so args[0] is the module instance.
-            agent_ctx = getattr(args[0], "agent_ctx", None) if args else None
+            agent_ctx = _agent_ctx_from_binding or (
+                getattr(args[0], "agent_ctx", None) if args else None
+            )
             agent_id = agent_ctx.agent_id if agent_ctx else "unknown"
 
             log_kwargs: dict[str, Any] = {
