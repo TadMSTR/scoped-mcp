@@ -18,7 +18,9 @@ by module code. Credential values are redacted; large payloads are truncated.
 from __future__ import annotations
 
 import functools
+import logging
 import re
+import sys
 import time
 from collections.abc import Callable
 from typing import Any
@@ -129,6 +131,8 @@ def configure_logging(audit_log: str | None = None, ops_log: str | None = None) 
         audit_log: optional file path for audit stream output.
         ops_log:   optional file path for ops stream output.
     """
+    # Route through stdlib so file handlers can be attached per named logger.
+    # JSONRenderer already serialises the event; %(message)s preserves it as-is.
     structlog.configure(
         processors=[
             structlog.stdlib.add_log_level,
@@ -139,14 +143,28 @@ def configure_logging(audit_log: str | None = None, ops_log: str | None = None) 
         ],
         wrapper_class=structlog.stdlib.BoundLogger,
         context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(),
+        logger_factory=structlog.stdlib.LoggerFactory(),
     )
 
-    # File sinks — structlog writes to stdout by default; file sinks are additive.
-    # In v0.1 we write both streams to stdout and rely on the operator to configure
-    # log forwarding (Alloy → Loki). File paths are accepted and stored for future use.
-    # TODO(post-v0.1): wire file sinks when structlog async file handler is stable.
-    _ = audit_log, ops_log
+    _json_fmt = logging.Formatter("%(message)s")
+
+    # All log output goes to stderr — stdout is the stdio JSON-RPC wire.
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setFormatter(_json_fmt)
+    root.addHandler(stderr_handler)
+
+    # Optional file sinks: named loggers propagate to root (stderr) AND write to file.
+    if audit_log:
+        fh = logging.FileHandler(audit_log)
+        fh.setFormatter(_json_fmt)
+        logging.getLogger("audit").addHandler(fh)
+
+    if ops_log:
+        fh = logging.FileHandler(ops_log)
+        fh.setFormatter(_json_fmt)
+        logging.getLogger("ops").addHandler(fh)
 
 
 def get_audit_logger() -> structlog.stdlib.BoundLogger:

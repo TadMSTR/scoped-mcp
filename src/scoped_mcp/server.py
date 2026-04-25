@@ -30,13 +30,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--audit-log",
         default=None,
         metavar="PATH",
-        help="Optional file path for audit log output (stdout always enabled).",
+        help="Optional file path for audit log output (stderr always enabled).",
     )
     parser.add_argument(
         "--ops-log",
         default=None,
         metavar="PATH",
-        help="Optional file path for ops log output (stdout always enabled).",
+        help="Optional file path for ops log output (stderr always enabled).",
     )
     return parser.parse_args(argv)
 
@@ -48,7 +48,12 @@ def main(argv: list[str] | None = None) -> None:
     ops = get_ops_logger()
 
     try:
-        ops.info("startup", manifest=args.manifest)
+        ops.info(
+            "startup",
+            manifest=args.manifest,
+            audit_log=args.audit_log,
+            ops_log=args.ops_log,
+        )
 
         agent_ctx = AgentContext.from_env()
         ops.info("identity_resolved", agent_id=agent_ctx.agent_id, agent_type=agent_ctx.agent_type)
