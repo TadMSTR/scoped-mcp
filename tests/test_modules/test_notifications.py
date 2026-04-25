@@ -1,7 +1,7 @@
 """Tests for notification modules — credential isolation, recipient/room validation.
 
-All HTTP calls use respx (httpx mock backend). No real SMTP/Matrix/ntfy/Slack/Discord
-connections are made during tests.
+All HTTP calls use respx (httpx mock backend). No real SMTP/ntfy/Slack/Discord
+connections are made during tests. Matrix tests live in test_matrix.py.
 """
 
 from __future__ import annotations
@@ -10,10 +10,8 @@ import pytest
 import respx
 from httpx import Response
 
-from scoped_mcp.exceptions import ScopeViolation
 from scoped_mcp.identity import AgentContext
 from scoped_mcp.modules.discord_webhook import DiscordWebhookModule
-from scoped_mcp.modules.matrix import MatrixModule
 from scoped_mcp.modules.ntfy import NtfyModule
 from scoped_mcp.modules.slack_webhook import SlackWebhookModule
 
@@ -103,49 +101,6 @@ async def test_ntfy_no_auth_header_when_token_absent(ntfy_module: NtfyModule) ->
     route = respx.post("http://ntfy.test/test-topic").mock(return_value=Response(200))
     await ntfy_module.send(title="x", message="y")
     assert route.calls[0].request.headers.get("Authorization") is None
-
-
-# ── MatrixModule ──────────────────────────────────────────────────────────────
-
-
-@pytest.fixture
-def matrix_module(agent_ctx: AgentContext) -> MatrixModule:
-    return MatrixModule(
-        agent_ctx=agent_ctx,
-        credentials={
-            "MATRIX_HOMESERVER": "http://matrix.test",
-            "MATRIX_ACCESS_TOKEN": "EXAMPLE_TOKEN",
-        },
-        config={"allowed_rooms": ["!room1:matrix.test"]},
-    )
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_matrix_send_success(matrix_module: MatrixModule) -> None:
-    respx.put(url__regex=r"http://matrix\.test/_matrix/client/v3/rooms/.+/send/.+").mock(
-        return_value=Response(200, json={"event_id": "$abc"})
-    )
-    result = await matrix_module.send(room="!room1:matrix.test", message="hello")
-    assert result is True
-
-
-@pytest.mark.asyncio
-async def test_matrix_blocked_room(matrix_module: MatrixModule) -> None:
-    with pytest.raises(ScopeViolation):
-        await matrix_module.send(room="!evil:attacker.com", message="inject")
-
-
-def test_matrix_no_allowed_rooms_raises(agent_ctx: AgentContext) -> None:
-    with pytest.raises(ValueError, match="allowed_rooms"):
-        MatrixModule(
-            agent_ctx=agent_ctx,
-            credentials={
-                "MATRIX_HOMESERVER": "http://matrix.test",
-                "MATRIX_ACCESS_TOKEN": "EXAMPLE_TOKEN",
-            },
-            config={},
-        )
 
 
 # ── SlackWebhookModule ────────────────────────────────────────────────────────
