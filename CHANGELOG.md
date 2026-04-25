@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-04-25
+
+### Fixed
+
+- **Audit log corrupting stdio MCP stream:** `configure_logging()` was using
+  `structlog.PrintLoggerFactory()` which defaults to stdout. Since scoped-mcp
+  runs as a stdio MCP server, stdout is the JSON-RPC wire — any log line
+  written there would corrupt the protocol. Fixed by switching to
+  `structlog.stdlib.LoggerFactory()` with a `StreamHandler(sys.stderr)` on
+  the root logger. All log output now goes to stderr.
+- **`--audit-log` / `--ops-log` flags silently ignored:** `configure_logging()`
+  accepted path arguments but discarded them (`_ = audit_log, ops_log`). File
+  sinks are now wired via stdlib `FileHandler`s attached to the named `audit`
+  and `ops` loggers. When a path is provided, output goes to both stderr (via
+  root propagation) and the specified file. The `startup` ops event now
+  includes the active `audit_log` and `ops_log` paths.
+
+### Changed
+
+- **`--audit-log` / `--ops-log` help text** corrected from "stdout always
+  enabled" to "stderr always enabled".
+
+### Tests
+
+- Extracted `MatrixModule` tests from `test_notifications.py` into a dedicated
+  `tests/test_modules/test_matrix.py`, consistent with the per-module pattern
+  used by `test_influxdb.py`, `test_grafana.py`, etc. Matrix is bidirectional
+  (send + receive via matrix-channel) and conceptually distinct from one-way
+  notification webhooks.
+
 ## [0.3.1] — 2026-04-19
 
 ### Added
