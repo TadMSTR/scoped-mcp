@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-04-25
+
+### Fixed
+
+- **`agent_id` logged as `"unknown"` in audit events:** The `@audited` decorator
+  was resolving `agent_ctx` from `args[0]` at call time, assuming the first
+  positional argument was the module instance (`self`). When the registry wraps
+  bound tool methods, `args[0]` is actually the first tool argument (e.g. the
+  `room` string for `matrix.send`), so `agent_id` always fell back to
+  `"unknown"`. Fixed by capturing `agent_ctx` from `fn.__self__` at decoration
+  time; falls back to `args[0]` for the unbound case used in tests.
+
 ## [0.3.2] — 2026-04-25
 
 ### Fixed
