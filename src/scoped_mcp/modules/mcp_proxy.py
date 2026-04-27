@@ -20,6 +20,11 @@ Config:
         Empty list or absent = all tools exposed.
     tool_denylist (list[str]): Tools in this list are never exposed.
         Applied after allowlist filtering.
+    discovery_timeout_seconds (float): Timeout for the initial tools/list
+        call at startup. Default: 10.0.
+
+Note: the manifest mode: field has no effect for mcp_proxy — use
+tool_allowlist/tool_denylist for access control instead.
 
 Required credentials: none (upstream credentials stay in the upstream service)
 """
@@ -56,9 +61,12 @@ class McpProxyModule(ToolModule):
         denylist = config.get("tool_denylist", [])
         self._tool_allowlist: set[str] = set(allowlist) if allowlist else set()
         self._tool_denylist: set[str] = set(denylist)
+        self._discovery_timeout: float = float(config.get("discovery_timeout_seconds", 10.0))
 
         # Discover tools synchronously at init time (before event loop starts).
-        self._proxy_methods: list[Any] = asyncio.run(self._discover_tools())
+        self._proxy_methods: list[Any] = asyncio.run(
+            asyncio.wait_for(self._discover_tools(), timeout=self._discovery_timeout)
+        )
 
     def _transport(self) -> str | dict:
         """Return a fastmcp.Client-compatible transport spec."""
@@ -72,13 +80,24 @@ class McpProxyModule(ToolModule):
             upstream_tools = await client.list_tools()
 
         methods = []
-        for tool in upstream_tools:
-            tool_name: str = tool.name
+        seen_safe: set[str] = set()
+        for upstream_tool in upstream_tools:
+            tool_name: str = upstream_tool.name
 
             if self._tool_allowlist and tool_name not in self._tool_allowlist:
                 continue
             if tool_name in self._tool_denylist:
                 continue
+
+            safe = re.sub(r"[^a-zA-Z0-9_]", "_", tool_name)
+            if safe and safe[0].isdigit():
+                safe = f"tool_{safe}"
+            if safe in seen_safe:
+                raise ValueError(
+                    f"mcp_proxy: upstream tool '{tool_name}' normalizes to '{safe}', "
+                    f"which collides with an earlier tool — use tool_allowlist to exclude one"
+                )
+            seen_safe.add(safe)
 
             method = self._make_proxy_method(tool_name)
             methods.append(method)

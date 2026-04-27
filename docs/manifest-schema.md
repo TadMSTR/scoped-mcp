@@ -52,6 +52,11 @@ modules:
 | `args` | list[str] | `[]` | Arguments passed to `command` |
 | `tool_allowlist` | list[str] | `[]` | If non-empty, only these upstream tools are exposed |
 | `tool_denylist` | list[str] | `[]` | These upstream tools are always hidden (applied after allowlist) |
+| `discovery_timeout_seconds` | float | `10.0` | Timeout for connecting to the upstream server at startup |
+
+> **Note:** The `mode:` field has no effect for `mcp_proxy`. Use `tool_allowlist` or
+> `tool_denylist` to restrict which upstream tools are exposed. If no filter is set, all
+> upstream tools are registered regardless of the `mode:` value.
 
 ## Credential source config
 

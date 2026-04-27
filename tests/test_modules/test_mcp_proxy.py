@@ -212,3 +212,58 @@ def test_tool_name_sanitization(agent_ctx):
         )
 
     assert {m.__name__ for m in mod.get_tool_methods(mode=None)} == expected
+
+
+def test_colliding_sanitized_names_raises(agent_ctx):
+    """Two upstream tool names that normalize to the same identifier raise ValueError."""
+    # "log-event" and "log_event" both normalize to "log_event"
+    tool_names = ["log-event", "log_event"]
+    with patch("scoped_mcp.modules.mcp_proxy.Client") as MockClient:
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_cm.list_tools = AsyncMock(return_value=[_make_tool(t) for t in tool_names])
+        MockClient.return_value = mock_cm
+
+        with pytest.raises(ValueError, match="collides with an earlier tool"):
+            McpProxyModule(
+                agent_ctx=agent_ctx,
+                credentials={},
+                config={"url": "http://127.0.0.1:8485/mcp"},
+            )
+
+
+def test_discovery_timeout_config(agent_ctx):
+    """discovery_timeout_seconds is read from config and stored."""
+    with patch("scoped_mcp.modules.mcp_proxy.Client") as MockClient:
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_cm.list_tools = AsyncMock(return_value=[])
+        MockClient.return_value = mock_cm
+
+        mod = McpProxyModule(
+            agent_ctx=agent_ctx,
+            credentials={},
+            config={"url": "http://127.0.0.1:8485/mcp", "discovery_timeout_seconds": 30.0},
+        )
+
+    assert mod._discovery_timeout == 30.0
+
+
+def test_discovery_timeout_default(agent_ctx):
+    """discovery_timeout_seconds defaults to 10.0 when not set."""
+    with patch("scoped_mcp.modules.mcp_proxy.Client") as MockClient:
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_cm.list_tools = AsyncMock(return_value=[])
+        MockClient.return_value = mock_cm
+
+        mod = McpProxyModule(
+            agent_ctx=agent_ctx,
+            credentials={},
+            config={"url": "http://127.0.0.1:8485/mcp"},
+        )
+
+    assert mod._discovery_timeout == 10.0
