@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "scoped-mcp"
-version = "0.6.0"
+version = "0.7.0"
 description = "Per-agent scoped MCP tool proxy with credential isolation and audit logging"
 readme = "README.md"
 license = "MIT"
@@ -44,8 +44,10 @@ otel = [
     "opentelemetry-sdk>=1.20",
     "opentelemetry-exporter-otlp-proto-grpc>=1.20",
 ]
+dragonfly = ["redis>=5.0,<6"]  # enables DragonflyBackend (rate limiting + HITL shared state)
+vault = ["hvac>=2.0,<3"]       # enables Vault credential source (v0.8)
 all = ["httpx", "aiosmtplib", "aiosqlite"]
-dev = ["pytest", "pytest-asyncio", "pytest-cov", "ruff"]
+dev = ["pytest", "pytest-asyncio", "pytest-cov", "ruff", "redis>=5.0,<6"]
 
 [project.scripts]
 scoped-mcp = "scoped_mcp.server:main"
