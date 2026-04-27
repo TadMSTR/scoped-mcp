@@ -129,6 +129,80 @@ class RateLimitsConfig(BaseModel):
         return v
 
 
+_NTFY_TOPIC_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# Matrix room id (!localpart:server) or alias (#alias:server).
+_MATRIX_ROOM_RE = re.compile(r"^[!#][A-Za-z0-9._=/+-]+:[A-Za-z0-9.-]+$")
+
+
+class NotifyConfig(BaseModel):
+    """Notification channel for HITL approval requests."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["ntfy", "matrix", "webhook", "log"] = "log"
+    # ntfy: server url + topic (server may default to https://ntfy.sh)
+    url: str | None = None
+    topic: str | None = None
+    # matrix: room id (homeserver + access token come from credentials)
+    room: str | None = None
+
+    @field_validator("topic")
+    @classmethod
+    def _validate_topic(cls, v: str | None) -> str | None:
+        if v is not None and not _NTFY_TOPIC_RE.match(v):
+            raise ValueError(f"hitl.notify.topic must match ^[A-Za-z0-9_-]{{1,64}}$, got {v!r}")
+        return v
+
+    @field_validator("room")
+    @classmethod
+    def _validate_room(cls, v: str | None) -> str | None:
+        if v is not None and not _MATRIX_ROOM_RE.match(v):
+            raise ValueError(
+                f"hitl.notify.room must be a Matrix room id (!… or #…) "
+                f"of the form '!local:server' or '#alias:server', got {v!r}"
+            )
+        return v
+
+    @field_validator("url")
+    @classmethod
+    def _validate_url(cls, v: str | None) -> str | None:
+        if v is not None and not (v.startswith("http://") or v.startswith("https://")):
+            raise ValueError(f"hitl.notify.url must start with 'http://' or 'https://', got {v!r}")
+        return v
+
+    @model_validator(mode="after")
+    def _check_required_fields(self) -> NotifyConfig:
+        if self.type == "ntfy" and not self.topic:
+            raise ValueError("hitl.notify.topic is required when type is 'ntfy'")
+        if self.type == "webhook" and not self.url:
+            raise ValueError("hitl.notify.url is required when type is 'webhook'")
+        if self.type == "matrix" and not self.room:
+            raise ValueError("hitl.notify.room is required when type is 'matrix'")
+        return self
+
+
+class HitlConfig(BaseModel):
+    """Human-in-the-loop approval config (v1.0)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Glob patterns for tools that require explicit operator approval before execution
+    approval_required: list[str] = []
+    # Glob patterns for tools that should be logged-only (synthetic empty-success response,
+    # never forwarded). Useful for observing what an agent would do before enabling a tool.
+    shadow: list[str] = []
+    # Auto-reject after this many seconds with no decision
+    timeout_seconds: int = 300
+    notify: NotifyConfig = NotifyConfig()
+
+    @field_validator("timeout_seconds")
+    @classmethod
+    def _timeout_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError(f"hitl.timeout_seconds must be positive, got {v}")
+        return v
+
+
 class ArgumentFilterRule(BaseModel):
     """A single argument-content filter rule from the manifest."""
 
@@ -191,6 +265,7 @@ class Manifest(BaseModel):
     state_backend: StateBackendConfig = StateBackendConfig()
     rate_limits: RateLimitsConfig | None = None
     argument_filters: list[ArgumentFilterRule] | None = None
+    hitl: HitlConfig | None = None
 
     @field_validator("agent_type")
     @classmethod
@@ -205,6 +280,23 @@ class Manifest(BaseModel):
         if not v:
             raise ValueError("manifest must declare at least one module")
         return v
+
+    @model_validator(mode="after")
+    def _validate_hitl_requires_dragonfly(self) -> Manifest:
+        # HITL relies on cross-process pub/sub for the operator CLI to approve a
+        # call held in the server process — the in-process backend cannot bridge
+        # processes. Fail at manifest load, not at first approval attempt.
+        if (
+            self.hitl is not None
+            and (self.hitl.approval_required or self.hitl.shadow)
+            and self.state_backend.type != "dragonfly"
+        ):
+            raise ValueError(
+                "hitl requires state_backend.type: dragonfly — the in-process backend "
+                "cannot share approval state with the operator CLI. Configure "
+                "state_backend.type: dragonfly with a url, then re-load."
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_module_configs(self) -> Manifest:

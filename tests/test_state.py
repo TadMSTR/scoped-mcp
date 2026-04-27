@@ -153,17 +153,38 @@ async def test_inprocess_pubsub() -> None:
     b = InProcessBackend()
     received: list[str] = []
 
+    # subscribe() is a coroutine: registration happens synchronously when
+    # awaited, so the publish below cannot beat us to the channel.
+    sub = await b.subscribe("chan")
+
     async def subscriber() -> None:
-        async for msg in b.subscribe("chan"):
+        async for msg in sub:
             received.append(msg)
             break
 
     task = asyncio.create_task(subscriber())
-    await asyncio.sleep(0)  # let subscriber register
     await b.publish("chan", "hello")
     await task
 
     assert received == ["hello"]
+
+
+@pytest.mark.asyncio
+async def test_inprocess_pubsub_publish_before_iteration_is_received() -> None:
+    """Audit v1.0 M1 regression: a publish that lands AFTER subscribe()
+    awaits but BEFORE the iteration starts must still be delivered. The
+    old async-generator design lost messages here."""
+    b = InProcessBackend()
+
+    sub = await b.subscribe("chan")
+    # Publish BEFORE any iteration begins — the queue must already be
+    # registered behind the subscription.
+    await b.publish("chan", "race-test")
+
+    # Now iterate: the message must be waiting in the queue.
+    async for msg in sub:
+        assert msg == "race-test"
+        break
 
 
 # ---------------------------------------------------------------------------

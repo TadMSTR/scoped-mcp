@@ -42,7 +42,23 @@ class StateBackend(Protocol):
 
     async def publish(self, channel: str, message: str) -> None: ...
 
-    async def subscribe(self, channel: str) -> AsyncIterator[str]: ...
+    async def subscribe(self, channel: str) -> AsyncIterator[str]:
+        """Subscribe to a pub/sub channel and return an async iterator of messages.
+
+        IMPORTANT: This is a coroutine, not an async generator. The
+        registration / network handshake happens synchronously when the
+        coroutine is awaited; iteration only consumes messages from the
+        already-registered subscription. Callers must use::
+
+            sub = await state.subscribe("channel")
+            async for msg in sub:
+                ...
+
+        This shape was chosen deliberately to avoid the publish-before-
+        subscribe race that an async-generator design suffers — see audit
+        v1.0 M1 for the original bug.
+        """
+        ...
 
 
 class _SlidingWindow:
@@ -113,16 +129,21 @@ class InProcessBackend:
             await q.put(message)
 
     async def subscribe(self, channel: str) -> AsyncIterator[str]:
+        """Register the subscription synchronously, then return an iterator."""
         q: asyncio.Queue[str] = asyncio.Queue()
         async with self._lock:
             self._pubsub.setdefault(channel, []).append(q)
-        try:
-            while True:
-                yield await q.get()
-        finally:
-            async with self._lock:
-                with contextlib.suppress(KeyError, ValueError):
-                    self._pubsub[channel].remove(q)
+
+        async def _iter() -> AsyncIterator[str]:
+            try:
+                while True:
+                    yield await q.get()
+            finally:
+                async with self._lock:
+                    with contextlib.suppress(KeyError, ValueError):
+                        self._pubsub[channel].remove(q)
+
+        return _iter()
 
 
 def build_state_backend(
