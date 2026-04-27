@@ -375,6 +375,30 @@ audit logging. To back that up:
   includes a step-by-step verification walkthrough — you can confirm filesystem
   isolation and credential non-exposure yourself in under five minutes.
 
+### Optional guardrails (v0.7 → v1.0)
+
+The v0.7 → v1.0 hardening roadmap added four opt-in middleware layers that
+sit on top of the core tool/scope/credential/audit guarantees. All are off
+by default; enable per-agent in the manifest:
+
+- **Rate limiting** (`rate_limits:`, v0.7) — sliding-window per-agent and
+  per-tool limits with glob patterns. Backed by `InProcessBackend` (default)
+  or `DragonflyBackend` (`[dragonfly]` extra) for cross-process state.
+- **Vault-backed credentials** (`credentials.source: vault`, v0.8) — fetch
+  credentials from HashiCorp Vault via AppRole; client token auto-renewed in
+  the background. See `examples/vault/`.
+- **mcp_proxy schema validation + argument filtering** (`argument_filters:`,
+  v0.9) — proxied calls are validated against the upstream tool's
+  `inputSchema` before forwarding; pattern-based argument filters can block
+  or alert on values, with optional base64/url decoding. See
+  `docs/threat-model.md` for the documented limits.
+- **Human-in-the-loop approval** (`hitl:`, v1.0) — operator-gated tool
+  calls. Glob patterns select tools that require explicit approval, or
+  shadow-mode tools that log a sanitised summary and return a synthetic
+  empty-success without forwarding upstream. Approve/reject via
+  `scoped-mcp hitl approve|reject <id>`. Requires `state_backend.type:
+  dragonfly` (cross-process pub/sub).
+
 ---
 
 ## Non-Goals
