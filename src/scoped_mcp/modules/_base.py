@@ -81,6 +81,14 @@ class ToolModule(ABC):
         self.credentials = credentials
         self.config = config
 
+    async def startup(self) -> None:  # noqa: B027
+        """Called once after the server event loop starts. Override to open
+        persistent resources (connections, subprocesses, pools)."""
+
+    async def shutdown(self) -> None:  # noqa: B027
+        """Called once on graceful server stop. Override to release resources
+        opened in startup()."""
+
     def get_tool_methods(self, mode: Literal["read", "write"] | None) -> list[Any]:
         """Return tool methods matching the requested mode.
 
