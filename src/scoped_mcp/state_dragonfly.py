@@ -93,15 +93,23 @@ class DragonflyBackend:
         await self._client.publish(self._key(channel), message)
 
     async def subscribe(self, channel: str) -> AsyncIterator[str]:
+        """Subscribe to the channel synchronously, then return an iterator."""
         pubsub = self._client.pubsub()
+        # Network handshake happens here, BEFORE the caller can publish anything
+        # — fixes audit v1.0 M1 where a fast operator decision could land on a
+        # not-yet-subscribed channel.
         await pubsub.subscribe(self._key(channel))
-        try:
-            async for msg in pubsub.listen():
-                if msg["type"] == "message":
-                    yield msg["data"]
-        finally:
-            await pubsub.unsubscribe(self._key(channel))
-            await pubsub.aclose()
+
+        async def _iter() -> AsyncIterator[str]:
+            try:
+                async for msg in pubsub.listen():
+                    if msg["type"] == "message":
+                        yield msg["data"]
+            finally:
+                await pubsub.unsubscribe(self._key(channel))
+                await pubsub.aclose()
+
+        return _iter()
 
     async def close(self) -> None:
         await self._client.aclose()

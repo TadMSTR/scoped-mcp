@@ -152,8 +152,11 @@ class HitlMiddleware:
         )
 
         # Subscribe BEFORE writing the key, so a fast operator decision cannot
-        # arrive between the publish and our subscribe call.
-        sub = self._state.subscribe(approval_key)
+        # arrive between the publish and our subscribe call. ``subscribe`` is a
+        # coroutine: registration / network handshake completes synchronously
+        # when this awaits, BEFORE we set the state key or notify the operator
+        # (audit v1.0 M1 fix).
+        sub = await self._state.subscribe(approval_key)
 
         try:
             await self._state.set_with_ttl(approval_key, payload, self._timeout)
@@ -163,9 +166,11 @@ class HitlMiddleware:
                 approval_id=approval_id,
                 error=type(e).__name__,
             )
-            raise HitlRejectedError(
-                f"approval rejected: state backend unavailable ({type(e).__name__})"
-            ) from e
+            # Don't chain via ``from e`` — the underlying exception type is an
+            # operational fingerprint we should not surface to the agent
+            # (audit v1.0 L2). The structured log above keeps the detail for
+            # operator triage.
+            raise HitlRejectedError("approval rejected: state backend unavailable") from None
 
         _log.warning(
             "hitl_approval_pending",
@@ -176,16 +181,26 @@ class HitlMiddleware:
             timeout_seconds=self._timeout,
         )
 
-        # Notify the operator. Notifier failures are logged inside the notifier
-        # and do not interrupt the approval loop.
-        await self._notifier.notify(
-            approval_id=approval_id,
-            tool_name=tool_name,
-            agent_id=self._agent_id,
-            agent_type=self._agent_type,
-            arguments_summary=summary,
-            timeout_seconds=self._timeout,
-        )
+        # Notify the operator. A buggy or third-party notifier that raises must
+        # not propagate out of the middleware: it would orphan the approval key
+        # and surface a non-HitlRejectedError stack to the agent. Log and
+        # continue waiting for an operator decision via other channels (audit
+        # v1.0 L1).
+        try:
+            await self._notifier.notify(
+                approval_id=approval_id,
+                tool_name=tool_name,
+                agent_id=self._agent_id,
+                agent_type=self._agent_type,
+                arguments_summary=summary,
+                timeout_seconds=self._timeout,
+            )
+        except Exception as e:
+            _log.error(
+                "hitl_notifier_failed",
+                approval_id=approval_id,
+                error=type(e).__name__,
+            )
 
         decision = await self._wait_for_decision(approval_id, sub)
 

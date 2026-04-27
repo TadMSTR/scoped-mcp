@@ -129,6 +129,11 @@ class RateLimitsConfig(BaseModel):
         return v
 
 
+_NTFY_TOPIC_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# Matrix room id (!localpart:server) or alias (#alias:server).
+_MATRIX_ROOM_RE = re.compile(r"^[!#][A-Za-z0-9._=/+-]+:[A-Za-z0-9.-]+$")
+
+
 class NotifyConfig(BaseModel):
     """Notification channel for HITL approval requests."""
 
@@ -140,6 +145,30 @@ class NotifyConfig(BaseModel):
     topic: str | None = None
     # matrix: room id (homeserver + access token come from credentials)
     room: str | None = None
+
+    @field_validator("topic")
+    @classmethod
+    def _validate_topic(cls, v: str | None) -> str | None:
+        if v is not None and not _NTFY_TOPIC_RE.match(v):
+            raise ValueError(f"hitl.notify.topic must match ^[A-Za-z0-9_-]{{1,64}}$, got {v!r}")
+        return v
+
+    @field_validator("room")
+    @classmethod
+    def _validate_room(cls, v: str | None) -> str | None:
+        if v is not None and not _MATRIX_ROOM_RE.match(v):
+            raise ValueError(
+                f"hitl.notify.room must be a Matrix room id (!… or #…) "
+                f"of the form '!local:server' or '#alias:server', got {v!r}"
+            )
+        return v
+
+    @field_validator("url")
+    @classmethod
+    def _validate_url(cls, v: str | None) -> str | None:
+        if v is not None and not (v.startswith("http://") or v.startswith("https://")):
+            raise ValueError(f"hitl.notify.url must start with 'http://' or 'https://', got {v!r}")
+        return v
 
     @model_validator(mode="after")
     def _check_required_fields(self) -> NotifyConfig:

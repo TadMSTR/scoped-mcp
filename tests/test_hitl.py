@@ -318,13 +318,10 @@ async def test_state_payload_does_not_contain_raw_sensitive_values() -> None:
 
 
 @pytest.mark.asyncio
-async def test_notifier_exception_does_not_crash_middleware() -> None:
-    """If the notifier raises (despite the contract that it should not), the
-    middleware should still continue to wait for the operator decision —
-    operator might have other channels to learn about the request.
-
-    Today the contract is 'notifiers don't raise', but defense in depth: a
-    bug in a future notifier mustn't take the proxy down."""
+async def test_notifier_exception_swallowed_and_middleware_continues() -> None:
+    """Audit v1.0 L1 regression: a buggy notifier must NOT propagate out of
+    the middleware. The error is logged and the approval loop continues; the
+    call eventually times out → HitlRejectedError, never RuntimeError."""
     state = InProcessBackend()
 
     class BrokenNotifier:
@@ -340,15 +337,93 @@ async def test_notifier_exception_does_not_crash_middleware() -> None:
         timeout_seconds=1,
         notifier=BrokenNotifier(),
     )
-    # Notifier raises → middleware currently propagates. Verify behavior.
-    # (If the design changes to swallow notifier errors, update this test.)
-    with pytest.raises(RuntimeError, match="notifier exploded"):
+    upstream = AsyncMock()
+    with pytest.raises(HitlRejectedError):
         await mw(
+            agent_ctx=None,
+            tool_name="x",
+            kwargs={},
+            call_next=upstream,
+        )
+    upstream.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_notifier_exception_does_not_block_approve_decision() -> None:
+    """L1 follow-up: even when the notifier raises, an operator decision
+    arriving via another channel still drives the call to its conclusion."""
+    state = InProcessBackend()
+    captured_id: dict[str, str] = {}
+
+    class BrokenNotifier:
+        async def notify(self, approval_id: str, **kwargs: Any) -> None:
+            captured_id["id"] = approval_id
+            raise RuntimeError("transport down")
+
+    mw = HitlMiddleware(
+        state=state,
+        agent_id="a1",
+        agent_type="r",
+        approval_required=["*"],
+        shadow=[],
+        timeout_seconds=2,
+        notifier=BrokenNotifier(),
+    )
+
+    async def publisher() -> None:
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if "id" in captured_id:
+                await state.publish(f"hitl:{captured_id['id']}", "approve")
+                return
+
+    publisher_task = asyncio.create_task(publisher())
+    try:
+        result = await mw(
             agent_ctx=None,
             tool_name="x",
             kwargs={},
             call_next=_passthrough,
         )
+    finally:
+        await publisher_task
+    assert result == "EXECUTED"
+
+
+# ── M1 regression: fast operator approval during notify() is not lost ────────
+
+
+@pytest.mark.asyncio
+async def test_fast_operator_approval_during_notify_is_received() -> None:
+    """Audit v1.0 M1 regression: a notifier that publishes the approval
+    INSIDE its notify() call (a fast operator who decides instantaneously)
+    must not lose the message. The middleware must have its subscription
+    registered synchronously BEFORE notify() runs."""
+    state = InProcessBackend()
+
+    class FastOperatorNotifier:
+        def __init__(self, backend: InProcessBackend) -> None:
+            self._backend = backend
+
+        async def notify(self, approval_id: str, **kwargs: Any) -> None:
+            await self._backend.publish(f"hitl:{approval_id}", "approve")
+
+    mw = HitlMiddleware(
+        state=state,
+        agent_id="a1",
+        agent_type="r",
+        approval_required=["*"],
+        shadow=[],
+        timeout_seconds=2,
+        notifier=FastOperatorNotifier(state),
+    )
+    result = await mw(
+        agent_ctx=None,
+        tool_name="x",
+        kwargs={},
+        call_next=_passthrough,
+    )
+    assert result == "EXECUTED"
 
 
 # ── Approval ID format and CLI parsing ───────────────────────────────────────
@@ -551,6 +626,105 @@ hitl:
             load_manifest(path)
     finally:
         Path(path).unlink()
+
+
+# ── L3 regression: NotifyConfig field-format validators ─────────────────────
+
+
+@pytest.mark.parametrize(
+    "topic",
+    [
+        "valid-topic_123",
+        "alphanumeric",
+        "X" * 64,  # max length
+    ],
+)
+def test_notify_topic_valid(topic: str) -> None:
+    from scoped_mcp.manifest import NotifyConfig
+
+    cfg = NotifyConfig(type="ntfy", topic=topic)
+    assert cfg.topic == topic
+
+
+@pytest.mark.parametrize(
+    "topic",
+    [
+        "with spaces",
+        "X" * 65,  # too long
+        "../traversal",
+        "with/slash",
+        "with.dot",
+    ],
+)
+def test_notify_topic_invalid(topic: str) -> None:
+    from pydantic import ValidationError
+
+    from scoped_mcp.manifest import NotifyConfig
+
+    with pytest.raises(ValidationError, match="topic"):
+        NotifyConfig(type="ntfy", topic=topic)
+
+
+@pytest.mark.parametrize(
+    "room",
+    [
+        "!abc:matrix.org",
+        "#alias:example.com",
+        "!room.id_with-chars:home.server",
+    ],
+)
+def test_notify_room_valid(room: str) -> None:
+    from scoped_mcp.manifest import NotifyConfig
+
+    cfg = NotifyConfig(type="matrix", room=room)
+    assert cfg.room == room
+
+
+@pytest.mark.parametrize(
+    "room",
+    [
+        "no-prefix:matrix.org",
+        "!no-server",
+        "@user:matrix.org",  # user id, not a room
+        "/etc/passwd",
+    ],
+)
+def test_notify_room_invalid(room: str) -> None:
+    from pydantic import ValidationError
+
+    from scoped_mcp.manifest import NotifyConfig
+
+    with pytest.raises(ValidationError, match="room"):
+        NotifyConfig(type="matrix", room=room)
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["http://example.com/hook", "https://example.com/hook"],
+)
+def test_notify_url_valid(url: str) -> None:
+    from scoped_mcp.manifest import NotifyConfig
+
+    cfg = NotifyConfig(type="webhook", url=url)
+    assert cfg.url == url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ftp://example.com",
+        "javascript:alert(1)",
+        "/relative/path",
+        "example.com/no-scheme",
+    ],
+)
+def test_notify_url_invalid(url: str) -> None:
+    from pydantic import ValidationError
+
+    from scoped_mcp.manifest import NotifyConfig
+
+    with pytest.raises(ValidationError, match="url"):
+        NotifyConfig(type="webhook", url=url)
 
 
 # Suppress the unused json warning by using it indirectly
