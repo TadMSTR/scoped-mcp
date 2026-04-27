@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-04-27
+
+### Added
+
+- **mcp_proxy inputSchema validation** — every proxied `tools/call` is validated
+  against the upstream tool's JSON Schema before forwarding. Schemas are cached
+  at discovery and refreshed on stdio reconnect. The refresh path filters new
+  tools through `tool_allowlist`/`tool_denylist` so a malicious upstream cannot
+  widen the exposed surface, and *merges* into the cache rather than replacing
+  it — tools that disappear from a refresh keep their cached schema (fail-safe
+  to stale-but-strict over silent no-validation). Validation failures log the
+  argument *keys* only, never values.
+
+- **`ArgumentFilterMiddleware`** (`scoped_mcp.contrib.arg_filter`) — pattern-based
+  blocking or alerting on tool argument values. Configured via the new
+  `argument_filters:` manifest section; auto-registered after rate limiting.
+  Supports optional decode steps `base64`, `urlsafe_base64`, and `url` to catch
+  obfuscated payloads. Decode results are capped at 64 KiB to bound the ReDoS
+  amplification surface. Block rules are evaluated before warn rules and
+  short-circuit on the first hit. The structured audit log records the rule
+  name, tool name, field name, and a `raw`/`decoded` label — never the matched
+  value. The agent-facing block error is generic so an agent cannot enumerate
+  filter configuration via probe-and-observe.
+
+- **`argument_filters:` manifest section** — list of rules with `name`, `pattern`,
+  `fields`, `action` (`block`|`warn`), `decode`, and `case_insensitive`. Patterns
+  are compiled at manifest load so a malformed regex fails the manifest, not
+  the first call. `extra="forbid"` on every rule.
+
+### Changed
+
+- **`jsonschema` pin tightened to `>=4.18`** — earlier versions ship a legacy
+  `RefResolver` that auto-fetches external `$ref` URLs, turning a permissive
+  upstream `inputSchema` into a controlled outbound HTTP channel. 4.18+ uses
+  the `referencing` library where external refs are unresolvable by default.
+
+- **`docs/threat-model.md`** — added explicit sections on the schema-validation
+  semantic gap (shape ≠ intent) and the argument-filter limits (top-level
+  strings only, 64 KiB decode cap, no per-match regex timeout).
+
 ## [0.8.0] — 2026-04-27
 
 ### Added
