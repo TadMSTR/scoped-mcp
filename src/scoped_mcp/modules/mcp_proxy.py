@@ -144,12 +144,20 @@ class McpProxyModule(ToolModule):
         return methods
 
     async def _refresh_schemas_from_client(self, client: Any) -> None:
-        """Re-fetch tools/list from an already-open client and rebuild the schema cache.
+        """Re-fetch tools/list from an already-open client and update the schema cache.
 
         Filters via the same allowlist/denylist as ``_discover_tools`` so a
         refresh can never widen the exposed tool surface — a malicious or
         misconfigured upstream that suddenly advertises new tools cannot use a
         refresh to bypass the operator's allowlist.
+
+        Update semantics — never demote validation:
+        - Tools that disappear from the refresh response keep their existing
+          schema. The proxy method built at __init__ remains callable, so we
+          must never silently downgrade validation for it (audit M1).
+        - A tool that returns from the refresh with no schema (None) does NOT
+          overwrite an existing non-None schema. Strict-stays-strict.
+        - A tool that returns with a new schema overwrites the prior one.
 
         Refresh failures are logged at warning and leave the existing cache
         intact (fail-safe: stale-but-restrictive over no validation at all).
@@ -164,15 +172,17 @@ class McpProxyModule(ToolModule):
             )
             return
 
-        new_cache: dict[str, dict[str, Any] | None] = {}
         for t in upstream_tools:
             tool_name = t.name
             if self._tool_allowlist and tool_name not in self._tool_allowlist:
                 continue
             if tool_name in self._tool_denylist:
                 continue
-            new_cache[tool_name] = _coerce_schema(getattr(t, "inputSchema", None))
-        self._schemas = new_cache
+            new_schema = _coerce_schema(getattr(t, "inputSchema", None))
+            # Never demote a known-strict schema to None.
+            if new_schema is None and self._schemas.get(tool_name) is not None:
+                continue
+            self._schemas[tool_name] = new_schema
 
     async def startup(self) -> None:
         if self._command:  # stdio transport — open persistent subprocess

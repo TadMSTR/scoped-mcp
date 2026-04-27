@@ -24,7 +24,7 @@ async def test_block_pattern_in_plain_text() -> None:
         rules=[{"name": "creds", "pattern": "password", "fields": ["*"], "action": "block"}],
         agent_id="a1",
     )
-    with pytest.raises(ConfigError, match="creds"):
+    with pytest.raises(ConfigError, match="argument filter policy"):
         await mw(
             agent_ctx=None,
             tool_name="filesystem_write_file",
@@ -89,7 +89,7 @@ async def test_field_scope_blocks_when_in_listed_field() -> None:
         rules=[{"name": "trav", "pattern": r"\.\./", "fields": ["path"], "action": "block"}],
         agent_id="a1",
     )
-    with pytest.raises(ConfigError, match="trav"):
+    with pytest.raises(ConfigError, match="argument filter policy"):
         await mw(
             agent_ctx=None,
             tool_name="filesystem_read_file",
@@ -116,7 +116,7 @@ async def test_base64_decode_match() -> None:
         ],
         agent_id="a1",
     )
-    with pytest.raises(ConfigError, match="b64-creds"):
+    with pytest.raises(ConfigError, match="argument filter policy"):
         await mw(
             agent_ctx=None,
             tool_name="some_tool",
@@ -140,7 +140,7 @@ async def test_url_decode_match() -> None:
         ],
         agent_id="a1",
     )
-    with pytest.raises(ConfigError, match="url-creds"):
+    with pytest.raises(ConfigError, match="argument filter policy"):
         await mw(
             agent_ctx=None,
             tool_name="some_tool",
@@ -165,7 +165,7 @@ async def test_decode_failure_falls_back_to_raw_match() -> None:
         agent_id="a1",
     )
     # 'my password' is not valid base64 — decode fails, raw match still triggers
-    with pytest.raises(ConfigError, match="creds"):
+    with pytest.raises(ConfigError, match="argument filter policy"):
         await mw(
             agent_ctx=None,
             tool_name="some_tool",
@@ -221,7 +221,7 @@ async def test_block_evaluated_before_warn() -> None:
         ],
         agent_id="a1",
     )
-    with pytest.raises(ConfigError, match="blocker"):
+    with pytest.raises(ConfigError, match="argument filter policy"):
         await mw(
             agent_ctx=None,
             tool_name="some_tool",
@@ -313,7 +313,7 @@ async def test_case_insensitive_match() -> None:
         ],
         agent_id="a1",
     )
-    with pytest.raises(ConfigError, match="creds"):
+    with pytest.raises(ConfigError, match="argument filter policy"):
         await mw(
             agent_ctx=None,
             tool_name="some_tool",
@@ -355,3 +355,99 @@ async def test_non_string_args_are_skipped() -> None:
         call_next=_passthrough,
     )
     assert result == "OK"
+
+
+# ── L1 regression: urlsafe_base64 decode step (audit v0.9 L1) ────────────────
+
+
+@pytest.mark.asyncio
+async def test_urlsafe_base64_decode_match() -> None:
+    """A URL-safe-base64-encoded payload (e.g., JWT body) is matched when
+    decode: [urlsafe_base64] is configured. Standard base64 alphabet rejects
+    '-' and '_'; URL-safe alphabet uses them."""
+    payload = base64.urlsafe_b64encode(b"my-password?_leaked").decode().rstrip("=")
+    mw = ArgumentFilterMiddleware(
+        rules=[
+            {
+                "name": "url-safe-creds",
+                "pattern": "password",
+                "fields": ["*"],
+                "action": "block",
+                "decode": ["urlsafe_base64"],
+            }
+        ],
+        agent_id="a1",
+    )
+    with pytest.raises(ConfigError, match="argument filter policy"):
+        await mw(
+            agent_ctx=None,
+            tool_name="some_tool",
+            kwargs={"jwt_body": payload},
+            call_next=_passthrough,
+        )
+
+
+@pytest.mark.asyncio
+async def test_standard_base64_does_not_decode_urlsafe_alphabet() -> None:
+    """Without urlsafe_base64 in decode chain, a URL-safe-encoded payload that
+    actually contains '-' or '_' is rejected by the standard b64decoder and
+    falls back to raw-only matching. Confirms the two alphabets are distinct."""
+    # Plaintext crafted so its url-safe b64 encoding contains '_' or '-'
+    # (which the standard alphabet rejects via validate=True).
+    payload = base64.urlsafe_b64encode(b"my-password?_leaked").decode().rstrip("=")
+    assert "_" in payload or "-" in payload  # sanity-check the test premise
+    mw = ArgumentFilterMiddleware(
+        rules=[
+            {
+                "name": "creds",
+                "pattern": "password",
+                "fields": ["*"],
+                "action": "block",
+                "decode": ["base64"],
+            }
+        ],
+        agent_id="a1",
+    )
+    # Standard b64 rejects the URL-safe alphabet → decode path skipped → raw
+    # scan only. The raw form does not contain the literal word 'password',
+    # so the call passes through.
+    result = await mw(
+        agent_ctx=None,
+        tool_name="some_tool",
+        kwargs={"jwt_body": payload},
+        call_next=_passthrough,
+    )
+    assert result == "OK"
+
+
+# ── L3 regression: block error does not leak rule/field names (audit v0.9 L3)
+
+
+@pytest.mark.asyncio
+async def test_block_error_message_does_not_leak_rule_or_field_name() -> None:
+    """The agent-facing ConfigError message must not include the filter rule
+    name or the matched field name — those are recoverable via probe-and-observe.
+    The structured audit log emitted before the raise retains the full detail
+    (verified independently in audit.py tests)."""
+    mw = ArgumentFilterMiddleware(
+        rules=[
+            {
+                "name": "VERY-SPECIFIC-RULE-NAME-XYZ",
+                "pattern": "password",
+                "fields": ["secret_field_name"],
+                "action": "block",
+            }
+        ],
+        agent_id="a1",
+    )
+    with pytest.raises(ConfigError) as exc_info:
+        await mw(
+            agent_ctx=None,
+            tool_name="some_tool",
+            kwargs={"secret_field_name": "my password"},
+            call_next=_passthrough,
+        )
+
+    error_text = str(exc_info.value)
+    assert "VERY-SPECIFIC-RULE-NAME-XYZ" not in error_text
+    assert "secret_field_name" not in error_text

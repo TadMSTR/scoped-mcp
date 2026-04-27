@@ -52,7 +52,7 @@ logger = structlog.get_logger("audit")
 _MAX_DECODED_BYTES = 64 * 1024  # 64 KiB cap on base64-decoded content
 
 Action = Literal["block", "warn"]
-DecodeStep = Literal["base64", "url"]
+DecodeStep = Literal["base64", "urlsafe_base64", "url"]
 
 
 @dataclass
@@ -82,11 +82,32 @@ def _compile_rule(rule: dict[str, Any]) -> _CompiledRule:
         )
     decode = list(rule.get("decode", []))
     for step in decode:
-        if step not in ("base64", "url"):
+        if step not in ("base64", "urlsafe_base64", "url"):
             raise ValueError(
-                f"argument_filters[{name!r}].decode entry must be 'base64' or 'url', got {step!r}"
+                f"argument_filters[{name!r}].decode entry must be one of "
+                f"('base64', 'urlsafe_base64', 'url'), got {step!r}"
             )
     return _CompiledRule(name=name, pattern=compiled, fields=fields, action=action, decode=decode)
+
+
+def _b64_decode(value: str, urlsafe: bool) -> str | None:
+    """Return decoded value or None if input would exceed cap or fails to decode."""
+    # Reject candidates that would decode to >64 KiB before doing the work.
+    # base64 inflates by ~4/3 → an N-char input decodes to ~3N/4 bytes.
+    if (len(value) * 3) // 4 > _MAX_DECODED_BYTES:
+        return None
+    try:
+        if urlsafe:
+            # urlsafe_b64decode requires correct padding; pad up to a multiple of 4.
+            padded = value + "=" * (-len(value) % 4)
+            decoded = base64.urlsafe_b64decode(padded)
+        else:
+            decoded = base64.b64decode(value, validate=True)
+    except (ValueError, base64.binascii.Error):
+        return None
+    if len(decoded) > _MAX_DECODED_BYTES:
+        return None
+    return decoded.decode("utf-8", errors="replace")
 
 
 def _candidate_strings(value: str, decode_steps: list[DecodeStep]) -> list[str]:
@@ -100,17 +121,15 @@ def _candidate_strings(value: str, decode_steps: list[DecodeStep]) -> list[str]:
             except Exception:
                 continue
         elif step == "base64":
-            try:
-                # Reject candidates that would decode to >64 KiB before doing the work.
-                # base64 inflates by ~4/3 → an N-char input decodes to ~3N/4 bytes.
-                if (len(current) * 3) // 4 > _MAX_DECODED_BYTES:
-                    continue
-                decoded = base64.b64decode(current, validate=True)
-                if len(decoded) > _MAX_DECODED_BYTES:
-                    continue
-                current = decoded.decode("utf-8", errors="replace")
-            except (ValueError, base64.binascii.Error):
+            decoded = _b64_decode(current, urlsafe=False)
+            if decoded is None:
                 continue
+            current = decoded
+        elif step == "urlsafe_base64":
+            decoded = _b64_decode(current, urlsafe=True)
+            if decoded is None:
+                continue
+            current = decoded
         candidates.append(current)
     return candidates
 
@@ -190,10 +209,11 @@ class ArgumentFilterMiddleware:
                 )
                 from ..exceptions import ConfigError
 
-                raise ConfigError(
-                    f"argument_filter {rule.name!r} blocked tool {tool_name!r}: "
-                    f"field {field_name!r} matched a forbidden pattern"
-                )
+                # Generic message — rule name and field are already in the
+                # structured audit log written above. Including them in the
+                # agent-facing message would let an agent enumerate filter
+                # configuration via probe-and-observe (audit L3).
+                raise ConfigError(f"tool call to {tool_name!r} blocked by argument filter policy")
 
         # Warns are advisory — log every hit but don't short-circuit.
         for rule in self._warn_rules:

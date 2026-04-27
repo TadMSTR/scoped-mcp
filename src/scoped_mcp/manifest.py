@@ -138,7 +138,7 @@ class ArgumentFilterRule(BaseModel):
     pattern: str
     fields: list[str] = ["*"]
     action: Literal["block", "warn"] = "block"
-    decode: list[Literal["base64", "url"]] = []
+    decode: list[Literal["base64", "urlsafe_base64", "url"]] = []
     case_insensitive: bool = False
 
     @field_validator("fields")

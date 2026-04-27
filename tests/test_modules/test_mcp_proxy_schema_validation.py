@@ -179,3 +179,66 @@ async def test_refresh_failure_keeps_existing_cache(read_file_module) -> None:
     await module._refresh_schemas_from_client(fake_client)
 
     assert module._schemas == original_cache
+
+
+# ── M1 regression: refresh must not silently downgrade validation (audit v0.9)
+
+
+@pytest.mark.asyncio
+async def test_refresh_preserves_schema_for_disappeared_tool(read_file_module) -> None:
+    """When upstream stops advertising a previously-known tool, its cached
+    schema must be preserved. The proxy method built at __init__ remains
+    callable, and dropping the schema would silently downgrade per-call
+    validation to no-validation (audit M1)."""
+    module, _ = read_file_module
+    original_schema = module._schemas["read_file"]
+    assert original_schema is not None
+
+    # Upstream returns an empty list — read_file is no longer advertised.
+    fake_client = AsyncMock()
+    fake_client.list_tools = AsyncMock(return_value=[])
+
+    await module._refresh_schemas_from_client(fake_client)
+
+    # Schema for read_file must still be present and unchanged.
+    assert module._schemas["read_file"] == original_schema
+
+    # And the proxy method must still validate against the original schema.
+    method = module._proxy_methods[0]
+    with pytest.raises(_ProxyValidationError):
+        await method()  # missing required 'path'
+
+
+@pytest.mark.asyncio
+async def test_refresh_does_not_demote_schema_to_none(read_file_module) -> None:
+    """If a tool comes back from refresh with an empty/None schema, the
+    cached strict schema must not be overwritten — strict-stays-strict."""
+    module, _ = read_file_module
+    original_schema = module._schemas["read_file"]
+
+    fake_client = AsyncMock()
+    fake_client.list_tools = AsyncMock(return_value=[_make_tool("read_file", {})])
+
+    await module._refresh_schemas_from_client(fake_client)
+
+    assert module._schemas["read_file"] == original_schema
+
+
+@pytest.mark.asyncio
+async def test_refresh_overwrites_with_new_schema(read_file_module) -> None:
+    """If a tool comes back from refresh with a NEW schema (not None),
+    the cache is updated. This is how legitimate upstream schema changes
+    propagate."""
+    module, _ = read_file_module
+    new_schema = {
+        "type": "object",
+        "properties": {"path": {"type": "string"}, "encoding": {"type": "string"}},
+        "required": ["path", "encoding"],
+    }
+
+    fake_client = AsyncMock()
+    fake_client.list_tools = AsyncMock(return_value=[_make_tool("read_file", new_schema)])
+
+    await module._refresh_schemas_from_client(fake_client)
+
+    assert module._schemas["read_file"] == new_schema
