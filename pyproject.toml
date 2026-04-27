@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "scoped-mcp"
-version = "0.7.0"
+version = "0.8.0"
 description = "Per-agent scoped MCP tool proxy with credential isolation and audit logging"
 readme = "README.md"
 license = "MIT"

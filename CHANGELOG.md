@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-04-27
+
+### Added
+
+- **`VaultCredentialSource`** — fetch agent credentials from HashiCorp Vault using
+  AppRole auth. Supports KV v1 and v2, `{agent_type}` interpolation in the secret
+  path, and a background renewal task that refreshes the client token at 2/3 of
+  the lease TTL. The `secret_id` is removed from the instance attribute before
+  the AppRole login call so it cannot leak via traceback-with-locals capture on
+  auth failure. Requires the new `[vault]` optional extra (`hvac>=2.0,<3`).
+
+- **`credentials.vault:` manifest section** — set `credentials.source: vault` and
+  configure `addr`, `auth: approle`, `role_id_env`, `secret_id_env`, `path`, and
+  `kv_version`. Path traversal sequences (`..`) in the interpolated path are
+  rejected at startup. The vault bundle is fetched once during `build_server()`
+  and filtered per module so each module receives only the keys it declares.
+
+- **Vault token redaction in audit logs** — `_VAULT_TOKEN_RE` matches modern
+  base64url SSTs (`hvs.`/`hvb.`/`hvr.` with `_` and `-` characters) and all
+  legacy prefixes (`s.`/`b.`/`r.`). `secret_id`, `role_id`, `lease_id`, and
+  `accessor` are added to the `_SENSITIVE_KEYS` redaction set.
+
+- **Renewal shutdown timeout** — `VaultCredentialSource.close()` bounds the wait
+  for an in-flight renewal HTTP call to 5 seconds so a Vault outage at shutdown
+  cannot stall server termination.
+
+- **`examples/vault/`** — drop-in manifest, Vault policy HCL, and AppRole setup
+  script for getting Vault-backed credentials running.
+
 ## [0.7.0] — 2026-04-27
 
 ### Added
