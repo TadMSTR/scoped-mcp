@@ -141,6 +141,48 @@ def test_sanitize_long_hex_in_message() -> None:
     assert "<redacted-hex>" in result
 
 
+def test_sanitize_modern_vault_sst_with_underscores_and_dashes() -> None:
+    # Real-format SST: base64url payload contains _ and -
+    token = "hvs.CAESIJ_9aZ-Bk-hQVXYZ_dGhlcmU0NTY3ODkwAAAAAAA"  # gitleaks:allow
+    result = _sanitize_value(f"auth failed: token={token} expired")
+    assert token not in result
+    assert "<redacted-vault-token>" in result
+
+
+def test_sanitize_modern_vault_batch_token() -> None:
+    token = "hvb.AbcDefGhi_jKlMnOpQrStUvWxYz0123456789"  # gitleaks:allow
+    result = _sanitize_value(f"using {token} for batch op")
+    assert token not in result
+    assert "<redacted-vault-token>" in result
+
+
+def test_sanitize_legacy_vault_service_token() -> None:
+    token = "s.abcdef0123456789ABCDEF01"  # gitleaks:allow
+    result = _sanitize_value(f"got token {token} back")
+    assert token not in result
+    assert "<redacted-vault-token>" in result
+
+
+def test_sanitize_legacy_vault_batch_token() -> None:
+    token = "b.abcdef0123456789ABCDEF01"  # gitleaks:allow
+    result = _sanitize_value(f"batch {token} ok")
+    assert token not in result
+    assert "<redacted-vault-token>" in result
+
+
+def test_sanitize_legacy_vault_recovery_token() -> None:
+    token = "r.abcdef0123456789ABCDEF01"  # gitleaks:allow
+    result = _sanitize_value(f"recovery {token} ok")
+    assert token not in result
+    assert "<redacted-vault-token>" in result
+
+
+def test_sanitize_secret_id_key_redacted() -> None:
+    # L2 fix: secret_id and role_id must be in _SENSITIVE_KEYS
+    assert _sanitize_value("d3b0c442-98fc-1c14-9af8-decafe000001", "secret_id") == "<redacted>"
+    assert _sanitize_value("e9c1d442-98fc-1c14-9af8-decafe000002", "role_id") == "<redacted>"
+
+
 def test_sanitize_processor_walks_whole_event() -> None:
     event = {
         "event": "tool_call",

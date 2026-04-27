@@ -47,7 +47,7 @@ otel = [
 dragonfly = ["redis>=5.0,<6"]  # enables DragonflyBackend (rate limiting + HITL shared state)
 vault = ["hvac>=2.0,<3"]       # enables Vault credential source (v0.8)
 all = ["httpx", "aiosmtplib", "aiosqlite"]
-dev = ["pytest", "pytest-asyncio", "pytest-cov", "ruff", "redis>=5.0,<6"]
+dev = ["pytest", "pytest-asyncio", "pytest-cov", "ruff", "redis>=5.0,<6", "hvac>=2.0,<3"]
 
 [project.scripts]
 scoped-mcp = "scoped_mcp.server:main"

@@ -99,14 +99,18 @@ class VaultCredentialSource:
         Synchronous — call before the asyncio event loop is running.
         Raises CredentialError on any failure; the proxy will not start.
         """
+        # Drop secret_id off the instance before any hvac code runs.
+        # On a login exception, traceback-with-locals capture cannot reach the
+        # value via self — only the local `secret_id` binding, which is freed
+        # when the frame unwinds.
+        secret_id = self._secret_id
+        self._secret_id = ""
         try:
             client = hvac.Client(url=self._addr)
             auth_resp = client.auth.approle.login(
                 role_id=self._role_id,
-                secret_id=self._secret_id,
+                secret_id=secret_id,
             )
-            # Discard secret_id immediately — it is a one-time-use credential
-            self._secret_id = ""
 
             self._token_lease_duration = auth_resp["auth"].get("lease_duration", 3600)
             self._client = client
@@ -185,9 +189,14 @@ class VaultCredentialSource:
             )
 
     async def close(self) -> None:
-        """Cancel the renewal task on server shutdown."""
+        """Cancel the renewal task on server shutdown.
+
+        If a renewal HTTP call is in flight inside ``asyncio.to_thread``, the
+        worker thread cannot be cancelled. Bound the wait to 5 seconds so a
+        Vault outage at shutdown time cannot stall server termination.
+        """
         if self._renewal_task is not None:
             self._renewal_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._renewal_task
+            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(self._renewal_task), timeout=5.0)
             self._renewal_task = None
