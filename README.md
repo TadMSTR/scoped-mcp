@@ -267,6 +267,11 @@ Credentials are passed in `settings.json` under `env` (for Claude Code) or expor
 in the shell before running `scoped-mcp`. They are loaded once at startup, injected
 into module contexts, and never returned in tool responses or logged.
 
+For HashiCorp Vault — set `credentials.source: vault` in the manifest with an
+`approle` block; credentials are fetched once at startup and the client token is
+renewed in the background. Requires `pip install scoped-mcp[vault]`. See
+`examples/vault/` for a working manifest, AppRole setup script, and Vault policy.
+
 For integration with a secrets manager such as Vaultwarden, see
 `examples/vaultwarden/`.
 
