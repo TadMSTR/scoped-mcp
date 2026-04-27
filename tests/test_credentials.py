@@ -121,6 +121,11 @@ def test_file_source_0600_passes(tmp_path: object) -> None:
 
 def test_unknown_source_raises() -> None:
     with pytest.raises(CredentialError, match="Unknown credential source"):
+        resolve_credentials("magic", ["MY_TOKEN"])  # type: ignore[arg-type]
+
+
+def test_vault_source_raises_descriptive_error() -> None:
+    with pytest.raises(CredentialError, match="VaultCredentialSource"):
         resolve_credentials("vault", ["MY_TOKEN"])  # type: ignore[arg-type]
 
 

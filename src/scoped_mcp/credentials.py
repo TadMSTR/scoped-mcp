@@ -64,8 +64,16 @@ def resolve_credentials(
         return _from_file(
             required_keys, file_path, strict_permissions=strict_permissions, optional_keys=opts
         )
+    elif source == "vault":
+        raise CredentialError(
+            "Vault credentials must be fetched via VaultCredentialSource before calling "
+            "resolve_credentials(). Use filter_vault_credentials() to extract module keys "
+            "from the pre-fetched bundle."
+        )
     else:
-        raise CredentialError(f"Unknown credential source: '{source}'. Expected 'env' or 'file'")
+        raise CredentialError(
+            f"Unknown credential source: '{source}'. Expected 'env', 'file', or 'vault'"
+        )
 
 
 def _from_env(required_keys: list[str], optional_keys: list[str]) -> dict[str, str]:
@@ -158,3 +166,34 @@ def _check_secrets_file_permissions(path: Path, strict_permissions: bool) -> Non
             msg + ". Set strict_permissions=False in the manifest to downgrade this to a warning."
         )
     _log.warning("%s (strict_permissions=False)", msg)
+
+
+def filter_vault_credentials(
+    vault_bundle: dict[str, str],
+    required_keys: list[str],
+    optional_keys: list[str] | None = None,
+) -> dict[str, str]:
+    """Extract module-specific keys from a pre-fetched Vault credential bundle.
+
+    Args:
+        vault_bundle: the full dict returned by VaultCredentialSource.fetch().
+        required_keys: keys the module cannot start without.
+        optional_keys: keys that are included if present but not required.
+
+    Returns:
+        Dict containing all required keys and any present optional keys.
+
+    Raises:
+        CredentialError: if any required key is absent from the bundle.
+    """
+    missing = [k for k in required_keys if k not in vault_bundle]
+    if missing:
+        raise CredentialError(
+            f"Vault bundle is missing required credential key(s): {', '.join(missing)}"
+        )
+
+    result = {k: vault_bundle[k] for k in required_keys}
+    for k in optional_keys or []:
+        if k in vault_bundle:
+            result[k] = vault_bundle[k]
+    return result
