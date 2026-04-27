@@ -20,9 +20,11 @@ from .state import StateBackend, build_state_backend
 
 def _build_middleware(
     agent_id: str,
+    agent_type: str,
     state: StateBackend,
     rate_limits_cfg: object,
     argument_filters_cfg: object,
+    hitl_cfg: object,
 ) -> list[ToolCallMiddleware]:
     """Build the middleware stack from manifest config and environment."""
     middleware: list[ToolCallMiddleware] = []
@@ -50,6 +52,21 @@ def _build_middleware(
             ArgumentFilterMiddleware(
                 rules=[r.model_dump() for r in argument_filters_cfg],
                 agent_id=agent_id,
+            )
+        )
+
+    # HITL — auto-registered when hitl is present. Placed last among the
+    # gating middleware so an approval request reflects the call as it would
+    # actually run (post rate-limit, post arg-filter).
+    if hitl_cfg is not None and (hitl_cfg.approval_required or hitl_cfg.shadow):
+        from .hitl import build_hitl_middleware
+
+        middleware.append(
+            build_hitl_middleware(
+                hitl_cfg=hitl_cfg,
+                state=state,
+                agent_id=agent_id,
+                agent_type=agent_type,
             )
         )
 
@@ -114,9 +131,11 @@ def _run_serve(args: argparse.Namespace) -> None:
 
         middleware = _build_middleware(
             agent_id=agent_ctx.agent_id,
+            agent_type=agent_ctx.agent_type,
             state=state,
             rate_limits_cfg=manifest.rate_limits,
             argument_filters_cfg=manifest.argument_filters,
+            hitl_cfg=manifest.hitl,
         )
 
         server = build_server(agent_ctx, manifest, middleware=middleware)
@@ -149,6 +168,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     validate_parser.add_argument("--manifest", required=True, metavar="PATH")
 
+    # "hitl" subcommand group — operator approval flow
+    hitl_parser = subparsers.add_parser(
+        "hitl", help="Inspect or decide pending HITL approval requests."
+    )
+    hitl_parser.add_argument("--manifest", required=True, metavar="PATH")
+    hitl_sub = hitl_parser.add_subparsers(dest="hitl_command", required=True)
+    hitl_sub.add_parser("list", help="List pending approval requests across all agents.")
+    approve_p = hitl_sub.add_parser("approve", help="Approve a pending request by ID.")
+    approve_p.add_argument("approval_id", metavar="APPROVAL_ID")
+    reject_p = hitl_sub.add_parser("reject", help="Reject a pending request by ID.")
+    reject_p.add_argument("approval_id", metavar="APPROVAL_ID")
+    reject_p.add_argument("reason", nargs="?", default="", metavar="REASON")
+
     # Legacy flat args for backwards compatibility (no subcommand given)
     parser.add_argument("--manifest", default=None, metavar="PATH")
     parser.add_argument("--audit-log", default=None, metavar="PATH")
@@ -163,6 +195,11 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "validate":
         _run_validate(args)
         return
+
+    if args.command == "hitl":
+        from .hitl_cli import run_hitl_command
+
+        sys.exit(run_hitl_command(args))
 
     # "run" subcommand or legacy flat invocation
     if args.manifest is None:

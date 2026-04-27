@@ -15,3 +15,7 @@ class ManifestError(Exception):
 
 class ScopeViolation(Exception):
     """Raised when a tool call attempts to access resources outside its scope."""
+
+
+class HitlRejectedError(Exception):
+    """Raised when a tool call is rejected via HITL approval (explicit reject or timeout)."""
