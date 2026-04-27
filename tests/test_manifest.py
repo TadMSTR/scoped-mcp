@@ -273,6 +273,41 @@ def test_extra_top_level_field_rejected(tmp_path: Path) -> None:
         load_manifest(path)
 
 
+def test_rate_limits_extra_field_rejected(tmp_path: Path) -> None:
+    """RateLimitsConfig rejects typos/unknown fields (extra=forbid)."""
+    path = write_manifest(
+        tmp_path,
+        """\
+        agent_type: research
+        modules:
+          ntfy: {}
+        rate_limits:
+          global: 10/minute
+          per_tol:
+            filesystem.*: 5/minute
+        """,
+    )
+    with pytest.raises(ManifestError):
+        load_manifest(path)
+
+
+def test_module_config_extra_field_rejected(tmp_path: Path) -> None:
+    """ModuleConfig rejects unknown fields (extra=forbid catches typos like mde: read)."""
+    path = write_manifest(
+        tmp_path,
+        """\
+        agent_type: research
+        modules:
+          filesystem:
+            mde: read
+            config:
+              base_path: /tmp/agents
+        """,
+    )
+    with pytest.raises(ManifestError):
+        load_manifest(path)
+
+
 # ── state_backend config ──────────────────────────────────────────────────────
 
 

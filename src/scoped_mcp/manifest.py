@@ -93,7 +93,7 @@ class StateBackendConfig(BaseModel):
 class RateLimitsConfig(BaseModel):
     """Rate limit declarations from the manifest."""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     # Catch-all global limit across all tools for this agent
     global_limit: str | None = None
@@ -113,9 +113,7 @@ class RateLimitsConfig(BaseModel):
     @classmethod
     def _validate_global(cls, v: Any) -> Any:
         if v is not None and not _RATE_LIMIT_RE.match(str(v)):
-            raise ValueError(
-                f"rate_limits.global must be '<N>/second|minute|hour', got {v!r}"
-            )
+            raise ValueError(f"rate_limits.global must be '<N>/second|minute|hour', got {v!r}")
         return v
 
     @field_validator("per_tool", mode="before")
@@ -133,6 +131,8 @@ class RateLimitsConfig(BaseModel):
 
 class ModuleConfig(BaseModel):
     """Per-module configuration from the manifest."""
+
+    model_config = ConfigDict(extra="forbid")
 
     # None means "all tools" (used for write-only notification modules)
     mode: Literal["read", "write"] | None = None
@@ -166,9 +166,7 @@ class Manifest(BaseModel):
     @classmethod
     def _agent_type_pattern(cls, v: str) -> str:
         if not _AGENT_TYPE_RE.match(v):
-            raise ValueError(
-                f"agent_type must match ^[a-z0-9][a-z0-9_-]{{0,62}}$, got {v!r}"
-            )
+            raise ValueError(f"agent_type must match ^[a-z0-9][a-z0-9_-]{{0,62}}$, got {v!r}")
         return v
 
     @field_validator("modules")
@@ -194,10 +192,10 @@ class Manifest(BaseModel):
             # mcp_proxy requires url OR command (not both, not neither)
             has_connection = mod_cfg.config.get("url") or mod_cfg.config.get("command")
             if module_name == "mcp_proxy" and not has_connection:
-                    errors.append(
-                        f"modules.{key}: mcp_proxy requires either 'url' (HTTP) or"
-                        " 'command' (stdio) in config"
-                    )
+                errors.append(
+                    f"modules.{key}: mcp_proxy requires either 'url' (HTTP) or"
+                    " 'command' (stdio) in config"
+                )
         if errors:
             raise ValueError("\n".join(errors))
         return self

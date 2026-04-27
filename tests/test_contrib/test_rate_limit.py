@@ -171,6 +171,33 @@ async def test_audit_log_on_rejection() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Fail-closed: backend errors must propagate, not silently bypass limits
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_global_backend_error_is_fail_closed() -> None:
+    """A broken backend must block the call (fail-closed), not silently allow it."""
+    from unittest.mock import AsyncMock, patch
+
+    mw = _make_middleware(global_limit="10/minute")
+    with patch.object(mw._state, "increment", AsyncMock(side_effect=RuntimeError("conn error"))):
+        with pytest.raises(RuntimeError, match="conn error"):
+            await _call(mw)
+
+
+@pytest.mark.asyncio
+async def test_per_tool_backend_error_is_fail_closed() -> None:
+    """A broken backend on the per-tool check must block the call."""
+    from unittest.mock import AsyncMock, patch
+
+    mw = _make_middleware(per_tool={"fs.read": "10/minute"})
+    with patch.object(mw._state, "increment", AsyncMock(side_effect=RuntimeError("conn error"))):
+        with pytest.raises(RuntimeError, match="conn error"):
+            await _call(mw, tool_name="fs.read")
+
+
+# ---------------------------------------------------------------------------
 # Edge: invalid rate spec raises at construction
 # ---------------------------------------------------------------------------
 

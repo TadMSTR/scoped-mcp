@@ -95,7 +95,17 @@ class RateLimitMiddleware:
         # Check global limit first
         if self._global_limit is not None:
             lim, win = self._global_limit
-            allowed, count = await self._state.increment(self._global_key(), win, lim)
+            try:
+                allowed, count = await self._state.increment(self._global_key(), win, lim)
+            except Exception:
+                # fail-closed: backend errors block the call rather than silently bypassing limits
+                logger.warning(
+                    "rate_limit_backend_error",
+                    agent_id=self._agent_id,
+                    tool_name=tool_name,
+                    limit_type="global",
+                )
+                raise
             if not allowed:
                 logger.warning(
                     "rate_limit_exceeded",
@@ -117,7 +127,17 @@ class RateLimitMiddleware:
         per_tool_match = self._match_per_tool(tool_name)
         if per_tool_match is not None:
             counter_key, lim, win = per_tool_match
-            allowed, count = await self._state.increment(counter_key, win, lim)
+            try:
+                allowed, count = await self._state.increment(counter_key, win, lim)
+            except Exception:
+                # fail-closed: backend errors block the call rather than silently bypassing limits
+                logger.warning(
+                    "rate_limit_backend_error",
+                    agent_id=self._agent_id,
+                    tool_name=tool_name,
+                    limit_type="per_tool",
+                )
+                raise
             if not allowed:
                 logger.warning(
                     "rate_limit_exceeded",
