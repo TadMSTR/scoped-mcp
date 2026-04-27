@@ -79,15 +79,20 @@ def _make_module_lifespan(module_instances: list) -> object:
     @asynccontextmanager
     async def lifespan(server):  # server arg required by FastMCP lifespan protocol
         ops = get_ops_logger()
-        for mod in module_instances:
-            ops.info("module_startup", module=mod.name)
-            await mod.startup()
+        started: list = []
         try:
+            for mod in module_instances:
+                ops.info("module_startup", module=mod.name)
+                await mod.startup()
+                started.append(mod)
             yield {}
         finally:
-            for mod in reversed(module_instances):
+            for mod in reversed(started):
                 ops.info("module_shutdown", module=mod.name)
-                await mod.shutdown()
+                try:
+                    await mod.shutdown()
+                except Exception as exc:
+                    ops.error("module_shutdown_error", module=mod.name, error=str(exc))
 
     return lifespan
 

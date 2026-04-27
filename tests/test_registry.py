@@ -193,3 +193,52 @@ async def test_registry_lifespan_calls_shutdown_in_reverse(agent_ctx: AgentConte
         pass  # triggers shutdown on exit
 
     assert call_order == ["b", "a"]
+
+
+@pytest.mark.asyncio
+async def test_lifespan_partial_startup_cleans_up_started_modules() -> None:
+    """If module N raises in startup(), modules 0..N-1 that started still get shutdown()."""
+    call_order: list[str] = []
+
+    mock_a = MagicMock()
+    mock_a.name = "mod_a"
+    mock_a.startup = AsyncMock(side_effect=lambda: call_order.append("start_a"))
+    mock_a.shutdown = AsyncMock(side_effect=lambda: call_order.append("shutdown_a"))
+
+    mock_b = MagicMock()
+    mock_b.name = "mod_b"
+    mock_b.startup = AsyncMock(side_effect=RuntimeError("startup failed"))
+    mock_b.shutdown = AsyncMock()
+
+    lifespan = _make_module_lifespan([mock_a, mock_b])
+    with pytest.raises(RuntimeError, match="startup failed"):
+        async with lifespan(server=None):
+            pass  # should never be reached
+
+    assert "start_a" in call_order
+    assert "shutdown_a" in call_order
+    mock_b.shutdown.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_shutdown_error_does_not_skip_remaining() -> None:
+    """If mod.shutdown() raises, remaining modules still get shutdown()."""
+    call_order: list[str] = []
+
+    mock_a = MagicMock()
+    mock_a.name = "mod_a"
+    mock_a.startup = AsyncMock()
+    mock_a.shutdown = AsyncMock(side_effect=lambda: call_order.append("shutdown_a"))
+
+    mock_b = MagicMock()
+    mock_b.name = "mod_b"
+    mock_b.startup = AsyncMock()
+    mock_b.shutdown = AsyncMock(side_effect=RuntimeError("shutdown failed"))
+
+    # mod_b is reversed-first (index 1 shuts down before index 0)
+    lifespan = _make_module_lifespan([mock_a, mock_b])
+    async with lifespan(server=None):
+        pass
+
+    # mod_a shutdown must still run despite mod_b raising
+    assert "shutdown_a" in call_order

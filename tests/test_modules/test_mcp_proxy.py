@@ -348,3 +348,4 @@ async def test_shutdown_closes_persistent_client(stdio_module):
 
     mock_persistent.__aexit__.assert_called_once_with(None, None, None)
     assert stdio_module._persistent_client is None
+    assert stdio_module._client_handle is None

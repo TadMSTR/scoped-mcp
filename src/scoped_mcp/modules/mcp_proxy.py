@@ -69,7 +69,8 @@ class McpProxyModule(ToolModule):
         self._tool_allowlist: set[str] = set(allowlist) if allowlist else set()
         self._tool_denylist: set[str] = set(denylist)
         self._discovery_timeout: float = float(config.get("discovery_timeout_seconds", 10.0))
-        self._persistent_client: Any | None = None  # set in startup() for stdio
+        self._client_handle: Any | None = None  # outer Client for stdio — retained for __aexit__
+        self._persistent_client: Any | None = None  # return value of __aenter__; used for calls
 
         # Discover tools synchronously at init time (before event loop starts).
         self._proxy_methods: list[Any] = asyncio.run(
@@ -114,12 +115,13 @@ class McpProxyModule(ToolModule):
 
     async def startup(self) -> None:
         if self._command:  # stdio transport — open persistent subprocess
-            client = Client(self._transport())
-            self._persistent_client = await client.__aenter__()
+            self._client_handle = Client(self._transport())
+            self._persistent_client = await self._client_handle.__aenter__()
 
     async def shutdown(self) -> None:
-        if self._persistent_client is not None:
-            await self._persistent_client.__aexit__(None, None, None)
+        if self._client_handle is not None:
+            await self._client_handle.__aexit__(None, None, None)
+            self._client_handle = None
             self._persistent_client = None
 
     def _make_proxy_method(self, upstream_tool_name: str) -> Any:
