@@ -1,0 +1,28 @@
+# Vault credential source example — research agent.
+# Credentials are fetched from HashiCorp Vault using AppRole auth.
+# The env vars VAULT_ROLE_ID and VAULT_SECRET_ID must be set at startup.
+#
+# Usage:
+#   export VAULT_ROLE_ID=<your-role-id>
+#   export VAULT_SECRET_ID=<your-secret-id>
+#   scoped-mcp run --manifest examples/vault/manifest-vault.yml
+
+agent_type: research
+description: "Research agent with Vault-sourced credentials"
+
+credentials:
+  source: vault
+  vault:
+    addr: https://vault.example.com
+    auth: approle
+    role_id_env: VAULT_ROLE_ID
+    secret_id_env: VAULT_SECRET_ID
+    # {agent_type} is interpolated to the agent_type value above ("research")
+    path: "secret/data/scoped-mcp/{agent_type}"
+    kv_version: 2
+
+modules:
+  filesystem:
+    mode: read
+    config:
+      base_path: /tmp/scoped-mcp-data

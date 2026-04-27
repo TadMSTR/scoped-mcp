@@ -54,6 +54,9 @@ _SENSITIVE_KEYS = frozenset(
         "apikey",
         "access_token",
         "refresh_token",
+        # Vault-specific fields
+        "lease_id",
+        "accessor",
     }
 )
 # Log-event top-level keys whose value is operational metadata, not user-supplied
@@ -69,6 +72,8 @@ _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}")
 _LONG_HEX_RE = re.compile(r"\b[A-Fa-f0-9]{32,}\b")
 _GH_PAT_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b")
+# Vault service tokens (new hvs./hvb./hvr. format and legacy s./b./r. format)
+_VAULT_TOKEN_RE = re.compile(r"\b(?:hvs|hvb|hvr)\.[A-Za-z0-9]{10,}\b|\bs\.[A-Za-z0-9]{24,}\b")
 
 
 def _redact_string(s: str) -> str:
@@ -76,6 +81,7 @@ def _redact_string(s: str) -> str:
     s = _JWT_RE.sub("<redacted-jwt>", s)
     s = _BEARER_RE.sub("<redacted-bearer>", s)
     s = _GH_PAT_RE.sub("<redacted-gh-token>", s)
+    s = _VAULT_TOKEN_RE.sub("<redacted-vault-token>", s)
     s = _LONG_HEX_RE.sub("<redacted-hex>", s)
     return s
 
