@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-04-27
+
+### Added
+
+- **`mcp_proxy` module** — proxy any existing MCP server through scoped-mcp.
+  Supports HTTP (streamable-http) and stdio transports. Tools discovered at
+  startup via `tools/list`; forwarded per-call via `fastmcp.Client`.
+  `tool_allowlist` and `tool_denylist` config options control which upstream
+  tools are exposed. No new dependencies required.
+
+- **`type:` field in module config** — allows multiple instances of the same
+  module class under different manifest keys. Example: two `mcp_proxy` entries
+  for separate upstream servers (`task-queue` and `memory-search`). Backwards
+  compatible — existing manifests without `type:` are unchanged.
+
+### Security
+
+- `mcp_proxy` intentionally does not apply `http_proxy`'s SSRF blocklist.
+  Upstream URLs are operator-declared in the manifest, not user-supplied.
+  See `docs/threat-model.md` for the security boundary distinction.
+
 ## [0.3.3] — 2026-04-25
 
 ### Fixed
