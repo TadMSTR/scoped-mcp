@@ -18,7 +18,40 @@ Each key under `modules` is a module name. The value is:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `mode` | `"read"` or `"write"` | `null` | Tool mode. `read` = read-only tools; `write` = read + write tools; `null` = all tools (write-only modules like ntfy) |
+| `type` | string | `null` | Module class name. Set when multiple instances of the same module class are needed (e.g. two `mcp_proxy` entries for separate upstream servers). When absent, the manifest key is used as the class name. |
 | `config` | object | `{}` | Module-specific configuration |
+
+### mcp_proxy config
+
+Proxy any existing MCP server (HTTP streamable-http or stdio) through scoped-mcp without
+writing a custom module. Because multiple independent upstream servers can be proxied, use
+`type: mcp_proxy` with a unique manifest key per server.
+
+```yaml
+modules:
+  task-queue:
+    type: mcp_proxy
+    config:
+      url: http://127.0.0.1:8485/mcp   # streamable-http server
+      tool_allowlist: []               # empty = all tools exposed
+      tool_denylist: []
+
+  # stdio example — for lightweight, stateless servers only.
+  # Each tool call spawns a fresh subprocess; avoid for persistent servers.
+  some-local-tool:
+    type: mcp_proxy
+    config:
+      command: /path/to/python3
+      args: [/path/to/stateless_mcp_server.py]
+```
+
+| Config key | Type | Default | Description |
+|------------|------|---------|-------------|
+| `url` | string | — | URL of an HTTP streamable-http MCP server (mutually exclusive with `command`) |
+| `command` | string | — | Executable for a stdio MCP server (mutually exclusive with `url`) |
+| `args` | list[str] | `[]` | Arguments passed to `command` |
+| `tool_allowlist` | list[str] | `[]` | If non-empty, only these upstream tools are exposed |
+| `tool_denylist` | list[str] | `[]` | These upstream tools are always hidden (applied after allowlist) |
 
 ## Credential source config
 

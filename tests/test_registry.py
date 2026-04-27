@@ -77,3 +77,70 @@ def test_get_tool_methods_none_mode(agent_ctx: AgentContext) -> None:
     names = [m.__name__ for m in methods]
     assert "read_thing" in names
     assert "write_thing" in names
+
+
+# ── type: field dispatch tests ────────────────────────────────────────────────
+
+
+from unittest.mock import MagicMock, patch  # noqa: E402
+
+
+def _mock_module_cls():
+    """Return a mock module class whose instances report no tools."""
+    mock_cls = MagicMock()
+    mock_cls.required_credentials = []
+    mock_cls.optional_credentials = []
+    mock_instance = mock_cls.return_value
+    mock_instance.get_tool_methods.return_value = []
+    return mock_cls
+
+
+def test_type_field_dispatches_to_correct_class(agent_ctx: AgentContext) -> None:
+    """Manifest key 'task-queue' with type: mcp_proxy instantiates the mcp_proxy class."""
+    mock_cls = _mock_module_cls()
+
+    manifest = Manifest.model_validate({
+        "agent_type": "test",
+        "modules": {
+            "task-queue": {"type": "mcp_proxy", "config": {"url": "http://localhost/mcp"}}
+        },
+    })
+
+    with patch(
+        "scoped_mcp.registry._discover_module_classes", return_value={"mcp_proxy": mock_cls}
+    ):
+        build_server(agent_ctx, manifest)
+
+    mock_cls.assert_called_once()
+    call_kwargs = mock_cls.call_args.kwargs
+    assert call_kwargs["agent_ctx"] is agent_ctx
+
+
+def test_unknown_type_raises_manifest_error(agent_ctx: AgentContext) -> None:
+    """Registry raises ManifestError when type: references an unknown module class."""
+    manifest = Manifest.model_validate({
+        "agent_type": "test",
+        "modules": {"thing": {"type": "nonexistent_module"}},
+    })
+
+    with patch("scoped_mcp.registry._discover_module_classes", return_value={}):
+        with pytest.raises(ManifestError, match="nonexistent_module"):
+            build_server(agent_ctx, manifest)
+
+
+def test_type_field_none_uses_key_name(agent_ctx: AgentContext) -> None:
+    """When type is absent, the manifest key itself is used as the class name."""
+    mock_matrix_cls = _mock_module_cls()
+
+    manifest = Manifest.model_validate({
+        "agent_type": "test",
+        "modules": {"matrix": {"config": {"allowed_rooms": ["!abc:test"]}}},
+    })
+
+    with patch(
+        "scoped_mcp.registry._discover_module_classes",
+        return_value={"matrix": mock_matrix_cls},
+    ):
+        build_server(agent_ctx, manifest)
+
+    mock_matrix_cls.assert_called_once()

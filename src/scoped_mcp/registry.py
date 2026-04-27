@@ -27,7 +27,7 @@ from .audit import audited, get_ops_logger
 from .credentials import resolve_credentials
 from .exceptions import ManifestError
 from .identity import AgentContext
-from .manifest import Manifest
+from .manifest import Manifest, ModuleConfig
 from .modules._base import ToolModule
 
 logger = structlog.get_logger("ops")
@@ -72,6 +72,11 @@ def _resolve_module_credentials(
     )
 
 
+def _resolve_class_name(module_name: str, module_cfg: ModuleConfig) -> str:
+    """Return the module class name to look up — type: if set, else the manifest key."""
+    return module_cfg.type if module_cfg.type is not None else module_name
+
+
 def build_server(agent_ctx: AgentContext, manifest: Manifest) -> FastMCP:
     """Discover modules, filter to manifest, register tools, return a ready FastMCP server.
 
@@ -84,19 +89,24 @@ def build_server(agent_ctx: AgentContext, manifest: Manifest) -> FastMCP:
     available = _discover_module_classes()
     ops.info("modules_discovered", count=len(available), names=list(available.keys()))
 
-    # Validate: all manifest modules must exist
-    unknown = set(manifest.modules.keys()) - set(available.keys())
+    # Validate: all manifest modules must resolve to a known class
+    unknown = []
+    for module_name, module_cfg in manifest.modules.items():
+        class_name = _resolve_class_name(module_name, module_cfg)
+        if class_name not in available:
+            unknown.append(f"{module_name!r} (type={class_name!r})")
     if unknown:
         raise ManifestError(
-            f"Manifest references unknown module(s): {', '.join(sorted(unknown))}. "
+            f"Manifest references unknown module(s): {', '.join(unknown)}. "
             f"Available: {', '.join(sorted(available.keys()))}"
         )
 
     server = FastMCP(f"scoped-mcp/{agent_ctx.agent_id}")
 
     for module_name, module_cfg in manifest.modules.items():
-        module_cls = available[module_name]
-        ops.info("loading_module", module=module_name, mode=module_cfg.mode)
+        class_name = _resolve_class_name(module_name, module_cfg)
+        module_cls = available[class_name]
+        ops.info("loading_module", module=module_name, class_name=class_name, mode=module_cfg.mode)
 
         credentials = _resolve_module_credentials(module_cls, manifest)
         instance = module_cls(

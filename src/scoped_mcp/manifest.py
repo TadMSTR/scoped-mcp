@@ -40,6 +40,10 @@ class ModuleConfig(BaseModel):
 
     # None means "all tools" (used for write-only notification modules)
     mode: Literal["read", "write"] | None = None
+    # Optional: override the class looked up by manifest key.
+    # Use when multiple instances of the same module class are needed.
+    # Example: type: mcp_proxy with key: task-queue and key: agent-bus
+    type: str | None = None
     config: dict[str, Any] = {}
 
     @field_validator("mode", mode="before")

@@ -48,6 +48,9 @@ The Matrix module supports unencrypted rooms only (v0.1). No libolm dependency.
 **DNS-based SSRF**
 The http_proxy SSRF check validates IP addresses at init time but cannot perform DNS resolution without an async context. If a hostname resolves to an internal IP, this is not caught by the proxy — it relies on network-level controls. Run in a restricted network environment for defense in depth.
 
+**mcp_proxy loopback access**
+Unlike `http_proxy`, `mcp_proxy` does not block loopback or RFC1918 URLs — its purpose is specifically to proxy services running on the local host. The upstream URL or command is operator-declared in the manifest, not user-supplied. Agents can call any tool exposed by the upstream server that passes `tool_allowlist`/`tool_denylist` filtering. If an upstream server has weak input validation, that is not a scoped-mcp concern.
+
 ## Security properties summary
 
 | Property | Enforced by |

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from scoped_mcp.exceptions import ManifestError
-from scoped_mcp.manifest import load_manifest
+from scoped_mcp.manifest import Manifest, load_manifest
 
 
 def write_manifest(tmp_path: Path, content: str) -> str:
@@ -131,3 +131,31 @@ def test_load_manifest_file_credentials_missing_path(tmp_path: Path) -> None:
     )
     with pytest.raises(ManifestError):
         load_manifest(path)
+
+
+# ── type: field tests ─────────────────────────────────────────────────────────
+
+
+def test_module_config_type_field():
+    """type: field is accepted and stored on ModuleConfig."""
+    raw = {
+        "agent_type": "test",
+        "modules": {
+            "task-queue": {
+                "type": "mcp_proxy",
+                "config": {"url": "http://127.0.0.1:8485/mcp"},
+            }
+        },
+    }
+    manifest = Manifest.model_validate(raw)
+    assert manifest.modules["task-queue"].type == "mcp_proxy"
+
+
+def test_module_config_type_defaults_none():
+    """type: field defaults to None when absent (backwards compatible)."""
+    raw = {
+        "agent_type": "test",
+        "modules": {"matrix": {"config": {"allowed_rooms": ["!abc:test"]}}},
+    }
+    manifest = Manifest.model_validate(raw)
+    assert manifest.modules["matrix"].type is None
