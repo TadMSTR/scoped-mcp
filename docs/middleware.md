@@ -28,6 +28,10 @@ class MyMiddleware:
 > Omitting the call silently short-circuits the chain — subsequent middleware
 > and the tool handler will not run.
 
+> **Note:** `kwargs` is a copy of the original arguments — mutations do not
+> propagate to subsequent middleware or the handler. The handler always receives
+> the original, unmodified kwargs.
+
 ## Composing middleware
 
 Pass a list to `build_server()`. Middleware runs in list order (index 0 is the
@@ -80,7 +84,10 @@ the server starts normally — the OTel dependency is silently skipped.
 | `scoped_mcp.call.status` | `"ok"` or `"error"` |
 
 Tool arguments (kwargs) are intentionally **not** included in spans to prevent
-credentials or sensitive data from being sent to the OTLP collector.
+credentials or sensitive data from being sent to the OTLP collector. Exception
+messages in error spans are run through the structlog redaction filter before
+being recorded (JWTs, bearer tokens, long hex strings, and GitHub PATs are
+replaced with `<redacted-*>` placeholders).
 
 ### SigNoz setup
 

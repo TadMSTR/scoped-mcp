@@ -102,3 +102,19 @@ async def test_otel_does_not_include_kwargs_in_span(agent_ctx, mock_tracer):
     attr_keys = [call.args[0] for call in span.set_attribute.call_args_list]
     assert "secret_key" not in attr_keys
     assert "content" not in attr_keys
+
+
+@pytest.mark.asyncio
+async def test_otel_redacts_exception_message_in_status(agent_ctx, mock_tracer):
+    """Error span status description has sensitive patterns redacted."""
+    tracer, span = mock_tracer
+    with patch("scoped_mcp.contrib.otel.trace.get_tracer", return_value=tracer):
+        mw = OtelMiddleware()
+    # A bearer token in the exception message should be redacted from the span status
+    err = RuntimeError("upstream rejected: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.x.y")
+    with pytest.raises(RuntimeError):
+        await mw(agent_ctx, "failing_tool", {}, AsyncMock(side_effect=err))
+    # set_status was called; its description should not contain the raw bearer token
+    call_args = span.set_status.call_args[0][0]  # the Status object
+    status_desc = call_args.description or ""
+    assert "Bearer eyJ" not in status_desc

@@ -59,10 +59,12 @@ class MiddlewareChain:
                 if idx >= len(chain):
                     return await handler(**kwargs)
                 mw = chain[idx]
+                # Pass a copy so middleware mutations don't propagate through the chain.
+                # The handler always uses the original kwargs from the outer closure.
                 return await mw(
                     agent_ctx=agent_ctx,
                     tool_name=tool_name,
-                    kwargs=kwargs,
+                    kwargs=dict(kwargs),
                     call_next=lambda: _run(idx + 1),
                 )
 
