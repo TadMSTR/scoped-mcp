@@ -20,6 +20,7 @@ def _make_tool(name: str) -> Tool:
 @dataclass
 class FakeCallToolResult:
     """Minimal stand-in for fastmcp CallToolResult."""
+
     data: object
     content: list
     structured_content: object = None

@@ -99,12 +99,14 @@ def test_type_field_dispatches_to_correct_class(agent_ctx: AgentContext) -> None
     """Manifest key 'task-queue' with type: mcp_proxy instantiates the mcp_proxy class."""
     mock_cls = _mock_module_cls()
 
-    manifest = Manifest.model_validate({
-        "agent_type": "test",
-        "modules": {
-            "task-queue": {"type": "mcp_proxy", "config": {"url": "http://localhost/mcp"}}
-        },
-    })
+    manifest = Manifest.model_validate(
+        {
+            "agent_type": "test",
+            "modules": {
+                "task-queue": {"type": "mcp_proxy", "config": {"url": "http://localhost/mcp"}}
+            },
+        }
+    )
 
     with patch(
         "scoped_mcp.registry._discover_module_classes", return_value={"mcp_proxy": mock_cls}
@@ -118,10 +120,12 @@ def test_type_field_dispatches_to_correct_class(agent_ctx: AgentContext) -> None
 
 def test_unknown_type_raises_manifest_error(agent_ctx: AgentContext) -> None:
     """Registry raises ManifestError when type: references an unknown module class."""
-    manifest = Manifest.model_validate({
-        "agent_type": "test",
-        "modules": {"thing": {"type": "nonexistent_module"}},
-    })
+    manifest = Manifest.model_validate(
+        {
+            "agent_type": "test",
+            "modules": {"thing": {"type": "nonexistent_module"}},
+        }
+    )
 
     with patch("scoped_mcp.registry._discover_module_classes", return_value={}):
         with pytest.raises(ManifestError, match="nonexistent_module"):
@@ -132,10 +136,12 @@ def test_type_field_none_uses_key_name(agent_ctx: AgentContext) -> None:
     """When type is absent, the manifest key itself is used as the class name."""
     mock_matrix_cls = _mock_module_cls()
 
-    manifest = Manifest.model_validate({
-        "agent_type": "test",
-        "modules": {"matrix": {"config": {"allowed_rooms": ["!abc:test"]}}},
-    })
+    manifest = Manifest.model_validate(
+        {
+            "agent_type": "test",
+            "modules": {"matrix": {"config": {"allowed_rooms": ["!abc:test"]}}},
+        }
+    )
 
     with patch(
         "scoped_mcp.registry._discover_module_classes",
