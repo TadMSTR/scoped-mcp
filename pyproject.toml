@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "scoped-mcp"
-version = "0.5.0"
+version = "0.6.0"
 description = "Per-agent scoped MCP tool proxy with credential isolation and audit logging"
 readme = "README.md"
 license = "MIT"
@@ -39,6 +39,11 @@ Issues = "https://github.com/TadMSTR/scoped-mcp/issues"
 http = ["httpx"]       # enables grafana, influxdb, ntfy, slack, discord, matrix, http_proxy
 smtp = ["aiosmtplib"]  # enables smtp module
 sqlite = ["aiosqlite"] # enables sqlite module
+otel = [
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.20",
+]
 all = ["httpx", "aiosmtplib", "aiosqlite"]
 dev = ["pytest", "pytest-asyncio", "pytest-cov", "ruff"]
 

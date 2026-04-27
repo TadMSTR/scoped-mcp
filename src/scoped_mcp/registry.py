@@ -29,6 +29,7 @@ from .credentials import resolve_credentials
 from .exceptions import ManifestError
 from .identity import AgentContext
 from .manifest import Manifest, ModuleConfig
+from .middleware import MiddlewareChain, ToolCallMiddleware
 from .modules._base import ToolModule
 
 logger = structlog.get_logger("ops")
@@ -102,11 +103,19 @@ def _resolve_class_name(module_name: str, module_cfg: ModuleConfig) -> str:
     return module_cfg.type if module_cfg.type is not None else module_name
 
 
-def build_server(agent_ctx: AgentContext, manifest: Manifest) -> FastMCP:
+def build_server(
+    agent_ctx: AgentContext,
+    manifest: Manifest,
+    middleware: list[ToolCallMiddleware] | None = None,
+) -> FastMCP:
     """Discover modules, filter to manifest, register tools, return a ready FastMCP server.
 
     Each module gets its own child FastMCP instance mounted on the parent with
     namespace=module.name. Tool names become e.g. "filesystem_read_file".
+
+    middleware: optional list of ToolCallMiddleware applied to every tool call.
+        Middleware wraps the @audited function — spans include the full call duration.
+        Empty list (default) adds no overhead.
     """
     ops = get_ops_logger()
     ops.info("registry_start", agent_id=agent_ctx.agent_id, agent_type=agent_ctx.agent_type)
@@ -146,6 +155,8 @@ def build_server(agent_ctx: AgentContext, manifest: Manifest) -> FastMCP:
         lifespan=_make_module_lifespan([inst for _, _, inst in all_instances]),
     )
 
+    chain = MiddlewareChain(middleware or [])
+
     # Register tools with child servers and mount.
     for module_name, module_cfg, instance in all_instances:
         child = FastMCP(module_name)
@@ -157,6 +168,8 @@ def build_server(agent_ctx: AgentContext, manifest: Manifest) -> FastMCP:
             # Wrap with @audited — this is the only place @audited is applied.
             # Module authors must not apply it themselves.
             wrapped = audited(tool_name)(method)
+            if middleware:
+                wrapped = chain.wrap(tool_name, wrapped, agent_ctx)
             child.tool(name=tool_name)(wrapped)
             ops.info("tool_registered", tool=tool_name, mode=module_cfg.mode)
         server.mount(child, prefix=module_name)
