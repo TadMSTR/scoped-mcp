@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-04-27
+
+Final phase of the scoped-mcp hardening roadmap. Project moves to
+`Development Status :: 4 - Beta` — the four core guardrails (per-agent
+credential isolation, scope enforcement, audit logging, and now
+operator-in-the-loop approval) are stable and exercised by 432 tests at
+82% coverage.
+
+### Added
+
+- **`HitlMiddleware`** (`scoped_mcp.hitl`) — human-in-the-loop approval
+  middleware. Glob-pattern matching against tool names selects calls that
+  require explicit operator approval (`approval_required`) or are logged-only
+  (`shadow`). Shadow takes precedence: a tool matched by both shadow and
+  approval_required returns a synthetic empty-success response without ever
+  forwarding upstream, regardless of operator decision. Auto-rejects after
+  `timeout_seconds` (default 300s) with no decision. Backend write failures
+  fail closed — the agent receives `HitlRejectedError`, not a forwarded call.
+
+- **Notifier abstraction** (`scoped_mcp.hitl_notify`) — `LogNotifier`
+  (default, no extra deps), `NtfyNotifier`, `WebhookNotifier`, `MatrixNotifier`.
+  All transport failures are logged and swallowed so a notification outage
+  cannot wedge the approval loop. Notifiers receive only the sanitised
+  argument summary — raw values never reach the operator channel.
+
+- **HITL operator CLI** (`scoped-mcp hitl …`) — `list`, `approve <id>`,
+  `reject <id> [reason]`. Reads the Dragonfly URL from the manifest.
+  Verifies the approval key is still pending before publishing a decision.
+
+- **`hitl:` manifest section** — `approval_required`, `shadow`,
+  `timeout_seconds`, `notify` (type + topic/room/url with format validators).
+  Manifest validator: HITL with non-empty patterns requires
+  `state_backend.type: dragonfly`.
+
+- **`HitlRejectedError`** — raised on explicit reject, `reject:<reason>`, or
+  timeout. Generic agent-facing message; rule/pattern detail stays in the
+  audit log.
+
+- **Approval ID format** — `{agent_id}.{uuid_hex_12}` with 48 bits of entropy
+  in the random suffix. The agent_id prefix lets the operator CLI find the
+  right Dragonfly key prefix without a separate lookup key.
+
+### Changed
+
+- **`StateBackend.subscribe()` is now a coroutine returning an async iterator**
+  (was an async generator). Registration / network handshake completes
+  synchronously when awaited, eliminating a publish-before-subscribe race
+  that caused fast operator decisions to be lost. Callers must use
+  `sub = await state.subscribe(channel)` before `async for msg in sub`.
+
+- **Project status: `Development Status :: 4 - Beta`** — bumped from Alpha now
+  that the v0.7 → v1.0 hardening roadmap is complete.
+
 ## [0.9.0] — 2026-04-27
 
 ### Added
