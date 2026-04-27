@@ -52,8 +52,14 @@ Thumbs.db
 secrets.yml
 secrets.yaml
 *.secrets
+.env
+*.env
 .env.local
 .env.*.local
+
+# Core dumps
+core.*
+*.core
 
 # Logs
 *.log
