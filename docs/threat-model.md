@@ -51,6 +51,16 @@ The http_proxy SSRF check validates IP addresses at init time but cannot perform
 **mcp_proxy loopback access**
 Unlike `http_proxy`, `mcp_proxy` does not block loopback or RFC1918 URLs — its purpose is specifically to proxy services running on the local host. The upstream URL or command is operator-declared in the manifest, not user-supplied. Agents can call any tool exposed by the upstream server that passes `tool_allowlist`/`tool_denylist` filtering. If an upstream server has weak input validation, that is not a scoped-mcp concern.
 
+**mcp_proxy schema validation — semantic gap (v0.9)**
+v0.9 introduced JSON Schema validation of arguments forwarded through `mcp_proxy`: the upstream tool's declared `inputSchema` is cached at startup and every `tools/call` is validated before forwarding. This catches *shape* and *type* errors — missing required fields, wrong types, out-of-range values declared by the schema, and unknown fields when the schema sets `additionalProperties: false`.
+
+Schema validation does **not** prevent semantic abuse: a syntactically valid argument that exploits the upstream tool's behaviour is forwarded unchanged. A `read_file` tool whose schema accepts any string in `path` will accept `/etc/shadow` if the upstream allows it; schema validation cannot reason about which paths are sensitive. Operators must restrict `mcp_proxy` upstreams to trusted servers and pair schema validation with `tool_allowlist`, `ArgumentFilterMiddleware` rules for known-bad patterns, and (where appropriate) HITL approval on dangerous tools.
+
+A malicious or misconfigured upstream can also serve a permissive `inputSchema` (e.g., `additionalProperties: true`, no required fields, no type constraints) — schema validation accepts whatever the upstream declared. Schema cache refresh respects the operator's `tool_allowlist`/`tool_denylist`, so a refreshed `tools/list` cannot widen the exposed tool surface, but it cannot tighten an already-permissive schema either.
+
+**Argument filter middleware — encoding limits (v0.9)**
+`ArgumentFilterMiddleware` inspects top-level string arguments only. Nested structures (dicts, lists) are not walked; operators needing deep inspection should write more specific upstream tool wrappers. Base64 decode is capped at 64 KiB — larger candidates are matched against the raw string only, so a payload buried in a >64 KiB base64 blob can evade decode-aware rules. Operator-supplied regex patterns are trusted; Python's stdlib `re` has no per-match timeout, so a pathological pattern can stall the middleware chain. Review patterns for catastrophic backtracking before deploying.
+
 ## Security properties summary
 
 | Property | Enforced by |

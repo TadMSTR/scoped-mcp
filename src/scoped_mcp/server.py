@@ -22,6 +22,7 @@ def _build_middleware(
     agent_id: str,
     state: StateBackend,
     rate_limits_cfg: object,
+    argument_filters_cfg: object,
 ) -> list[ToolCallMiddleware]:
     """Build the middleware stack from manifest config and environment."""
     middleware: list[ToolCallMiddleware] = []
@@ -36,6 +37,19 @@ def _build_middleware(
                 agent_id=agent_id,
                 global_limit=rate_limits_cfg.global_limit,
                 per_tool=rate_limits_cfg.per_tool,
+            )
+        )
+
+    # Argument filtering — auto-registered when argument_filters is present.
+    # Placed AFTER rate-limiting so a flood of policy-violating calls still
+    # counts toward the rate limit.
+    if argument_filters_cfg:
+        from .contrib.arg_filter import ArgumentFilterMiddleware
+
+        middleware.append(
+            ArgumentFilterMiddleware(
+                rules=[r.model_dump() for r in argument_filters_cfg],
+                agent_id=agent_id,
             )
         )
 
@@ -102,6 +116,7 @@ def _run_serve(args: argparse.Namespace) -> None:
             agent_id=agent_ctx.agent_id,
             state=state,
             rate_limits_cfg=manifest.rate_limits,
+            argument_filters_cfg=manifest.argument_filters,
         )
 
         server = build_server(agent_ctx, manifest, middleware=middleware)

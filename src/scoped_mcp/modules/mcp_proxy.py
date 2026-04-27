@@ -42,9 +42,28 @@ import asyncio
 import re
 from typing import Any, ClassVar
 
+import jsonschema
+import structlog
 from fastmcp import Client
 
 from ._base import ToolModule
+
+_log = structlog.get_logger("audit")
+
+
+def _coerce_schema(raw: Any) -> dict[str, Any] | None:
+    """Return raw if it is a usable JSON Schema dict, else None.
+
+    fastmcp tool descriptors sometimes carry pydantic models or empty dicts —
+    only a non-empty dict is a real schema worth validating against.
+    """
+    if isinstance(raw, dict) and raw:
+        return raw
+    return None
+
+
+class _ProxyValidationError(ValueError):
+    """Raised when proxied arguments fail upstream inputSchema validation."""
 
 
 class McpProxyModule(ToolModule):
@@ -72,6 +91,11 @@ class McpProxyModule(ToolModule):
         self._client_handle: Any | None = None  # outer Client for stdio — retained for __aexit__
         self._persistent_client: Any | None = None  # return value of __aenter__; used for calls
 
+        # {upstream_tool_name: inputSchema_dict | None} — populated at discovery, refreshed
+        # on stdio reconnect via _refresh_schemas(). Used by proxy_call to validate arguments
+        # against the upstream-declared JSON Schema before forwarding the call.
+        self._schemas: dict[str, dict[str, Any] | None] = {}
+
         # Discover tools synchronously at init time (before event loop starts).
         self._proxy_methods: list[Any] = asyncio.run(
             asyncio.wait_for(self._discover_tools(), timeout=self._discovery_timeout)
@@ -84,7 +108,11 @@ class McpProxyModule(ToolModule):
         return {"command": self._command, "args": self._args}
 
     async def _discover_tools(self) -> list[Any]:
-        """Connect to upstream, enumerate tools, build proxy callables."""
+        """Connect to upstream, enumerate tools, build proxy callables.
+
+        Also populates ``self._schemas`` with each upstream tool's ``inputSchema``
+        for use by per-call argument validation.
+        """
         async with Client(self._transport()) as client:
             upstream_tools = await client.list_tools()
 
@@ -108,15 +136,52 @@ class McpProxyModule(ToolModule):
                 )
             seen_safe.add(safe)
 
+            self._schemas[tool_name] = _coerce_schema(getattr(upstream_tool, "inputSchema", None))
+
             method = self._make_proxy_method(tool_name)
             methods.append(method)
 
         return methods
 
+    async def _refresh_schemas_from_client(self, client: Any) -> None:
+        """Re-fetch tools/list from an already-open client and rebuild the schema cache.
+
+        Filters via the same allowlist/denylist as ``_discover_tools`` so a
+        refresh can never widen the exposed tool surface — a malicious or
+        misconfigured upstream that suddenly advertises new tools cannot use a
+        refresh to bypass the operator's allowlist.
+
+        Refresh failures are logged at warning and leave the existing cache
+        intact (fail-safe: stale-but-restrictive over no validation at all).
+        """
+        try:
+            upstream_tools = await client.list_tools()
+        except Exception as e:
+            _log.warning(
+                "mcp_proxy_schema_refresh_failed",
+                module=self.name,
+                error=type(e).__name__,
+            )
+            return
+
+        new_cache: dict[str, dict[str, Any] | None] = {}
+        for t in upstream_tools:
+            tool_name = t.name
+            if self._tool_allowlist and tool_name not in self._tool_allowlist:
+                continue
+            if tool_name in self._tool_denylist:
+                continue
+            new_cache[tool_name] = _coerce_schema(getattr(t, "inputSchema", None))
+        self._schemas = new_cache
+
     async def startup(self) -> None:
         if self._command:  # stdio transport — open persistent subprocess
             self._client_handle = Client(self._transport())
             self._persistent_client = await self._client_handle.__aenter__()
+            # Refresh schemas against the live persistent connection so a
+            # restart of this server picks up any upstream-side schema changes
+            # that landed between __init__ discovery and lifespan startup.
+            await self._refresh_schemas_from_client(self._persistent_client)
 
     async def shutdown(self) -> None:
         if self._client_handle is not None:
@@ -124,11 +189,43 @@ class McpProxyModule(ToolModule):
             self._client_handle = None
             self._persistent_client = None
 
+    def _validate_arguments(self, upstream_tool_name: str, kwargs: dict[str, Any]) -> None:
+        """Validate kwargs against the cached upstream inputSchema.
+
+        On schema mismatch raises ``_ProxyValidationError``. Logs a warning to
+        the audit stream with the tool name, the validation error message, and
+        the *names* of the supplied arguments — never the values.
+        """
+        schema = self._schemas.get(upstream_tool_name)
+        if schema is None:
+            _log.debug(
+                "mcp_proxy_no_schema",
+                module=self.name,
+                tool=upstream_tool_name,
+            )
+            return
+        try:
+            jsonschema.validate(kwargs, schema)
+        except jsonschema.ValidationError as e:
+            _log.warning(
+                "mcp_proxy_schema_validation_failed",
+                module=self.name,
+                tool=upstream_tool_name,
+                validation_error=e.message,
+                argument_keys=sorted(kwargs.keys()),
+            )
+            raise _ProxyValidationError(
+                f"mcp_proxy: arguments to {upstream_tool_name!r} failed schema validation: "
+                f"{e.message}"
+            ) from e
+
     def _make_proxy_method(self, upstream_tool_name: str) -> Any:
         """Create an async callable that forwards a single tool call upstream."""
         module = self
 
         async def proxy_call(**kwargs: Any) -> Any:
+            module._validate_arguments(upstream_tool_name, kwargs)
+
             if module._persistent_client is not None:
                 # stdio: reuse the persistent subprocess opened in startup()
                 result = await module._persistent_client.call_tool(

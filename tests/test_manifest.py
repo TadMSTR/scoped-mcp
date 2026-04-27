@@ -428,3 +428,99 @@ def test_credentials_vault_valid(tmp_path: Path) -> None:
     assert m.credentials.source == "vault"
     assert m.credentials.vault is not None
     assert m.credentials.vault.addr == "https://vault.example.com"
+
+
+# ── argument_filters (v0.9) ──────────────────────────────────────────────────
+
+
+def test_argument_filters_minimal(tmp_path: Path) -> None:
+    path = write_manifest(
+        tmp_path,
+        """\
+        agent_type: research
+        modules:
+          ntfy: {}
+        argument_filters:
+          - name: creds
+            pattern: "(password|secret)"
+        """,
+    )
+    m = load_manifest(path)
+    assert m.argument_filters is not None
+    assert len(m.argument_filters) == 1
+    rule = m.argument_filters[0]
+    assert rule.name == "creds"
+    assert rule.action == "block"
+    assert rule.fields == ["*"]
+
+
+def test_argument_filters_full(tmp_path: Path) -> None:
+    path = write_manifest(
+        tmp_path,
+        """\
+        agent_type: research
+        modules:
+          ntfy: {}
+        argument_filters:
+          - name: trav
+            pattern: "\\\\.\\\\./"
+            fields: ["path", "file_path"]
+            action: block
+            decode: [url]
+            case_insensitive: false
+        """,
+    )
+    m = load_manifest(path)
+    rule = m.argument_filters[0]
+    assert rule.fields == ["path", "file_path"]
+    assert rule.decode == ["url"]
+
+
+def test_argument_filters_invalid_regex_rejected(tmp_path: Path) -> None:
+    path = write_manifest(
+        tmp_path,
+        """\
+        agent_type: research
+        modules:
+          ntfy: {}
+        argument_filters:
+          - name: bad
+            pattern: "[unclosed"
+        """,
+    )
+    with pytest.raises(ManifestError, match="not a valid regex"):
+        load_manifest(path)
+
+
+def test_argument_filters_invalid_decode_step_rejected(tmp_path: Path) -> None:
+    path = write_manifest(
+        tmp_path,
+        """\
+        agent_type: research
+        modules:
+          ntfy: {}
+        argument_filters:
+          - name: x
+            pattern: ".*"
+            decode: [rot13]
+        """,
+    )
+    with pytest.raises(ManifestError):
+        load_manifest(path)
+
+
+def test_argument_filters_extra_field_rejected(tmp_path: Path) -> None:
+    path = write_manifest(
+        tmp_path,
+        """\
+        agent_type: research
+        modules:
+          ntfy: {}
+        argument_filters:
+          - name: x
+            pattern: ".*"
+            unknown_field: yes
+        """,
+    )
+    with pytest.raises(ManifestError):
+        load_manifest(path)
