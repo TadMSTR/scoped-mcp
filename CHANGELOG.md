@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-04-27
+
+### Added
+
+- **`StateBackend` protocol** — pluggable shared state for rate limiting and HITL.
+  `InProcessBackend` (default, no external dependencies) uses asyncio locks and a
+  sliding-window deque. `DragonflyBackend` (optional `[dragonfly]` extra) uses
+  redis-py with a Lua sorted-set sliding window for atomic multi-process rate limiting.
+  Keys are namespaced `scoped-mcp:{agent_id}:` to prevent cross-agent bleed.
+
+- **`[dragonfly]` optional extra** — `redis>=5.0,<6`. Enables `DragonflyBackend` for
+  shared state across processes. Works with any Redis-compatible server (Dragonfly,
+  Valkey, Redis).
+
+- **`RateLimitMiddleware`** — sliding window rate limiting in `scoped_mcp.contrib.rate_limit`.
+  Configures via `rate_limits:` manifest section. Supports a global per-agent limit and
+  per-tool limits with glob pattern support (`mcp_proxy.*`). Glob patterns share a single
+  counter so all matched tools count against the same window. Fail-closed: backend errors
+  block tool calls rather than silently bypassing limits.
+
+- **`scoped-mcp validate` CLI subcommand** — validates a manifest file, exits 0 on success
+  and 1 on failure. Suitable for CI pre-flight checks. Usage:
+  `scoped-mcp validate --manifest /path/to/manifest.yml`
+
+- **`scoped-mcp run` CLI subcommand** — explicit subcommand replacing the legacy flat
+  invocation. Legacy flat args (`scoped-mcp --manifest ...`) are preserved for backwards
+  compatibility.
+
+- **`state_backend:` manifest section** — configures the state backend.
+  `type: in_process` (default) or `type: dragonfly` (requires `url:`).
+
+- **`rate_limits:` manifest section** — declares global and per-tool sliding window limits.
+  Format: `<N>/second|minute|hour`. Supports glob patterns in `per_tool:`.
+
+- **`credentials.source: vault`** — manifest schema now accepts Vault as a credential source
+  (schema validation only in v0.7; full Vault integration ships in v0.8). Requires a
+  `vault:` block with `addr`, `auth`, and `path`.
+
+- **`[vault]` optional extra** — `hvac>=2.0,<3`. Reserved for v0.8 Vault integration.
+
+### Changed
+
+- **Manifest validation strengthened** — all Pydantic config models now use
+  `extra="forbid"`, including `RateLimitsConfig` and `ModuleConfig`. Unknown fields in
+  any manifest section raise `ManifestError` at load time.
+
+- **`build_state_backend()` factory** — wires the `StateBackend` from manifest config.
+  Called automatically by `scoped-mcp run`; available for programmatic use.
+
 ## [0.6.0] — 2026-04-27
 
 ### Added
