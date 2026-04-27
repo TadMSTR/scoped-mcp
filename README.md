@@ -166,6 +166,37 @@ modules:
 
 credentials:
   source: env                 # or "file" with path: /run/secrets/agent.yml
+  # or: source: vault — see Vault Credentials section
+
+# Optional: pluggable state backend (required for rate limiting and HITL)
+state_backend:
+  type: in_process            # default — no external deps
+  # type: dragonfly
+  # url: redis://127.0.0.1:6379/0
+
+# Optional: sliding-window rate limits
+rate_limits:
+  global: 60/minute           # all tools combined
+  per_tool:
+    filesystem_write_file: 10/minute
+    "mcp_proxy.*": 30/minute  # glob — all matched tools share one counter
+
+# Optional: argument-value filtering
+argument_filters:
+  - name: no-credentials
+    pattern: '(?i)(password|secret|token)\s*[:=]\s*\S+'
+    fields: [path, query, body]
+    action: block             # or: warn
+    decode: [base64, urlsafe_base64, url]
+
+# Optional: human-in-the-loop approval (requires state_backend.type: dragonfly)
+hitl:
+  approval_required: ["filesystem_delete_*", "sqlite_execute"]
+  shadow: ["mcp_proxy.*"]    # log-only, return synthetic empty success
+  timeout_seconds: 300
+  notify:
+    type: ntfy               # or: log (default), webhook, matrix
+    topic: homelab-hitl
 ```
 
 ### Manifest-to-Tools Mapping
