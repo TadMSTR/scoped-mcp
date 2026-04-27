@@ -129,6 +129,35 @@ class RateLimitsConfig(BaseModel):
         return v
 
 
+class ArgumentFilterRule(BaseModel):
+    """A single argument-content filter rule from the manifest."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    pattern: str
+    fields: list[str] = ["*"]
+    action: Literal["block", "warn"] = "block"
+    decode: list[Literal["base64", "urlsafe_base64", "url"]] = []
+    case_insensitive: bool = False
+
+    @field_validator("fields")
+    @classmethod
+    def _fields_nonempty(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("argument_filters[*].fields must not be empty")
+        return v
+
+    @field_validator("pattern")
+    @classmethod
+    def _pattern_compiles(cls, v: str) -> str:
+        try:
+            re.compile(v)
+        except re.error as e:
+            raise ValueError(f"argument_filters[*].pattern is not a valid regex: {e}") from e
+        return v
+
+
 class ModuleConfig(BaseModel):
     """Per-module configuration from the manifest."""
 
@@ -161,6 +190,7 @@ class Manifest(BaseModel):
     credentials: CredentialSourceConfig = CredentialSourceConfig()
     state_backend: StateBackendConfig = StateBackendConfig()
     rate_limits: RateLimitsConfig | None = None
+    argument_filters: list[ArgumentFilterRule] | None = None
 
     @field_validator("agent_type")
     @classmethod
