@@ -7,12 +7,27 @@ Fails fast with clear messages on any misconfiguration.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from .audit import configure_logging, get_ops_logger
 from .identity import AgentContext
 from .manifest import load_manifest
+from .middleware import ToolCallMiddleware
 from .registry import build_server
+
+
+def _build_middleware() -> list[ToolCallMiddleware]:
+    """Auto-enable OTel middleware when the standard endpoint env var is set."""
+    if not os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+        return []
+    try:
+        from .contrib.otel import OtelMiddleware
+
+        return [OtelMiddleware()]
+    except ImportError:
+        # [otel] extra not installed — skip silently
+        return []
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -65,7 +80,7 @@ def main(argv: list[str] | None = None) -> None:
             modules=list(manifest.modules.keys()),
         )
 
-        server = build_server(agent_ctx, manifest)
+        server = build_server(agent_ctx, manifest, middleware=_build_middleware())
         ops.info("server_ready", transport="stdio")
 
         server.run(transport="stdio")

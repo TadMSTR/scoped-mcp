@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-04-27
+
+### Added
+
+- **Tool call middleware** — `ToolCallMiddleware` protocol and `MiddlewareChain`
+  for composable per-call interception (`src/scoped_mcp/middleware.py`). Middleware
+  wraps every tool invocation at the registry level, after scoping and before
+  execution. ASGI-style `call_next` chain. Pass a list of middleware to
+  `build_server(middleware=[...])`.
+
+- **`OtelMiddleware`** — reference implementation in `scoped_mcp.contrib.otel`.
+  Emits one OpenTelemetry span per tool call with `scoped_mcp.*` attributes
+  (`agent.id`, `agent.type`, `tool.name`, `call.status`). Tool arguments are
+  excluded from spans to prevent credential leakage. Auto-enabled when
+  `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Install with `pip install scoped-mcp[otel]`.
+  Works with SigNoz, Grafana Tempo, Jaeger, and Langfuse OTLP ingest.
+
+- **`[otel]` optional extra** — `opentelemetry-api>=1.20`, `opentelemetry-sdk>=1.20`,
+  `opentelemetry-exporter-otlp-proto-grpc>=1.20`.
+
+- **`build_server()` `middleware=` parameter** — pass a list of `ToolCallMiddleware`
+  instances for programmatic configuration. Empty list is the default (no overhead).
+
 ## [0.5.0] — 2026-04-27
 
 ### Added
