@@ -5,6 +5,13 @@ at startup via MCP tools/list and registered dynamically. The manifest key
 becomes the tool name prefix; tool_allowlist/tool_denylist filter which
 upstream tools are exposed.
 
+HTTP transport: a new connection is opened per tool call (cheap, stateless).
+
+stdio transport: two subprocess spawns occur per module lifetime:
+  1. A short-lived subprocess during __init__ for tool discovery (tools/list).
+  2. A persistent subprocess opened in startup() and reused for all tool calls.
+The persistent subprocess is closed in shutdown() when the server stops.
+
 Security note: unlike http_proxy, this module does NOT block loopback or
 RFC1918 addresses. mcp_proxy is explicitly for proxying local services
 declared by the operator in the manifest. The URL is operator-controlled,
@@ -62,6 +69,7 @@ class McpProxyModule(ToolModule):
         self._tool_allowlist: set[str] = set(allowlist) if allowlist else set()
         self._tool_denylist: set[str] = set(denylist)
         self._discovery_timeout: float = float(config.get("discovery_timeout_seconds", 10.0))
+        self._persistent_client: Any | None = None  # set in startup() for stdio
 
         # Discover tools synchronously at init time (before event loop starts).
         self._proxy_methods: list[Any] = asyncio.run(
@@ -104,13 +112,30 @@ class McpProxyModule(ToolModule):
 
         return methods
 
+    async def startup(self) -> None:
+        if self._command:  # stdio transport — open persistent subprocess
+            client = Client(self._transport())
+            self._persistent_client = await client.__aenter__()
+
+    async def shutdown(self) -> None:
+        if self._persistent_client is not None:
+            await self._persistent_client.__aexit__(None, None, None)
+            self._persistent_client = None
+
     def _make_proxy_method(self, upstream_tool_name: str) -> Any:
         """Create an async callable that forwards a single tool call upstream."""
         module = self
 
         async def proxy_call(**kwargs: Any) -> Any:
-            async with Client(module._transport()) as client:
-                result = await client.call_tool(upstream_tool_name, arguments=kwargs)
+            if module._persistent_client is not None:
+                # stdio: reuse the persistent subprocess opened in startup()
+                result = await module._persistent_client.call_tool(
+                    upstream_tool_name, arguments=kwargs
+                )
+            else:
+                # HTTP: open a connection per call (cheap, stateless)
+                async with Client(module._transport()) as client:
+                    result = await client.call_tool(upstream_tool_name, arguments=kwargs)
             if result.data is not None:
                 return result.data
             texts = [block.text for block in result.content if hasattr(block, "text")]

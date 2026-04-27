@@ -18,6 +18,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import pkgutil
+from contextlib import asynccontextmanager
 
 import structlog
 from fastmcp import FastMCP
@@ -72,6 +73,25 @@ def _resolve_module_credentials(
     )
 
 
+def _make_module_lifespan(module_instances: list) -> object:
+    """Build a FastMCP-compatible lifespan that calls startup/shutdown on all modules."""
+
+    @asynccontextmanager
+    async def lifespan(server):  # server arg required by FastMCP lifespan protocol
+        ops = get_ops_logger()
+        for mod in module_instances:
+            ops.info("module_startup", module=mod.name)
+            await mod.startup()
+        try:
+            yield {}
+        finally:
+            for mod in reversed(module_instances):
+                ops.info("module_shutdown", module=mod.name)
+                await mod.shutdown()
+
+    return lifespan
+
+
 def _resolve_class_name(module_name: str, module_cfg: ModuleConfig) -> str:
     """Return the module class name to look up — type: if set, else the manifest key."""
     return module_cfg.type if module_cfg.type is not None else module_name
@@ -101,26 +121,32 @@ def build_server(agent_ctx: AgentContext, manifest: Manifest) -> FastMCP:
             f"Available: {', '.join(sorted(available.keys()))}"
         )
 
-    server = FastMCP(f"scoped-mcp/{agent_ctx.agent_id}")
-
+    # Instantiate all modules first so they can be captured in the lifespan closure.
+    all_instances = []
     for module_name, module_cfg in manifest.modules.items():
         class_name = _resolve_class_name(module_name, module_cfg)
         module_cls = available[class_name]
         ops.info("loading_module", module=module_name, class_name=class_name, mode=module_cfg.mode)
-
         credentials = _resolve_module_credentials(module_cls, manifest)
         instance = module_cls(
             agent_ctx=agent_ctx,
             credentials=credentials,
             config=module_cfg.config,
         )
+        all_instances.append((module_name, module_cfg, instance))
 
+    # Create the parent server with the module lifespan.
+    server = FastMCP(
+        f"scoped-mcp/{agent_ctx.agent_id}",
+        lifespan=_make_module_lifespan([inst for _, _, inst in all_instances]),
+    )
+
+    # Register tools with child servers and mount.
+    for module_name, module_cfg, instance in all_instances:
         child = FastMCP(module_name)
-
         tool_methods = instance.get_tool_methods(module_cfg.mode)
         if not tool_methods:
             ops.warning("no_tools_registered", module=module_name, mode=module_cfg.mode)
-
         for method in tool_methods:
             tool_name = f"{module_name}_{method.__name__}"
             # Wrap with @audited — this is the only place @audited is applied.
@@ -128,7 +154,6 @@ def build_server(agent_ctx: AgentContext, manifest: Manifest) -> FastMCP:
             wrapped = audited(tool_name)(method)
             child.tool(name=tool_name)(wrapped)
             ops.info("tool_registered", tool=tool_name, mode=module_cfg.mode)
-
         server.mount(child, prefix=module_name)
 
     ops.info("registry_complete", agent_id=agent_ctx.agent_id)

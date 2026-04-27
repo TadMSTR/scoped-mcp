@@ -36,13 +36,13 @@ modules:
       tool_allowlist: []               # empty = all tools exposed
       tool_denylist: []
 
-  # stdio example — for lightweight, stateless servers only.
-  # Each tool call spawns a fresh subprocess; avoid for persistent servers.
-  some-local-tool:
+  # stdio example — opens a persistent subprocess for the server's lifetime.
+  # Discovery uses a short-lived subprocess; tool calls reuse the persistent one.
+  agent-bus:
     type: mcp_proxy
     config:
       command: /path/to/python3
-      args: [/path/to/stateless_mcp_server.py]
+      args: [/path/to/mcp_server.py]
 ```
 
 | Config key | Type | Default | Description |
@@ -53,6 +53,11 @@ modules:
 | `tool_allowlist` | list[str] | `[]` | If non-empty, only these upstream tools are exposed |
 | `tool_denylist` | list[str] | `[]` | These upstream tools are always hidden (applied after allowlist) |
 | `discovery_timeout_seconds` | float | `10.0` | Timeout for connecting to the upstream server at startup |
+
+> **stdio transport lifecycle:** Two subprocess spawns occur per module lifetime. A short-lived
+> subprocess runs during startup for tool discovery (`tools/list`). A persistent subprocess is
+> then opened when the server starts and reused for all tool calls. It is closed cleanly on
+> server shutdown. HTTP transport reconnects per-call (no persistent connection).
 
 > **Note:** The `mode:` field has no effect for `mcp_proxy`. Use `tool_allowlist` or
 > `tool_denylist` to restrict which upstream tools are exposed. If no filter is set, all

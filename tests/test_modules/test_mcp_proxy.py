@@ -267,3 +267,84 @@ def test_discovery_timeout_default(agent_ctx):
         )
 
     assert mod._discovery_timeout == 10.0
+
+
+# ── Persistent stdio tests ────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def stdio_module(agent_ctx):
+    """McpProxyModule (stdio transport) created in sync context.
+
+    Module is created with Client patched for discovery. startup() is NOT
+    called here — tests call it explicitly with their own mock setup.
+    """
+    with patch("scoped_mcp.modules.mcp_proxy.Client") as MockClient:
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_cm.list_tools = AsyncMock(return_value=[_make_tool("log_event")])
+        MockClient.return_value = mock_cm
+        mod = McpProxyModule(
+            agent_ctx=agent_ctx,
+            credentials={},
+            config={"command": "/path/to/python3", "args": ["/path/to/server.py"]},
+        )
+        yield mod
+
+
+@pytest.mark.asyncio
+async def test_stdio_startup_opens_persistent_client(stdio_module):
+    """startup() opens a persistent Client for stdio transport."""
+    mock_persistent = AsyncMock()
+    mock_persistent.__aenter__ = AsyncMock(return_value=mock_persistent)
+    mock_persistent.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("scoped_mcp.modules.mcp_proxy.Client", return_value=mock_persistent):
+        await stdio_module.startup()
+
+    assert stdio_module._persistent_client is mock_persistent
+    mock_persistent.__aenter__.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_http_startup_does_not_open_persistent_client(http_module):
+    """startup() is a no-op for HTTP transport — HTTP reconnects per-call."""
+    mod, _ = http_module
+    await mod.startup()
+    assert mod._persistent_client is None
+
+
+@pytest.mark.asyncio
+async def test_stdio_proxy_call_uses_persistent_client(stdio_module):
+    """Tool calls on stdio module use _persistent_client; no new subprocess spawned."""
+    fake_result = FakeCallToolResult(data={"ok": True}, content=[])
+    mock_persistent = AsyncMock()
+    mock_persistent.__aenter__ = AsyncMock(return_value=mock_persistent)
+    mock_persistent.__aexit__ = AsyncMock(return_value=None)
+    mock_persistent.call_tool = AsyncMock(return_value=fake_result)
+
+    with patch("scoped_mcp.modules.mcp_proxy.Client", return_value=mock_persistent) as MockClient:
+        await stdio_module.startup()
+        MockClient.reset_mock()
+        methods = stdio_module.get_tool_methods(mode=None)
+        result = await methods[0]()
+
+    MockClient.assert_not_called()
+    mock_persistent.call_tool.assert_called_once_with("log_event", arguments={})
+    assert result == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_shutdown_closes_persistent_client(stdio_module):
+    """shutdown() calls __aexit__ on the persistent client and clears the reference."""
+    mock_persistent = AsyncMock()
+    mock_persistent.__aenter__ = AsyncMock(return_value=mock_persistent)
+    mock_persistent.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("scoped_mcp.modules.mcp_proxy.Client", return_value=mock_persistent):
+        await stdio_module.startup()
+        await stdio_module.shutdown()
+
+    mock_persistent.__aexit__.assert_called_once_with(None, None, None)
+    assert stdio_module._persistent_client is None

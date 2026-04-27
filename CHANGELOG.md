@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-04-27
+
+### Added
+
+- **Module lifecycle hooks** — `ToolModule` base class now exposes `startup()` and
+  `shutdown()` async methods. `startup()` is called once after the server event loop
+  starts; `shutdown()` is called on graceful server stop, in reverse module order.
+  Default implementations are no-ops; modules override them to open and release
+  persistent resources.
+
+- **Persistent stdio subprocess for `mcp_proxy`** — stdio-transport `mcp_proxy`
+  entries now open a persistent subprocess in `startup()` that is reused for all
+  tool calls, then closed cleanly in `shutdown()`. Previously each tool call spawned
+  a fresh subprocess. HTTP transport is unchanged (reconnects per-call).
+
+- **Registry lifespan wiring** — `build_server()` now passes a FastMCP-compatible
+  `lifespan` context manager to the parent server. The lifespan calls `startup()` on
+  all modules in manifest order and `shutdown()` in reverse order, ensuring dependent
+  modules (e.g. persistent stdio subprocesses) are torn down safely.
+
 ## [0.4.0] — 2026-04-27
 
 ### Added
