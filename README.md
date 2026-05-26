@@ -117,6 +117,8 @@ scoped-mcp --manifest manifests/research-agent.yml
 ```
 
 See `examples/claude-code/` for a complete multi-agent setup.
+See `examples/launcher/` for stdio subprocess launcher templates — required when proxying
+MCP servers that need credentials, since stdio subprocesses do not inherit the parent env.
 
 ---
 

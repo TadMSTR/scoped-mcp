@@ -44,6 +44,10 @@ Tool modules live in `src/scoped_mcp/modules/`. Each module:
 - Decorates tool methods with `@tool(mode="read")` or `@tool(mode="write")`
 - The manifest controls which mode is loaded — `mode: read` registers only
   read-decorated tools; `mode: write` registers both read and write tools
+- **Exception: `mcp_proxy` modules ignore `mode:` entirely** — proxied tools
+  are registered dynamically and carry no read/write decoration. Setting
+  `mode: read` on an `mcp_proxy` module has no effect; a startup warning is
+  emitted. Use `tool_denylist` to restrict which proxied tools are exposed.
 - Notification modules (ntfy, smtp, matrix, slack, discord) are write-only
   by design — they have no read mode
 

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **OTel span exception redaction** — `exception.message` span attribute now passes through
+  `_redact_string` to prevent upstream exception messages from leaking request data
+  (embedded tokens, quoted argument values) to the OTLP collector. The status description
+  was already redacted; this closes the remaining gap.
+
 ## [1.0.1] — 2026-05-26
 
 ### Fixed
