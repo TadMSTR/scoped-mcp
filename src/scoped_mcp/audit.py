@@ -17,15 +17,123 @@ by module code. Credential values are redacted; large payloads are truncated.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import functools
+import json
 import logging
+import os
 import re
 import sys
 import time
+import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import structlog
+
+# ── Session ID ───────────────────────────────────────────────────────────────
+
+SESSION_ID: str = str(uuid.uuid4())
+"""UUID generated at process start. Injected into every audit record and OTel span.
+Enables cross-tool-call reconstruction by session key instead of timestamp ranging."""
+
+# ── Runtime audit configuration ──────────────────────────────────────────────
+# Defaults apply until configure_audit() is called from server.py at startup.
+
+_log_args: bool = True
+_agent_bus_emit: bool = False
+_agent_bus_comms_dir: str | None = None
+_response_filter: Any = None  # ResponseFilter instance or None
+
+
+def configure_audit(
+    *,
+    log_args: bool = True,
+    agent_bus_emit: bool = False,
+    agent_bus_comms_dir: str | None = None,
+    response_filter: Any = None,
+) -> None:
+    """Set audit runtime config from the manifest. Call once at server startup."""
+    global _log_args, _agent_bus_emit, _agent_bus_comms_dir, _response_filter
+    _log_args = log_args
+    _agent_bus_emit = agent_bus_emit
+    _agent_bus_comms_dir = agent_bus_comms_dir
+    _response_filter = response_filter
+
+
+# ── Agent-bus JSONL emission ─────────────────────────────────────────────────
+
+
+def _sync_append_event(log_path: str, line: str) -> None:
+    """Sync JSONL append. Runs in an executor to avoid blocking the event loop."""
+    with open(log_path, "a") as f:
+        f.write(line)
+
+
+async def _emit_agent_bus_event(
+    tool_name: str,
+    agent_id: str,
+    outcome: str,
+    elapsed_ms: float,
+    error: str | None = None,
+) -> None:
+    """Write a tool.called event to the agent-bus JSONL log. Never raises."""
+    if not _agent_bus_comms_dir:
+        return
+    try:
+        logs_dir = Path(_agent_bus_comms_dir) / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+
+        date = datetime.now(UTC).strftime("%Y-%m-%d")
+        log_path = str(logs_dir / f"{date}-session.jsonl")
+
+        event = {
+            "id": str(uuid.uuid4()),
+            "ts": datetime.now(UTC).isoformat(),
+            "event": "tool.called",
+            "scope": "session",
+            "source": agent_id,
+            "target": None,
+            "artifact_path": None,
+            "summary": f"{tool_name} — {outcome} in {elapsed_ms}ms",
+            "hostname": os.uname().nodename,
+            "metadata": {
+                "tool": tool_name,
+                "outcome": outcome,
+                "latency_ms": elapsed_ms,
+                "session_id": SESSION_ID,
+                "error": error,
+            },
+        }
+        line = json.dumps(event, ensure_ascii=False) + "\n"
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _sync_append_event, log_path, line)
+    except Exception:
+        pass  # never let emission errors crash the tool call
+
+
+# ── OTel session injection ───────────────────────────────────────────────────
+
+
+def _inject_session_id_to_current_span() -> None:
+    """Set scoped_mcp.session on the active OTel span, if one is recording.
+
+    Called at the start of every @audited wrapper so the session ID is stamped
+    on the span created by OtelMiddleware before the tool body runs.
+    """
+    try:
+        from opentelemetry import trace as _otel
+
+        span = _otel.get_current_span()
+        if span.is_recording():
+            span.set_attribute("scoped_mcp.session", SESSION_ID)
+    except ImportError:
+        pass
+
 
 # ── Sanitization processor ──────────────────────────────────────────────────
 
@@ -216,16 +324,32 @@ def audited(tool_name: str) -> Callable:
             )
             agent_id = agent_ctx.agent_id if agent_ctx else "unknown"
 
+            _inject_session_id_to_current_span()
+
             log_kwargs: dict[str, Any] = {
                 "tool": tool_name,
                 "agent_id": agent_id,
-                "args": kwargs,
+                "session_id": SESSION_ID,
             }
+            if _log_args:
+                log_kwargs["args"] = kwargs
 
             try:
                 result = await fn(*args, **kwargs)
                 elapsed_ms = round((time.monotonic() - start) * 1000, 2)
+
+                if _response_filter is not None:
+                    result = _response_filter.filter_response(result, tool_name, agent_id)
+
                 logger.info("tool_call", status="ok", elapsed_ms=elapsed_ms, **log_kwargs)
+
+                if _agent_bus_emit and _agent_bus_comms_dir:
+                    with contextlib.suppress(RuntimeError):
+                        _t = asyncio.create_task(
+                            _emit_agent_bus_event(tool_name, agent_id, "ok", elapsed_ms)
+                        )
+                        _t.add_done_callback(lambda _: None)
+
                 return result
             except Exception as exc:
                 from .exceptions import ScopeViolation  # avoid circular at module level
@@ -247,6 +371,16 @@ def audited(tool_name: str) -> Callable:
                         elapsed_ms=elapsed_ms,
                         **log_kwargs,
                     )
+
+                if _agent_bus_emit and _agent_bus_comms_dir:
+                    with contextlib.suppress(RuntimeError):
+                        _t = asyncio.create_task(
+                            _emit_agent_bus_event(
+                                tool_name, agent_id, "error", elapsed_ms, type(exc).__name__
+                            )
+                        )
+                        _t.add_done_callback(lambda _: None)
+
                 raise
 
         return wrapper

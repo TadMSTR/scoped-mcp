@@ -10,7 +10,7 @@ import argparse
 import os
 import sys
 
-from .audit import configure_logging, get_ops_logger
+from .audit import SESSION_ID, configure_audit, configure_logging, get_ops_logger
 from .identity import AgentContext
 from .manifest import load_manifest
 from .middleware import ToolCallMiddleware
@@ -148,6 +148,24 @@ def _run_serve(args: argparse.Namespace) -> None:
             url=manifest.state_backend.url,
             agent_id=agent_ctx.agent_id,
         )
+
+        # Configure audit runtime: session ID, arg logging, agent-bus, response filter.
+        _response_filter = None
+        if manifest.response_filters:
+            from .contrib.response_filter import ResponseFilter
+
+            _response_filter = ResponseFilter(
+                rules=[r.model_dump() for r in manifest.response_filters],
+                agent_id=agent_ctx.agent_id,
+            )
+        audit_cfg = manifest.audit
+        configure_audit(
+            log_args=audit_cfg.log_args if audit_cfg else True,
+            agent_bus_emit=audit_cfg.agent_bus_emit if audit_cfg else False,
+            agent_bus_comms_dir=audit_cfg.agent_bus_comms_dir if audit_cfg else None,
+            response_filter=_response_filter,
+        )
+        ops.info("session_ready", session_id=SESSION_ID)
 
         middleware = _build_middleware(
             agent_id=agent_ctx.agent_id,
