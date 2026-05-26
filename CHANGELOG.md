@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-05-26
+
+### Added
+
+- **Manifest env var substitution** (`manifest.py`) — `${VAR_NAME}` placeholders in manifest
+  files are expanded from the process environment before YAML parsing. Only the braced form
+  is supported (`${VAR}`, not `$VAR`) to prevent accidental expansion. Undefined variables
+  at startup are a hard error (`ManifestError` naming the variable, never its value) — the
+  agent will not start with incomplete config. Expanded values are never written to audit or
+  ops JSONL output.
+
 ## [1.1.1] — 2026-05-26
 
 ### Security

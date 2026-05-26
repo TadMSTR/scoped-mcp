@@ -9,6 +9,7 @@ the registry will not load it, even if it exists in the modules directory.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any, Literal
@@ -26,6 +27,35 @@ _AGENT_TYPE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 
 # Rate limit spec format: "<N>/<unit>" e.g. "100/minute", "50/hour", "10/second".
 _RATE_LIMIT_RE = re.compile(r"^\d+/(second|minute|hour)$")
+
+# Matches ${VAR_NAME} substitution markers. Only braced form supported — $VAR without
+# braces is intentionally not expanded to reduce accidental substitution.
+_ENV_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _expand_env_vars(text: str) -> str:
+    """Expand ${VAR_NAME} placeholders in *text* from the process environment.
+
+    Raises ManifestError naming any undefined variable — the agent must not start
+    with incomplete config. Expanded values are returned but never logged.
+    """
+    missing: list[str] = []
+
+    def _replace(m: re.Match) -> str:
+        name = m.group(1)
+        val = os.environ.get(name)
+        if val is None:
+            missing.append(name)
+            return m.group(0)
+        return val
+
+    result = _ENV_VAR_RE.sub(_replace, text)
+    if missing:
+        raise ManifestError(
+            f"Manifest references undefined environment variable(s): {', '.join(missing)}"
+        )
+    return result
+
 
 # Module config fields that are actually required (cause an error at module __init__ if absent).
 # Keys in this dict must match the actual validation in each module's __init__.
@@ -394,7 +424,9 @@ def load_manifest(path: str) -> Manifest:
         raise ManifestError(f"Manifest file not found: {path}")
 
     try:
-        raw = yaml.safe_load(manifest_path.read_text())
+        text = manifest_path.read_text()
+        text = _expand_env_vars(text)
+        raw = yaml.safe_load(text)
     except yaml.YAMLError as e:
         raise ManifestError(f"Failed to parse manifest '{path}': {e}") from e
 
