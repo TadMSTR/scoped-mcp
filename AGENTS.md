@@ -24,7 +24,22 @@ credentials.py     Reads secrets from env or file. Injects into module
 
 audit.py           @audited decorator. Wraps every tool call with
                    structured JSON logging: agent_id, tool, args, result,
-                   timing. Emits to stdout and/or file.
+                   timing, and session_id. Emits to stdout/file and writes
+                   a JSONL event to agent-bus (tool_name + outcome only —
+                   no kwargs). Injects session.id into the active OTel span.
+
+hooks.py           Pre-call hook registry. register_before(server, tool, fn)
+                   registers an async hook; run_before_hooks() fires hooks in
+                   registration order before each upstream call in mcp_proxy.
+                   Used by contrib/signing_hook.py; available to extensions.
+
+contrib/
+  response_filter.py  Post-execution response scanner. Supports block/warn/
+                      redact modes on per-field regex rules. Redact applies
+                      only to str leaves — never to dict/list structures.
+  signing_hook.py     ed25519 signing hook factory. Loads private key from
+                      Vault bundle; signs agent-bus log_event calls with the
+                      canonical payload. Key never appears in logs or events.
 
 scoping.py         Reusable scope strategies:
                    - PrefixScope: path/key prefix enforcement
@@ -115,6 +130,10 @@ must have tests verifying that:
 - The audit log format — downstream consumers (log aggregators, dashboards)
   depend on the field names and structure
 - Scoping strategy interface in `scoping.py` — same reason as ToolModule
+- The hook registry interface (`hooks.py`) — contrib hooks depend on the
+  `(server, tool, kwargs) -> kwargs` async callable contract
+- The signing hook canonical payload structure — changing field names or
+  inclusion rules invalidates all existing signatures in agent-bus logs
 
 ## Dependencies
 

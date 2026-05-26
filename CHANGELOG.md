@@ -7,12 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-05-26
+
+### Added
+
+- **Pre-call hook registry** (`hooks.py`) — `register_before(server, tool, handler)` /
+  `run_before_hooks(server, tool, kwargs)` pattern. Hooks chain in registration order and
+  fire in `mcp_proxy.proxy_call()` before each upstream call. Used by the signing hook and
+  available to contrib extensions.
+- **ed25519 signing hook** (`contrib/signing_hook.py`) — `create_signing_hook(priv_b64, pub_b64)`
+  factory returns an async hook that signs agent-bus `log_event` calls with an ed25519
+  private key loaded from Vault at startup. Key fingerprint is included in the signed
+  canonical payload; the raw key never appears in logs or event metadata.
+- **Auto-registration** (`registry._register_signing_hook_if_available`) — if the Vault
+  bundle contains `signing_private_key` + `signing_public_key`, the signing hook is
+  registered automatically on server startup; no manifest change required.
+- **`_manifest_key` on `McpProxyModule` instances** — registry sets this attribute after
+  instantiation so hooks are keyed to the logical server name (e.g. `"agent-bus"`) rather
+  than the class name.
+
 ### Security
 
 - **OTel span exception redaction** — `exception.message` span attribute now passes through
   `_redact_string` to prevent upstream exception messages from leaking request data
   (embedded tokens, quoted argument values) to the OTLP collector. The status description
   was already redacted; this closes the remaining gap.
+
+## [1.0.2] — 2026-05-26
+
+### Added
+
+- **Session ID** — `SESSION_ID` UUID generated at process start; injected into every audit
+  log entry and OTel span as `session.id`. Allows correlating all tool calls within a
+  single agent session.
+- **Agent-bus event emission** — `_emit_agent_bus_event()` writes a JSONL event to
+  `~/.claude/comms/logs/` after each tool call. Emits `tool_name`, `outcome`,
+  `elapsed_ms`, and error type only — kwargs and result content are never included.
+- **OTel session span injection** — `_inject_session_id_to_current_span()` adds `session.id`
+  to the active OTel span when one is present.
+- **`AuditConfig` and `ResponseFilterRule` manifest models** — opt-in audit configuration
+  and per-field response scanning rules wired at server startup.
+- **Response filter** (`contrib/response_filter.py`) — post-execution content scanning with
+  `block` / `warn` / `redact` modes. Redact applies only to `isinstance(value, str)` leaves
+  in structured responses — never to serialized dict/list blobs.
 
 ## [1.0.1] — 2026-05-26
 
