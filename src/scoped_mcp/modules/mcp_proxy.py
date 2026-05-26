@@ -76,6 +76,10 @@ class McpProxyModule(ToolModule):
     def __init__(self, agent_ctx: Any, credentials: dict, config: dict) -> None:
         super().__init__(agent_ctx, credentials, config)
 
+        # Set by the registry after instantiation to the manifest key (e.g. "agent-bus").
+        # Used as the server key for hook lookups in run_before_hooks().
+        self._manifest_key: str = ""
+
         self._url: str | None = config.get("url")
         self._command: str | None = config.get("command")
         self._args: list[str] = config.get("args", [])
@@ -320,6 +324,11 @@ class McpProxyModule(ToolModule):
                 kwargs = {_rename.get(k, k): v for k, v in kwargs.items()}
             kwargs = {k: v for k, v in kwargs.items() if v is not None}
             module._validate_arguments(upstream_tool_name, kwargs)
+
+            if module._manifest_key:
+                from ..hooks import run_before_hooks
+
+                kwargs = await run_before_hooks(module._manifest_key, upstream_tool_name, kwargs)
 
             if module._persistent_client is not None:
                 # stdio: reuse the persistent subprocess opened in startup()

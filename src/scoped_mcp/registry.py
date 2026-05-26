@@ -123,6 +123,27 @@ def _resolve_class_name(module_name: str, module_cfg: ModuleConfig) -> str:
     return module_cfg.type if module_cfg.type is not None else module_name
 
 
+def _register_signing_hook_if_available(vault_bundle: dict[str, str], ops: object) -> None:
+    """Register the agent-bus ed25519 signing hook if signing keys are in the Vault bundle.
+
+    Auto-enabled when the bundle contains signing_private_key + signing_public_key.
+    Silently no-ops if the cryptography package is not installed.
+    """
+    private_key = vault_bundle.get("signing_private_key", "")
+    public_key = vault_bundle.get("signing_public_key", "")
+    if not private_key or not public_key:
+        return
+    try:
+        from .contrib.signing_hook import create_signing_hook
+        from .hooks import register_before
+
+        hook = create_signing_hook(private_key_b64=private_key, public_key_b64=public_key)
+        register_before("agent-bus", "log_event", hook)
+        ops.info("signing_hook_registered", server="agent-bus", tool="log_event")
+    except ImportError:
+        pass  # cryptography package not installed — signing unavailable
+
+
 def build_server(
     agent_ctx: AgentContext,
     manifest: Manifest,
@@ -172,6 +193,7 @@ def build_server(
             kv_version=vc.kv_version,
         )
         vault_bundle = vault_source.fetch()
+        _register_signing_hook_if_available(vault_bundle, ops)
 
     # Instantiate all modules first so they can be captured in the lifespan closure.
     all_instances = []
@@ -185,6 +207,9 @@ def build_server(
             credentials=credentials,
             config=module_cfg.config,
         )
+        # Expose the manifest key to mcp_proxy for pre-call hook lookups.
+        if hasattr(instance, "_manifest_key"):
+            instance._manifest_key = module_name
         all_instances.append((module_name, module_cfg, instance))
 
     # Create the parent server with the module lifespan.

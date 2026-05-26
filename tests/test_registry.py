@@ -10,7 +10,11 @@ from scoped_mcp.exceptions import ManifestError
 from scoped_mcp.identity import AgentContext
 from scoped_mcp.manifest import Manifest, ModuleConfig
 from scoped_mcp.modules._base import ToolModule, tool
-from scoped_mcp.registry import _discover_module_classes, build_server
+from scoped_mcp.registry import (
+    _discover_module_classes,
+    _register_signing_hook_if_available,
+    build_server,
+)
 
 # ── Module discovery ──────────────────────────────────────────────────────────
 
@@ -242,3 +246,53 @@ async def test_lifespan_shutdown_error_does_not_skip_remaining() -> None:
 
     # mod_a shutdown must still run despite mod_b raising
     assert "shutdown_a" in call_order
+
+
+# ── _register_signing_hook_if_available ───────────────────────────────────────
+
+
+def test_register_signing_hook_no_keys_does_nothing() -> None:
+    from scoped_mcp.hooks import _registry, clear_hooks
+
+    clear_hooks()
+    try:
+        _register_signing_hook_if_available({}, None)
+        assert ("agent-bus", "log_event") not in _registry
+    finally:
+        clear_hooks()
+
+
+def test_register_signing_hook_missing_public_key_does_nothing() -> None:
+    from scoped_mcp.hooks import _registry, clear_hooks
+
+    clear_hooks()
+    try:
+        _register_signing_hook_if_available({"signing_private_key": "abc"}, None)
+        assert ("agent-bus", "log_event") not in _registry
+    finally:
+        clear_hooks()
+
+
+def test_register_signing_hook_with_valid_keys_registers_hook() -> None:
+    import base64
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from scoped_mcp.hooks import _registry, clear_hooks
+
+    private_key = Ed25519PrivateKey.generate()
+    priv_b64 = base64.b64encode(private_key.private_bytes_raw()).decode()
+    pub_b64 = base64.b64encode(private_key.public_key().public_bytes_raw()).decode()
+
+    clear_hooks()
+    try:
+        import structlog
+
+        ops = structlog.get_logger("ops")
+        _register_signing_hook_if_available(
+            {"signing_private_key": priv_b64, "signing_public_key": pub_b64},
+            ops,
+        )
+        assert len(_registry.get(("agent-bus", "log_event"), [])) == 1
+    finally:
+        clear_hooks()
