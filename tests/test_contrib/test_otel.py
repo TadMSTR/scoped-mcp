@@ -52,14 +52,22 @@ async def test_otel_sets_standard_attributes(agent_ctx, mock_tracer):
 
 @pytest.mark.asyncio
 async def test_otel_records_exception_on_error(agent_ctx, mock_tracer):
-    """OtelMiddleware records exceptions and sets ERROR status."""
+    """OtelMiddleware emits an exception event via add_event (not record_exception)."""
     tracer, span = mock_tracer
     with patch("scoped_mcp.contrib.otel.trace.get_tracer", return_value=tracer):
         mw = OtelMiddleware()
     err = RuntimeError("tool failed")
     with pytest.raises(RuntimeError):
         await mw(agent_ctx, "failing_tool", {}, AsyncMock(side_effect=err))
-    span.record_exception.assert_called_once_with(err)
+    span.add_event.assert_called_once()
+    event_name, event_kwargs = span.add_event.call_args[0][0], span.add_event.call_args[1]
+    assert event_name == "exception"
+    attrs = event_kwargs["attributes"]
+    assert attrs["exception.type"] == "RuntimeError"
+    assert "tool failed" in attrs["exception.message"]
+    assert "exception.stacktrace" in attrs
+    # record_exception must NOT be called (it emits raw unredacted exception.message)
+    span.record_exception.assert_not_called()
 
 
 @pytest.mark.asyncio
