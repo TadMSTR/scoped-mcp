@@ -249,8 +249,12 @@ class McpProxyModule(ToolModule):
         proxy_call un-renames before forwarding.
         """
         json_py = {
-            "string": str, "integer": int, "number": float,
-            "boolean": bool, "array": list, "object": dict,
+            "string": str,
+            "integer": int,
+            "number": float,
+            "boolean": bool,
+            "array": list,
+            "object": dict,
         }
 
         def py_type(prop: dict) -> Any:

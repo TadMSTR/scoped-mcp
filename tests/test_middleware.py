@@ -114,6 +114,7 @@ async def test_wrapped_callable_preserves_handler_name(agent_ctx):
 @pytest.mark.asyncio
 async def test_wrap_propagates_handler_signature(agent_ctx):
     """P5: chain.wrap() copies __signature__ so fastmcp 3.x can register the tool."""
+
     async def typed_handler(message: str, count: int = 1) -> str:
         return message * count
 
