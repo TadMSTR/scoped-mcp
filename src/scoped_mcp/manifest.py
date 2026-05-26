@@ -327,7 +327,10 @@ class Manifest(BaseModel):
                 _log.warning(
                     "mcp_proxy_mode_read_noop",
                     module=key,
-                    hint="mode:read has no effect on mcp_proxy modules — use tool_denylist to restrict tools",
+                    hint=(
+                        "mode:read has no effect on mcp_proxy modules"
+                        " — use tool_denylist to restrict tools"
+                    ),
                 )
         if errors:
             raise ValueError("\n".join(errors))

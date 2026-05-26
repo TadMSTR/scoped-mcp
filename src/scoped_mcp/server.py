@@ -73,8 +73,9 @@ def _build_middleware(
     # OTel — auto-enabled when OTEL_EXPORTER_OTLP_ENDPOINT is set
     if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
         try:
-            from .contrib.otel import OtelMiddleware
             from opentelemetry import trace as _trace
+
+            from .contrib.otel import OtelMiddleware
 
             if "sdk" not in type(_trace.get_tracer_provider()).__module__:
                 from opentelemetry.sdk.resources import Resource
