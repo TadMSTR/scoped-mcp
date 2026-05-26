@@ -39,6 +39,8 @@ Required credentials: none (upstream credentials stay in the upstream service)
 from __future__ import annotations
 
 import asyncio
+import inspect
+import keyword
 import re
 from typing import Any, ClassVar
 
@@ -105,7 +107,7 @@ class McpProxyModule(ToolModule):
         """Return a fastmcp.Client-compatible transport spec."""
         if self._url:
             return self._url
-        return {"command": self._command, "args": self._args}
+        return {"mcpServers": {"upstream": {"command": self._command, "args": self._args}}}
 
     async def _discover_tools(self) -> list[Any]:
         """Connect to upstream, enumerate tools, build proxy callables.
@@ -229,11 +231,90 @@ class McpProxyModule(ToolModule):
                 f"{e.message}"
             ) from e
 
+    @staticmethod
+    def _signature_from_schema(
+        schema: dict[str, Any] | None,
+    ) -> tuple[inspect.Signature, dict[str, str]]:
+        """Build an explicit inspect.Signature from an MCP inputSchema.
+
+        fastmcp rejects tool functions whose signature contains **kwargs, so each
+        proxied tool gets a synthesized signature derived from the upstream-declared
+        inputSchema properties. The proxy body keeps **kwargs and receives args as
+        keywords at call time; strict per-call validation still runs against the full
+        schema in _validate_arguments(), so a lossy type mapping here is safe.
+
+        Returns (signature, rename_map) where rename_map maps a sanitized Python
+        parameter name back to the original upstream property name. Upstream names
+        that are not valid Python identifiers or are reserved keywords are sanitized;
+        proxy_call un-renames before forwarding.
+        """
+        json_py = {
+            "string": str, "integer": int, "number": float,
+            "boolean": bool, "array": list, "object": dict,
+        }
+
+        def py_type(prop: dict) -> Any:
+            t = prop.get("type")
+            if isinstance(t, list):
+                non_null = [x for x in t if x != "null"]
+                t = non_null[0] if non_null else None
+            return json_py.get(t, Any)
+
+        rename: dict[str, str] = {}
+        used: set[str] = set()
+
+        def safe_param(name: str) -> str:
+            base = re.sub(r"[^a-zA-Z0-9_]", "_", name)
+            if not base or base[0].isdigit():
+                base = f"p_{base}"
+            while keyword.iskeyword(base) or not base.isidentifier() or base in used:
+                base = f"{base}_"
+            used.add(base)
+            if base != name:
+                rename[base] = name
+            return base
+
+        empty = inspect.Signature(parameters=[]), rename
+        if not isinstance(schema, dict):
+            return empty
+        props = schema.get("properties", {})
+        if not isinstance(props, dict):
+            return empty
+        required = set(schema.get("required", []) or [])
+
+        params: list[inspect.Parameter] = []
+        # required (no default) must precede optional for POSITIONAL_OR_KEYWORD
+        for name, prop in props.items():
+            if name in required:
+                params.append(
+                    inspect.Parameter(
+                        safe_param(name),
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        annotation=py_type(prop if isinstance(prop, dict) else {}),
+                    )
+                )
+        for name, prop in props.items():
+            if name not in required:
+                prop = prop if isinstance(prop, dict) else {}
+                params.append(
+                    inspect.Parameter(
+                        safe_param(name),
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        annotation=py_type(prop),
+                        default=prop.get("default", None),
+                    )
+                )
+        return inspect.Signature(parameters=params), rename
+
     def _make_proxy_method(self, upstream_tool_name: str) -> Any:
         """Create an async callable that forwards a single tool call upstream."""
         module = self
+        _sig, _rename = self._signature_from_schema(self._schemas.get(upstream_tool_name))
 
         async def proxy_call(**kwargs: Any) -> Any:
+            if _rename:
+                kwargs = {_rename.get(k, k): v for k, v in kwargs.items()}
+            kwargs = {k: v for k, v in kwargs.items() if v is not None}
             module._validate_arguments(upstream_tool_name, kwargs)
 
             if module._persistent_client is not None:
@@ -254,6 +335,12 @@ class McpProxyModule(ToolModule):
         if safe_name and safe_name[0].isdigit():
             safe_name = f"tool_{safe_name}"
         proxy_call.__name__ = safe_name
+        proxy_call.__signature__ = _sig
+        proxy_call.__annotations__ = {
+            p.name: (p.annotation if p.annotation is not inspect.Parameter.empty else Any)
+            for p in _sig.parameters.values()
+        }
+        proxy_call.__annotations__["return"] = Any
 
         # Required by _base.get_tool_methods() — marks this as a tool.
         proxy_call._is_tool = True

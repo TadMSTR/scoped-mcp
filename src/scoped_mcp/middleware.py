@@ -24,8 +24,13 @@ Protocol:
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 from typing import Any, Protocol, runtime_checkable
+
+import structlog
+
+_log = structlog.get_logger("ops")
 
 
 @runtime_checkable
@@ -71,4 +76,19 @@ class MiddlewareChain:
             return await _run(0)
 
         call_with_middleware.__name__ = handler.__name__
+        try:
+            sig = inspect.signature(handler)
+            call_with_middleware.__signature__ = sig
+            call_with_middleware.__annotations__ = {
+                p.name: (p.annotation if p.annotation is not inspect.Parameter.empty else Any)
+                for p in sig.parameters.values()
+            }
+            call_with_middleware.__annotations__["return"] = Any
+            call_with_middleware.__wrapped__ = handler
+        except (ValueError, TypeError) as sig_err:
+            _log.warning(
+                "middleware_sig_propagation_failed",
+                handler=getattr(handler, "__name__", "?"),
+                error=str(sig_err),
+            )
         return call_with_middleware

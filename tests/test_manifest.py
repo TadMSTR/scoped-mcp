@@ -524,3 +524,27 @@ def test_argument_filters_extra_field_rejected(tmp_path: Path) -> None:
     )
     with pytest.raises(ManifestError):
         load_manifest(path)
+
+
+def test_mcp_proxy_mode_read_emits_warning(tmp_path: Path) -> None:
+    """Phase 2.5b: mode:read on mcp_proxy emits a startup warning (it's a no-op)."""
+    import structlog.testing
+
+    path = write_manifest(
+        tmp_path,
+        """\
+        agent_type: research
+        modules:
+          proxy:
+            type: mcp_proxy
+            mode: read
+            config:
+              url: http://localhost:8080/mcp
+        """,
+    )
+    with structlog.testing.capture_logs() as captured:
+        load_manifest(path)
+
+    warnings = [e for e in captured if e.get("event") == "mcp_proxy_mode_read_noop"]
+    assert len(warnings) == 1
+    assert warnings[0]["module"] == "proxy"

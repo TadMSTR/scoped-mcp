@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-05-26
+
+### Fixed
+
+- **fastmcp 3.x compatibility** — Five patches to resolve breaking changes introduced in
+  fastmcp 3.2.4: `ToolAnnotations` constructor kwarg rejection (P1), stdio subprocess
+  config format (P2), `None` result serialization (P3), `TracerProvider` OTel init
+  signature (P4), middleware tool signature passthrough (P5). scoped-mcp is now
+  compatible with fastmcp >=3.2.0 as declared in the project dependencies.
+- **Silent exception handlers** — Bare `pass` blocks in exception handlers replaced with
+  structured `_log.warning(...)` calls. Startup failures now surface in logs rather than
+  manifesting as silently missing tools.
+
+### Changed
+
+- **`mode: read` + `mcp_proxy` warning** — Emits a startup warning when a manifest
+  combines `mode: read` with an `mcp_proxy` module, since `mode: read` has no effect on
+  proxied tools. Use `tool_denylist` to restrict tool access for `mcp_proxy` modules.
+
+### Added
+
+- **`examples/launcher/`** — Template launcher scripts for the stdio subprocess env
+  inheritance pattern (`run-scoped-mcp.sh`, `run-langfuse-mcp.sh`) with documentation.
+
 ## [1.0.0] — 2026-04-27
 
 Final phase of the scoped-mcp hardening roadmap. Project moves to

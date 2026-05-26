@@ -74,6 +74,25 @@ def _build_middleware(
     if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
         try:
             from .contrib.otel import OtelMiddleware
+            from opentelemetry import trace as _trace
+
+            if "sdk" not in type(_trace.get_tracer_provider()).__module__:
+                from opentelemetry.sdk.resources import Resource
+                from opentelemetry.sdk.trace import TracerProvider
+                from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+                if os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL", "").startswith("http"):
+                    from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+                        OTLPSpanExporter,
+                    )
+                else:
+                    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+                        OTLPSpanExporter,
+                    )
+
+                _provider = TracerProvider(resource=Resource.create())
+                _provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+                _trace.set_tracer_provider(_provider)
 
             middleware.append(OtelMiddleware())
         except ImportError:

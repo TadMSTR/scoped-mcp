@@ -13,10 +13,13 @@ import re
 from pathlib import Path
 from typing import Any, Literal
 
+import structlog
 import yaml
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from .exceptions import ManifestError
+
+_log = structlog.get_logger("ops")
 
 # Pattern for valid agent_type values.
 _AGENT_TYPE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
@@ -317,6 +320,14 @@ class Manifest(BaseModel):
                 errors.append(
                     f"modules.{key}: mcp_proxy requires either 'url' (HTTP) or"
                     " 'command' (stdio) in config"
+                )
+            # mode: read has no effect on mcp_proxy — capability restriction for proxied
+            # tools requires tool_denylist, not mode filtering
+            if module_name == "mcp_proxy" and mod_cfg.mode == "read":
+                _log.warning(
+                    "mcp_proxy_mode_read_noop",
+                    module=key,
+                    hint="mode:read has no effect on mcp_proxy modules — use tool_denylist to restrict tools",
                 )
         if errors:
             raise ValueError("\n".join(errors))
