@@ -557,7 +557,10 @@ def test_mcp_proxy_mode_read_emits_warning(tmp_path: Path) -> None:
 
 def test_expand_env_vars_substitutes_defined_var(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MY_SECRET", "hunter2")
-    assert _expand_env_vars("url: redis://:${MY_SECRET}@host:6379") == "url: redis://:hunter2@host:6379"
+    assert (
+        _expand_env_vars("url: redis://:${MY_SECRET}@host:6379")
+        == "url: redis://:hunter2@host:6379"
+    )
 
 
 def test_expand_env_vars_substitutes_multiple_vars(monkeypatch: pytest.MonkeyPatch) -> None:
