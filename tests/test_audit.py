@@ -2,9 +2,19 @@
 
 from __future__ import annotations
 
-import pytest
+import asyncio
+import pathlib
 
-from scoped_mcp.audit import _sanitize_processor, _sanitize_value, audited
+import pytest
+import structlog.testing
+
+from scoped_mcp.audit import (
+    SESSION_ID,
+    _sanitize_processor,
+    _sanitize_value,
+    audited,
+    configure_audit,
+)
 from scoped_mcp.exceptions import ScopeViolation
 from scoped_mcp.identity import AgentContext
 
@@ -205,6 +215,97 @@ def test_sanitize_processor_preserves_event_field_even_if_sensitive_looking() ->
 
 
 # ── H3: @audited signature no longer accepts scope_strategy ──────────────────
+
+
+# ── Phase 1a: session_id + log_args ──────────────────────────────────────────
+
+
+def test_session_id_is_a_uuid() -> None:
+    import re
+
+    assert re.match(
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        SESSION_ID,
+    )
+
+
+@pytest.mark.asyncio
+async def test_audited_includes_session_id_in_log(agent_ctx: AgentContext) -> None:
+    module = _MockModule(agent_ctx)
+    with structlog.testing.capture_logs() as logs:
+        await _make_tool(module)
+    assert any(r.get("session_id") == SESSION_ID for r in logs)
+
+
+@pytest.mark.asyncio
+async def test_audited_includes_args_by_default(agent_ctx: AgentContext) -> None:
+    configure_audit(log_args=True)
+    module = _MockModule(agent_ctx)
+    with structlog.testing.capture_logs() as logs:
+        await _make_tool(module)
+    assert any("args" in r for r in logs)
+
+
+@pytest.mark.asyncio
+async def test_audited_omits_args_when_log_args_false(agent_ctx: AgentContext) -> None:
+    configure_audit(log_args=False)
+    module = _MockModule(agent_ctx)
+    try:
+        with structlog.testing.capture_logs() as logs:
+            await _make_tool(module)
+        assert all("args" not in r for r in logs)
+    finally:
+        configure_audit(log_args=True)  # restore default
+
+
+# ── Phase 1d: response filter hook in @audited ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_audited_applies_response_filter(agent_ctx: AgentContext) -> None:
+    from scoped_mcp.contrib.response_filter import ResponseFilter
+
+    rf = ResponseFilter(
+        rules=[{"name": "strip-secret", "pattern": "ok:", "action": "redact"}],
+        agent_id=agent_ctx.agent_id,
+    )
+    configure_audit(response_filter=rf)
+    module = _MockModule(agent_ctx)
+    try:
+        result = await _make_tool(module)
+        assert "ok:" not in result
+        assert "[REDACTED]" in result
+    finally:
+        configure_audit(response_filter=None)
+
+
+# ── Phase 1a: agent-bus fire-and-forget emission ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_audited_emits_agent_bus_event(
+    agent_ctx: AgentContext, tmp_path: pathlib.Path
+) -> None:
+    import json
+
+    configure_audit(agent_bus_emit=True, agent_bus_comms_dir=str(tmp_path))
+    module = _MockModule(agent_ctx)
+    try:
+        await _make_tool(module)
+        # Yield twice so the create_task coroutine starts, then give the
+        # run_in_executor thread enough wall time to complete the write.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0.05)
+
+        log_files = list((tmp_path / "logs").glob("*-session.jsonl"))
+        assert log_files, "no session JSONL written"
+        events = [json.loads(line) for line in log_files[0].read_text().splitlines()]
+        assert any(e["event"] == "tool.called" for e in events)
+        tool_events = [e for e in events if e["event"] == "tool.called"]
+        assert tool_events[0]["metadata"]["session_id"] == SESSION_ID
+        assert tool_events[0]["metadata"]["outcome"] == "ok"
+    finally:
+        configure_audit(agent_bus_emit=False, agent_bus_comms_dir=None)
 
 
 def test_audited_rejects_scope_strategy_kwarg() -> None:

@@ -206,6 +206,30 @@ class HitlConfig(BaseModel):
         return v
 
 
+class AuditConfig(BaseModel):
+    """Audit event emission and logging configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Agent-bus: write tool.called events directly to the JSONL log
+    agent_bus_emit: bool = False
+    agent_bus_comms_dir: str | None = None
+
+    # Argument logging: include kwargs in local JSONL (default: on)
+    # Disable when the audit log is shipped off-host or stored with lower access control.
+    log_args: bool = True
+
+    # OTel service name used in span resource attributes.
+    # The OTLP endpoint is still configured via OTEL_EXPORTER_OTLP_ENDPOINT env var.
+    otel_service_name: str = "scoped-mcp"
+
+    @model_validator(mode="after")
+    def _check_agent_bus_requirements(self) -> AuditConfig:
+        if self.agent_bus_emit and not self.agent_bus_comms_dir:
+            raise ValueError("audit.agent_bus_comms_dir is required when agent_bus_emit is true")
+        return self
+
+
 class ArgumentFilterRule(BaseModel):
     """A single argument-content filter rule from the manifest."""
 
@@ -232,6 +256,27 @@ class ArgumentFilterRule(BaseModel):
             re.compile(v)
         except re.error as e:
             raise ValueError(f"argument_filters[*].pattern is not a valid regex: {e}") from e
+        return v
+
+
+class ResponseFilterRule(BaseModel):
+    """A single response-content filter rule from the manifest."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    pattern: str
+    action: Literal["block", "warn", "redact"] = "warn"
+    decode: list[Literal["base64", "urlsafe_base64", "url"]] = []
+    case_insensitive: bool = False
+
+    @field_validator("pattern")
+    @classmethod
+    def _pattern_compiles(cls, v: str) -> str:
+        try:
+            re.compile(v)
+        except re.error as e:
+            raise ValueError(f"response_filters[*].pattern is not a valid regex: {e}") from e
         return v
 
 
@@ -268,7 +313,9 @@ class Manifest(BaseModel):
     state_backend: StateBackendConfig = StateBackendConfig()
     rate_limits: RateLimitsConfig | None = None
     argument_filters: list[ArgumentFilterRule] | None = None
+    response_filters: list[ResponseFilterRule] | None = None
     hitl: HitlConfig | None = None
+    audit: AuditConfig | None = None
 
     @field_validator("agent_type")
     @classmethod
