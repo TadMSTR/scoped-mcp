@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-05-26
+
+### Security
+
+- **`contrib/otel.py`: replace `record_exception` with `add_event`** — `span.record_exception(exc)`
+  emits a separate OTel event with an unredacted `exception.message`, bypassing `_redact_string()`.
+  Replaced with `span.add_event("exception", attributes={...})` so only the redacted message
+  reaches the OTLP collector. `exception.type` (class name) included for schema compatibility.
+
 ## [1.1.0] — 2026-05-26
 
 ### Added
