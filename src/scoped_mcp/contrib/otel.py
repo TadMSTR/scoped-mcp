@@ -69,6 +69,7 @@ class OtelMiddleware:
                 return result
             except Exception as exc:
                 span.record_exception(exc)
+                span.set_attribute("exception.message", _redact_string(str(exc)))
                 span.set_status(Status(StatusCode.ERROR, _redact_string(str(exc))))
                 span.set_attribute("scoped_mcp.call.status", "error")
                 raise
