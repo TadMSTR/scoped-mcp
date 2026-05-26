@@ -349,3 +349,103 @@ async def test_shutdown_closes_persistent_client(stdio_module):
     mock_persistent.__aexit__.assert_called_once_with(None, None, None)
     assert stdio_module._persistent_client is None
     assert stdio_module._client_handle is None
+
+
+# ── fastmcp 3.x compatibility regression tests ───────────────────────────────
+
+
+def test_stdio_transport_wraps_in_mcp_servers(agent_ctx):
+    """P2: _transport() for stdio wraps command/args in mcpServers for fastmcp 3.x."""
+    with patch("scoped_mcp.modules.mcp_proxy.Client") as MockClient:
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_cm.list_tools = AsyncMock(return_value=[_make_tool("run_cmd")])
+        MockClient.return_value = mock_cm
+
+        mod = McpProxyModule(
+            agent_ctx=agent_ctx,
+            credentials={},
+            config={"command": "python3", "args": ["-m", "my_server"]},
+        )
+
+    assert mod._transport() == {
+        "mcpServers": {"upstream": {"command": "python3", "args": ["-m", "my_server"]}}
+    }
+
+
+def test_proxy_call_has_synthesized_signature(agent_ctx):
+    """P1: proxy_call gets an explicit inspect.Signature derived from inputSchema."""
+    import inspect as _inspect
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "recursive": {"type": "boolean"},
+        },
+        "required": ["path"],
+    }
+    tool = Tool(name="list_files", description="", inputSchema=schema)
+
+    with patch("scoped_mcp.modules.mcp_proxy.Client") as MockClient:
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_cm.list_tools = AsyncMock(return_value=[tool])
+        MockClient.return_value = mock_cm
+
+        mod = McpProxyModule(
+            agent_ctx=agent_ctx,
+            credentials={},
+            config={"url": "http://127.0.0.1:8485/mcp"},
+        )
+
+    method = mod.get_tool_methods(mode=None)[0]
+    sig = method.__signature__
+    assert isinstance(sig, _inspect.Signature)
+    assert "path" in sig.parameters
+    assert "recursive" in sig.parameters
+    # required param has no default; optional has None default (not provided in schema)
+    assert sig.parameters["path"].default is _inspect.Parameter.empty
+    assert sig.parameters["recursive"].default is None
+
+
+@pytest.fixture
+def search_module(agent_ctx):
+    """McpProxyModule with a schema-bearing 'search' tool — built in sync context."""
+    fake_result = FakeCallToolResult(data="ok", content=[])
+    schema = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "limit": {"type": "integer"},
+        },
+        "required": ["query"],
+    }
+    tool = Tool(name="search", description="", inputSchema=schema)
+    with patch("scoped_mcp.modules.mcp_proxy.Client") as MockClient:
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_cm.list_tools = AsyncMock(return_value=[tool])
+        mock_cm.call_tool = AsyncMock(return_value=fake_result)
+        MockClient.return_value = mock_cm
+        mod = McpProxyModule(
+            agent_ctx=agent_ctx,
+            credentials={},
+            config={"url": "http://127.0.0.1:8485/mcp"},
+        )
+        yield mod, mock_cm
+
+
+@pytest.mark.asyncio
+async def test_proxy_call_strips_none_kwargs(search_module):
+    """P3: None-valued kwargs are stripped before forwarding so unprovided optional
+    params are omitted rather than passed as None to the upstream tool."""
+    mod, mock_cm = search_module
+    method = mod.get_tool_methods(mode=None)[0]
+    await method(query="hello", limit=None)
+
+    # limit=None must be stripped; only query forwarded
+    mock_cm.call_tool.assert_called_once_with("search", arguments={"query": "hello"})

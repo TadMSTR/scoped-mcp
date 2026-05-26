@@ -109,3 +109,21 @@ async def test_wrapped_callable_preserves_handler_name(agent_ctx):
     chain = MiddlewareChain([])
     wrapped = chain.wrap("ns_my_tool_handler", my_tool_handler, agent_ctx)
     assert wrapped.__name__ == "my_tool_handler"
+
+
+@pytest.mark.asyncio
+async def test_wrap_propagates_handler_signature(agent_ctx):
+    """P5: chain.wrap() copies __signature__ so fastmcp 3.x can register the tool."""
+    import inspect
+
+    async def typed_handler(message: str, count: int = 1) -> str:
+        return message * count
+
+    chain = MiddlewareChain([])
+    wrapped = chain.wrap("test_tool", typed_handler, agent_ctx)
+
+    assert hasattr(wrapped, "__signature__")
+    sig = wrapped.__signature__
+    assert "message" in sig.parameters
+    assert "count" in sig.parameters
+    assert sig.parameters["count"].default == 1
