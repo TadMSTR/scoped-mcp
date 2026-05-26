@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from scoped_mcp.exceptions import ManifestError
-from scoped_mcp.manifest import Manifest, load_manifest
+from scoped_mcp.manifest import Manifest, _expand_env_vars, load_manifest
 
 
 def write_manifest(tmp_path: Path, content: str) -> str:
@@ -548,3 +548,105 @@ def test_mcp_proxy_mode_read_emits_warning(tmp_path: Path) -> None:
     warnings = [e for e in captured if e.get("event") == "mcp_proxy_mode_read_noop"]
     assert len(warnings) == 1
     assert warnings[0]["module"] == "proxy"
+
+
+# ---------------------------------------------------------------------------
+# _expand_env_vars unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_expand_env_vars_substitutes_defined_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MY_SECRET", "hunter2")
+    assert _expand_env_vars("url: redis://:${MY_SECRET}@host:6379") == "url: redis://:hunter2@host:6379"
+
+
+def test_expand_env_vars_substitutes_multiple_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOST", "localhost")
+    monkeypatch.setenv("PORT", "6379")
+    result = _expand_env_vars("${HOST}:${PORT}")
+    assert result == "localhost:6379"
+
+
+def test_expand_env_vars_raises_on_undefined_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MISSING_VAR", raising=False)
+    with pytest.raises(ManifestError, match="MISSING_VAR"):
+        _expand_env_vars("url: redis://:${MISSING_VAR}@host")
+
+
+def test_expand_env_vars_reports_all_missing_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FOO", raising=False)
+    monkeypatch.delenv("BAR", raising=False)
+    with pytest.raises(ManifestError) as exc_info:
+        _expand_env_vars("${FOO} and ${BAR}")
+    msg = str(exc_info.value)
+    assert "FOO" in msg
+    assert "BAR" in msg
+
+
+def test_expand_env_vars_no_placeholders(monkeypatch: pytest.MonkeyPatch) -> None:
+    text = "agent_type: research\nmodules:\n  filesystem: {}\n"
+    assert _expand_env_vars(text) == text
+
+
+def test_expand_env_vars_does_not_expand_unbraced_dollar(monkeypatch: pytest.MonkeyPatch) -> None:
+    """$VAR without braces must not be expanded."""
+    monkeypatch.setenv("VAR", "oops")
+    result = _expand_env_vars("value: $VAR")
+    assert result == "value: $VAR"
+
+
+def test_expand_env_vars_error_names_var_not_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ManifestError must name the variable, not the value — value may be secret."""
+    monkeypatch.delenv("SECRET_PASS", raising=False)
+    with pytest.raises(ManifestError) as exc_info:
+        _expand_env_vars("${SECRET_PASS}")
+    assert "SECRET_PASS" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# load_manifest env var integration tests
+# ---------------------------------------------------------------------------
+
+
+def test_load_manifest_expands_env_var_in_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    path = write_manifest(
+        tmp_path,
+        """\
+        agent_type: sysadmin
+        modules:
+          filesystem:
+            mode: read
+            config:
+              base_path: /tmp/agents
+        state_backend:
+          type: dragonfly
+          url: ${REDIS_URL}
+        """,
+    )
+    manifest = load_manifest(path)
+    assert manifest.state_backend.url == "redis://localhost:6379/0"
+
+
+def test_load_manifest_raises_manifest_error_on_undefined_env_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("DRAGONFLY_PASSWORD", raising=False)
+    path = write_manifest(
+        tmp_path,
+        """\
+        agent_type: sysadmin
+        modules:
+          filesystem:
+            mode: read
+            config:
+              base_path: /tmp/agents
+        state_backend:
+          type: dragonfly
+          url: redis://:${DRAGONFLY_PASSWORD}@host:6379
+        """,
+    )
+    with pytest.raises(ManifestError, match="DRAGONFLY_PASSWORD"):
+        load_manifest(path)
