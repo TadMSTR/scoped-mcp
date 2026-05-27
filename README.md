@@ -201,6 +201,26 @@ hitl:
     topic: homelab-hitl
 ```
 
+### Environment Variable Substitution
+
+Manifest fields support `${VAR_NAME}` placeholders, expanded from the process environment before YAML parsing:
+
+```yaml
+state_backend:
+  type: dragonfly
+  url: "redis://:${REDIS_PASSWORD}@host:6379/0"  # always quote substitution sites
+
+credentials:
+  source: file
+  path: "${SECRETS_FILE}"
+```
+
+Rules:
+- Only the braced form is expanded (`${VAR}`, not `$VAR`) to prevent accidental substitution.
+- Undefined variables at startup are a hard error — the agent will not start with incomplete config.
+- Expanded values are never written to audit or ops logs.
+- **Always YAML-quote fields receiving substitution** — a secret value containing `:`, `{`, or `}` can corrupt the YAML structure if the field is unquoted.
+
 ### Manifest-to-Tools Mapping
 
 ```mermaid
