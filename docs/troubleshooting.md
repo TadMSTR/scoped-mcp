@@ -125,7 +125,7 @@ cat audit.jsonl | jq 'select(.event == "tool_call" and .tool == "filesystem_writ
 
 ## Audit and ops log flags
 
-By default, both log streams go to stdout as JSON-L. To write to files:
+By default, both log streams go to stderr as JSON-L. To write to files:
 
 ```bash
 scoped-mcp \
@@ -134,7 +134,7 @@ scoped-mcp \
   --ops-log /var/log/scoped-mcp/ops.jsonl
 ```
 
-Stdout output continues even when file paths are set — both destinations
+Stderr output continues even when file paths are set — both destinations
 receive all events. The file output is useful for log shipping (Loki, Splunk,
 ELK) without losing terminal visibility.
 

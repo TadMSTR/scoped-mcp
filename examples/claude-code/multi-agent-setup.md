@@ -157,11 +157,11 @@ never values.
 
 ### Audit log confirmation
 
-Every tool call produces a structured JSON-L audit entry on stdout:
+Every tool call produces a structured JSON-L audit entry on stderr:
 
 ```json
 {"event": "tool_call", "agent_id": "research-01", "tool": "filesystem_read_file",
- "args": {"path": "private.txt"}, "status": "ok", "timestamp": "..."}
+ "args": {"path": "private.txt"}, "status": "ok", "session.id": "a3f2b1c4-...", "timestamp": "..."}
 ```
 
 Scope violations are logged with `"status": "blocked"` and `"event": "scope_violation"` before the

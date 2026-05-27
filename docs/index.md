@@ -17,6 +17,8 @@ pip install scoped-mcp
 ## Documentation
 
 - [Manifest Schema Reference](manifest-schema) — all manifest fields and options
+- [Middleware](middleware) — OTel tracing, composing middleware, writing custom middleware
 - [Scoping Strategies](scoping-strategies) — PrefixScope, NamespaceScope, and custom strategies
 - [Module Authoring Guide](module-authoring) — write a custom tool module
 - [Threat Model](threat-model) — security boundaries and assumptions
+- [Troubleshooting](troubleshooting) — startup errors, scope violations, log configuration

@@ -142,7 +142,7 @@ structlog audit processor
 
 ## Audit Pipeline
 
-Every tool call produces one JSON-L line on stdout. Scope violations produce a `warning`-level line instead of `info`.
+Every tool call produces one JSON-L line on stderr. Scope violations produce a `warning`-level line instead of `info`.
 
 **Audit log entry (successful call):**
 ```json
@@ -154,6 +154,7 @@ Every tool call produces one JSON-L line on stdout. Scope violations produce a `
   "agent_id": "research-01",
   "args": {"path": "notes.md"},
   "status": "ok",
+  "session.id": "a3f2b1c4-9e12-4d7a-b031-fc82a6e5d901",
   "elapsed_ms": 12
 }
 ```
@@ -169,6 +170,7 @@ Every tool call produces one JSON-L line on stdout. Scope violations produce a `
   "args": {"path": "../../build-01/secrets.env"},
   "status": "blocked",
   "error": "Path '../../build-01/secrets.env' is outside the agent scope",
+  "session.id": "a3f2b1c4-9e12-4d7a-b031-fc82a6e5d901",
   "elapsed_ms": 0
 }
 ```
@@ -208,8 +210,7 @@ Every tool call produces one JSON-L line on stdout. Scope violations produce a `
 
 **Additional credential sources** — Extend `credentials.py` with new sources (Vault, SSM Parameter Store, etc.).
 
-**Post-v0.1 roadmap ideas:**
+**Extension ideas for contributors:**
 - Per-tool scoping (more granular than per-module)
-- SSE/HTTP transport (currently stdio only)
-- Loki/OTLP log forwarding (currently stdout only)
+- SSE/HTTP agent-facing transport (currently stdio only; `mcp_proxy` already supports HTTP streamable-HTTP upstreams)
 - Helm-specific modules as a separate `helm-scoped-mcp-modules` package

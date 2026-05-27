@@ -4,13 +4,14 @@ How resource isolation works, and when to use each strategy.
 
 ## The invariant
 
-Every tool call passes through `enforce()` before any backend operation. This is called by the `@audited` decorator, which the registry applies at registration time. Module authors do not call `enforce()` directly — this design prevents accidental omission.
+Every tool call passes through `enforce()` before any backend operation. The `@audited` decorator (applied by the registry) handles structured logging only — scope enforcement is the module's responsibility. Every tool method must call `self.scoping.enforce()` on each resource-addressing argument before any backend I/O.
 
 ```
 Agent calls tool
-    → @audited wrapper runs
-    → scope.enforce(args, agent_ctx)  ← happens here, before tool logic
-    → tool logic executes (or ScopeViolation raised)
+    → @audited wrapper fires
+    → tool method executes
+        → scope.enforce(args, agent_ctx)  ← called by the tool method
+        → backend operation (or ScopeViolation raised + logged)
     → audit log written
 ```
 

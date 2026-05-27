@@ -5,7 +5,7 @@ How to ship scoped-mcp audit logs to Loki and query them in Grafana.
 scoped-mcp emits two structured JSON-L streams:
 
 - **Audit log** (`"logger": "audit"`) — every tool call, every scope violation.
-  Fields: `event`, `agent_id`, `tool`, `args`, `status`, `elapsed_ms`, `timestamp`.
+  Fields: `event`, `agent_id`, `tool`, `args`, `status`, `elapsed_ms`, `session.id`, `timestamp`.
 - **Ops log** (`"logger": "ops"`) — startup, shutdown, config events.
   Fields: `event`, `agent_id`, `agent_type`, `manifest`, `modules`, `timestamp`.
 

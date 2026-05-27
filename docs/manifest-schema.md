@@ -67,8 +67,10 @@ modules:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `source` | `"env"` or `"file"` | `"env"` | Where to read credentials from |
+| `source` | `"env"`, `"file"`, or `"vault"` | `"env"` | Where to read credentials from |
 | `path` | string | — | Path to a YAML secrets file (required when `source: file`) |
+
+For Vault-backed credentials, see [Vault credential source](#vault-credential-source) below.
 
 ## Secrets file format
 
@@ -78,6 +80,137 @@ When `source: file`, the file must be a YAML mapping of key names to values:
 NTFY_TOKEN: your-token-here
 SMTP_PASSWORD: your-password-here
 GRAFANA_SERVICE_ACCOUNT_TOKEN: glsa_abc123
+```
+
+## Vault credential source
+
+Set `credentials.source: vault` to fetch credentials from HashiCorp Vault via AppRole auth.
+Credentials are fetched once at startup; the client token is renewed automatically in the background.
+Requires `pip install scoped-mcp[vault]`.
+
+```yaml
+credentials:
+  source: vault
+  vault:
+    addr: https://vault.example.com
+    auth: approle
+    role_id_env: VAULT_ROLE_ID        # env var holding the AppRole role ID
+    secret_id_env: VAULT_SECRET_ID    # env var holding the AppRole secret ID
+    path: secret/data/scoped-mcp/{agent_type}  # {agent_type} interpolated at startup
+    kv_version: 2                     # 1 or 2 (default: 2)
+```
+
+Path traversal sequences (`..`) in the interpolated path are rejected at startup.
+See `examples/vault/` for a working manifest, AppRole policy, and setup script.
+
+## Environment variable substitution
+
+Manifest fields support `${VAR_NAME}` placeholders, expanded from the process environment
+before YAML parsing:
+
+```yaml
+state_backend:
+  type: dragonfly
+  url: "redis://:${REDIS_PASSWORD}@host:6379/0"   # always quote substitution sites
+
+credentials:
+  source: file
+  path: "${SECRETS_FILE}"
+```
+
+Rules:
+- Only the braced form is expanded (`${VAR}`, not `$VAR`).
+- Undefined variables at startup are a hard error — the agent will not start.
+- Expanded values are never written to audit or ops logs.
+- **Always YAML-quote fields receiving substitution** — a secret value containing `:`, `{`, or `}` can corrupt YAML structure if the field is unquoted.
+
+## state_backend
+
+Pluggable backend for shared state used by rate limiting and HITL. Optional; defaults to `in_process`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `type` | `"in_process"` or `"dragonfly"` | `"in_process"` | Backend type |
+| `url` | string | — | Redis-compatible URL (required when `type: dragonfly`) |
+
+`in_process` — asyncio-based, no external deps. State is not shared across processes; rate limits and HITL approvals are local to the current process only.
+
+`dragonfly` — Lua-scripted sliding window on any Redis-compatible server (Dragonfly, Valkey, Redis). Required for rate limiting and HITL across multiple concurrent agent processes. Requires `pip install scoped-mcp[dragonfly]`.
+
+```yaml
+state_backend:
+  type: dragonfly
+  url: "redis://:${REDIS_PASSWORD}@127.0.0.1:6379/0"
+```
+
+## rate_limits
+
+Sliding-window rate limits per agent. Optional. Works with `in_process` backend for single-process deployments; use `dragonfly` for cross-process limits.
+
+```yaml
+rate_limits:
+  global: 60/minute            # all tools combined, per agent instance
+  per_tool:
+    filesystem_write_file: 10/minute
+    "mcp_proxy.*": 30/minute   # glob — all matched tools share one counter
+```
+
+Format: `<N>/second`, `<N>/minute`, or `<N>/hour`. Glob patterns in `per_tool` share a single sliding window across all matched tool names. Rate limit violations fail closed — backend errors block tool calls rather than silently bypassing limits.
+
+## argument_filters
+
+Pattern-based blocking or alerting on tool argument values. Optional. Registered automatically after rate limiting in the middleware chain.
+
+```yaml
+argument_filters:
+  - name: no-credentials
+    pattern: '(?i)(password|secret|token)\s*[:=]\s*\S+'
+    fields: [path, query, body]       # top-level argument names to inspect
+    action: block                     # or: warn
+    decode: [base64, urlsafe_base64, url]   # optional decode steps before matching
+    case_insensitive: true            # default: false
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | Identifier used in audit log entries |
+| `pattern` | string | yes | Python regex; compiled at manifest load (malformed pattern = startup error) |
+| `fields` | list[str] | yes | Top-level argument names to inspect |
+| `action` | `"block"` or `"warn"` | yes | `block` returns an error to the agent; `warn` logs and continues |
+| `decode` | list[str] | no | Decode steps applied before matching: `base64`, `urlsafe_base64`, `url`. Capped at 64 KiB |
+| `case_insensitive` | bool | no | Case-insensitive matching (default: false) |
+
+Filters inspect top-level string arguments only — nested dicts/lists are not walked. Block rules short-circuit on first match. The audit log records rule name, tool name, field name, and a `raw`/`decoded` label — never the matched value.
+
+## hitl
+
+Human-in-the-loop approval for selected tools. Optional. Requires `state_backend.type: dragonfly`.
+
+```yaml
+hitl:
+  approval_required: ["filesystem_delete_*", "sqlite_execute"]
+  shadow: ["mcp_proxy.*"]    # log-only — return synthetic empty-success, never forward
+  timeout_seconds: 300        # auto-reject after this many seconds (default: 300)
+  notify:
+    type: ntfy               # log (default), ntfy, webhook, or matrix
+    topic: homelab-hitl
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `approval_required` | list[str] | `[]` | Glob patterns — matching tools require explicit operator approval before forwarding |
+| `shadow` | list[str] | `[]` | Glob patterns — matching tools log a sanitised summary and return synthetic empty-success without forwarding upstream |
+| `timeout_seconds` | int | `300` | Auto-reject if no decision arrives within this window |
+| `notify.type` | `"log"`, `"ntfy"`, `"webhook"`, `"matrix"` | `"log"` | Notification channel for pending approval requests |
+
+Shadow takes precedence: a tool matched by both `shadow` and `approval_required` is always shadowed. Transport failures in the notifier are logged and swallowed — a notification outage cannot wedge the approval loop.
+
+Approve or reject from the CLI:
+
+```bash
+scoped-mcp hitl list
+scoped-mcp hitl approve <id>
+scoped-mcp hitl reject <id> [reason]
 ```
 
 ## Complete example

@@ -43,7 +43,7 @@ scoped-mcp runs as a single OS user. An agent that achieves code execution in th
 stdio transport (the default) runs in-process. If you use HTTP/SSE transport, TLS configuration is your responsibility.
 
 **E2EE Matrix messages**
-The Matrix module supports unencrypted rooms only (v0.1). No libolm dependency.
+The Matrix module supports unencrypted rooms only. No libolm dependency.
 
 **DNS-based SSRF**
 The http_proxy SSRF check validates IP addresses at init time but cannot perform DNS resolution without an async context. If a hostname resolves to an internal IP, this is not caught by the proxy — it relies on network-level controls. Run in a restricted network environment for defense in depth.
