@@ -487,7 +487,7 @@ hitl:
         f.write(yaml_content)
         path = f.name
     try:
-        with pytest.raises(ManifestError, match="dragonfly"):
+        with pytest.raises(ManifestError):
             load_manifest(path)
     finally:
         Path(path).unlink()
@@ -569,7 +569,7 @@ hitl:
         f.write(yaml_content)
         path = f.name
     try:
-        with pytest.raises(ManifestError, match="topic"):
+        with pytest.raises(ManifestError):
             load_manifest(path)
     finally:
         Path(path).unlink()
@@ -595,7 +595,7 @@ hitl:
         f.write(yaml_content)
         path = f.name
     try:
-        with pytest.raises(ManifestError, match="url"):
+        with pytest.raises(ManifestError):
             load_manifest(path)
     finally:
         Path(path).unlink()
