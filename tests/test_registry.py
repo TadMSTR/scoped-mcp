@@ -296,3 +296,52 @@ def test_register_signing_hook_with_valid_keys_registers_hook() -> None:
         assert len(_registry.get(("agent-bus", "log_event"), [])) == 1
     finally:
         clear_hooks()
+
+
+# ── Tool name prefix regression test ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_tool_names_are_single_prefixed(agent_ctx: AgentContext) -> None:
+    """Tools must be registered as '{module}_{method}' — not '{module}_{module}_{method}'.
+
+    server.mount(prefix=module_name) applies the prefix, so child.tool() must receive
+    the bare method name only. Double-registration caused HITL and rate-limit patterns
+    to never match on forge.
+    """
+    from unittest.mock import patch
+
+    mock_cls = MagicMock()
+    mock_cls.required_credentials = []
+    mock_cls.optional_credentials = []
+
+    mock_instance = _make_mock(agent_ctx)
+    mock_cls.return_value = mock_instance
+
+    manifest = Manifest.model_validate(
+        {
+            "agent_type": "test",
+            "modules": {
+                "my-module": {
+                    "type": "_test_mock",
+                    "mode": "read",
+                    "config": {},
+                }
+            },
+        }
+    )
+
+    with patch(
+        "scoped_mcp.registry._discover_module_classes",
+        return_value={"_test_mock": type(mock_instance)},
+    ):
+        server = build_server(agent_ctx, manifest)
+
+    tools = await server.list_tools()
+    tool_names = [t.name for t in tools]
+    assert tool_names, "expected at least one tool to be registered"
+    for name in tool_names:
+        # No tool should start with the doubled prefix
+        assert not name.startswith("my-module_my-module_"), f"double prefix detected: {name!r}"
+        # All tools should start with the single module prefix
+        assert name.startswith("my-module_"), f"expected single prefix in: {name!r}"

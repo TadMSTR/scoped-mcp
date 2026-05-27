@@ -229,14 +229,17 @@ def build_server(
         if not tool_methods:
             ops.warning("no_tools_registered", module=module_name, mode=module_cfg.mode)
         for method in tool_methods:
-            tool_name = f"{module_name}_{method.__name__}"
+            # audit_tool_name is the full namespaced name used in logs and @audited.
+            # child.tool() receives only the bare method name — server.mount(prefix=)
+            # applies the module_name prefix, so using the full name here would double it.
+            audit_tool_name = f"{module_name}_{method.__name__}"
             # Wrap with @audited — this is the only place @audited is applied.
             # Module authors must not apply it themselves.
-            wrapped = audited(tool_name)(method)
+            wrapped = audited(audit_tool_name)(method)
             if middleware:
-                wrapped = chain.wrap(tool_name, wrapped, agent_ctx)
-            child.tool(name=tool_name)(wrapped)
-            ops.info("tool_registered", tool=tool_name, mode=module_cfg.mode)
+                wrapped = chain.wrap(audit_tool_name, wrapped, agent_ctx)
+            child.tool(name=method.__name__)(wrapped)
+            ops.info("tool_registered", tool=audit_tool_name, mode=module_cfg.mode)
         server.mount(child, prefix=module_name)
 
     ops.info("registry_complete", agent_id=agent_ctx.agent_id)

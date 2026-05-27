@@ -84,7 +84,7 @@ async def _emit_agent_bus_event(
     if not _agent_bus_comms_dir:
         return
     try:
-        logs_dir = Path(_agent_bus_comms_dir) / "logs"
+        logs_dir = Path(_agent_bus_comms_dir).expanduser() / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
 
         date = datetime.now(UTC).strftime("%Y-%m-%d")

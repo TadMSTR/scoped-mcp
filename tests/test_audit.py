@@ -317,3 +317,36 @@ def test_audited_rejects_scope_strategy_kwarg() -> None:
     """
     with pytest.raises(TypeError):
         audited("foo_tool", scope_strategy=object())  # type: ignore[call-arg]
+
+
+@pytest.mark.asyncio
+async def test_agent_bus_expands_tilde_in_comms_dir(agent_ctx: AgentContext) -> None:
+    """agent_bus_comms_dir values starting with '~' must be expanded to the home dir.
+
+    Without .expanduser(), Path("~/.claude/comms") resolves relative to CWD,
+    writing events to e.g. /home/ted/.claude/projects/sysadmin/~/.claude/comms/.
+    """
+    import json
+    import shutil
+    import tempfile
+
+    # Create a temp dir inside the actual home so tilde expansion is verifiable.
+    home = pathlib.Path.home()
+    target = pathlib.Path(tempfile.mkdtemp(dir=home, prefix=".scoped-mcp-test-"))
+    tilde_path = "~/" + target.name
+
+    configure_audit(agent_bus_emit=True, agent_bus_comms_dir=tilde_path)
+    try:
+        await _make_tool(_MockModule(agent_ctx))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0.05)
+
+        log_files = list((target / "logs").glob("*-session.jsonl"))
+        assert log_files, (
+            f"no JSONL written to expanded path {target}/logs — tilde was likely not expanded"
+        )
+        events = [json.loads(line) for line in log_files[0].read_text().splitlines()]
+        assert any(e["event"] == "tool.called" for e in events)
+    finally:
+        configure_audit(agent_bus_emit=False, agent_bus_comms_dir=None)
+        shutil.rmtree(target, ignore_errors=True)

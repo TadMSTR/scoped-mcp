@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] — 2026-05-26
+
+### Fixed
+
+- **`registry.py`: double module prefix in tool names** — `child.tool(name=tool_name)` was
+  registering tools with the full `{module}_{method}` name, then `server.mount(prefix=module)`
+  added the prefix a second time, producing `{module}_{module}_{method}`. HITL
+  `approval_required` and `rate_limits.per_tool` patterns never matched as a result — approvals
+  were silently bypassed on forge. Fixed by registering with `child.tool(name=method.__name__)`
+  (bare name) and letting `mount()` add the prefix once.
+- **`audit.py`: tilde not expanded in agent-bus comms path** — `Path(_agent_bus_comms_dir)` did
+  not call `.expanduser()`, so paths like `~/.claude/comms` were resolved relative to CWD.
+  Events were being written to `{CWD}/~/.claude/comms/logs/` instead of the intended
+  `/home/ted/.claude/comms/logs/`. Fixed by adding `.expanduser()`.
+
+### Changed
+
+- **`pyproject.toml` version bumped to 1.2.1** — version was not bumped during the v1.2.0
+  release.
+
 ## [1.2.0] — 2026-05-26
 
 ### Added
