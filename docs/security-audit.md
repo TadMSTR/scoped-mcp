@@ -16,7 +16,7 @@
 | 2026-04-27 | v1.0.0 — HITL + shadow mode | 0 critical / 0 high / 1 medium / 3 low | Remediated before merge |
 | 2026-05-26 | v1.0.1 — OTel TracerProvider + mcp_proxy | 0 critical / 0 high / 0 medium / 1 low | L1 partially mitigated; fully resolved in v1.1.1 |
 | 2026-05-26 | Phase 7 — audit, hooks, response filter, loki-mcp, agent-bus | 0 critical / 0 high / 0 medium / 3 low | All 3 findings triaged and fixed |
-| 2026-05-26 | Phase 7 forge — manifests, OTel v1.1.0, Vault AppRole config | 0 critical / 0 high / 0 medium / 4 low | Triaged; Vault per-agent policy pending |
+| 2026-05-26 | Phase 7 forge — manifests, OTel v1.1.0, Vault AppRole config | 0 critical / 0 high / 0 medium / 4 low | All 4 findings resolved |
 
 ## Summary
 
@@ -33,10 +33,10 @@ fully resolved in v1.1.1 (replacing `span.record_exception()` with a manually re
 event to prevent raw exception messages from reaching the OTLP collector).
 
 The 2026-05-26 audits (v1.0.1, Phase 7, and Phase 7 forge deployment) returned 0 critical,
-0 high, and 0 medium findings. Eight low-severity hardening items were identified across
-three audits; seven were triaged and fixed immediately. One outstanding item (per-agent Vault
-policies replacing the shared wildcard policy, Phase 7 forge L3) remains for a future
-configuration update.
+0 high, and 0 medium findings. Eight low-severity hardening items were identified across three audits; all eight were
+triaged and fixed. The Vault per-agent scoped policies (Phase 7 forge L3) were applied as
+part of the same Phase 7 session — per-agent AppRoles (`forge-<type>`) with per-agent
+policies (`agents-<type>-policy`) scoped to `read` on `secret/data/agents/<type>` only.
 
 ## Findings and Remediation
 
@@ -129,8 +129,10 @@ high, or medium findings. Four low findings:
   resolved in v1.1.1 by replacing `record_exception()` with `span.add_event()` using
   manually redacted `exception.type`, `exception.message`, and empty `exception.stacktrace`.
 - **L3** — Vault AppRole shared wildcard policy (`secret/data/agents/*`) allowed each agent
-  to read any other agent's signing private key from Vault KV. Per-agent scoped policies
-  recommended. **Outstanding** — Vault policy split not yet applied.
+  to read any other agent's signing private key from Vault KV. Fixed by creating five
+  per-agent policies (`agents-<type>-policy`) each scoped to `read` on
+  `secret/data/agents/<type>` only, with matching per-agent AppRoles (`forge-<type>`).
+  Documented in `helm-platform/docs/components/scoped-mcp-forge.md`.
 - **L4** — Dragonfly connection URL (including password) embedded in sysadmin manifest rather
   than the `.env` file used by other agents. Fixed by moving to `.env` with env var
   substitution in the manifest.
