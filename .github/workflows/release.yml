@@ -80,8 +80,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
-          gh release create "${TAG_NAME}" \
-            dist/*.whl dist/*.tar.gz \
-            --title "${TAG_NAME}" \
-            --generate-notes \
-            --verify-tag
+          if gh release view "${TAG_NAME}" &>/dev/null; then
+            gh release upload "${TAG_NAME}" dist/*.whl dist/*.tar.gz --clobber
+          else
+            gh release create "${TAG_NAME}" \
+              dist/*.whl dist/*.tar.gz \
+              --title "${TAG_NAME}" \
+              --generate-notes \
+              --verify-tag
+          fi
