@@ -38,6 +38,13 @@ def _expand_env_vars(text: str) -> str:
 
     Raises ManifestError naming any undefined variable — the agent must not start
     with incomplete config. Expanded values are returned but never logged.
+
+    Warning: manifest fields that receive substitution should be YAML-quoted to
+    prevent special characters in the expanded value from corrupting the YAML
+    structure. For example::
+
+        url: "${DRAGONFLY_URL}"   # safe — value is a YAML string
+        url: ${DRAGONFLY_URL}     # unsafe if value contains ':', '{', '}', or newline
     """
     missing: list[str] = []
 
@@ -428,7 +435,9 @@ def load_manifest(path: str) -> Manifest:
         text = _expand_env_vars(text)
         raw = yaml.safe_load(text)
     except yaml.YAMLError as e:
-        raise ManifestError(f"Failed to parse manifest '{path}': {e}") from e
+        # Do not include str(e) — PyYAML error messages may contain the expanded
+        # manifest text, which can include secret values from env var substitution.
+        raise ManifestError(f"Failed to parse manifest '{path}': YAML syntax error") from e
 
     if not isinstance(raw, dict):
         raise ManifestError(f"Manifest '{path}' must be a YAML/JSON object at the top level")
@@ -436,4 +445,6 @@ def load_manifest(path: str) -> Manifest:
     try:
         return Manifest.model_validate(raw)
     except Exception as e:
-        raise ManifestError(f"Manifest '{path}' failed validation: {e}") from e
+        # Do not include str(e) — Pydantic ValidationError messages include field
+        # values, which can contain secret values from env var substitution.
+        raise ManifestError(f"Manifest '{path}' failed validation: {type(e).__name__}") from e
