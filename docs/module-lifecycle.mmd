@@ -21,15 +21,32 @@ sequenceDiagram
     end
 
     rect rgb(26, 26, 46)
-        Note over Env,FM: Runtime (per tool call)
+        Note over Env,FM: Runtime (ToolModule call)
         FM->>Mod: tool_call(args)
         activate Mod
-        Note right of Mod: @audited wrapper runs first
+        Note right of Mod: @audited wrapper logs the call
         Mod->>Mod: scope.enforce(args)
         alt scope violation
             Mod-->>FM: ScopeError (blocked + logged)
         else within scope
             Mod->>Mod: execute tool logic
+            Mod-->>FM: result (logged)
+        end
+        deactivate Mod
+    end
+
+    rect rgb(26, 46, 26)
+        Note over Env,FM: Runtime (mcp_proxy forwarded call)
+        FM->>Mod: proxy_call(tool, args)
+        activate Mod
+        Note right of Mod: pre-call hook registry fires (e.g. signing hook)
+        Mod->>Mod: run_before_hooks(tool, kwargs)
+        Mod->>Mod: validate inputSchema
+        Mod->>Mod: run middleware (rate_limits, arg_filters, hitl)
+        alt blocked or rejected
+            Mod-->>FM: RateLimitError / HitlRejectedError (logged)
+        else approved
+            Mod->>Mod: forward to upstream MCP server
             Mod-->>FM: result (logged)
         end
         deactivate Mod

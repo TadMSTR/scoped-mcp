@@ -8,20 +8,23 @@ flowchart LR
         M["Manifest Loader\nresearch-agent.yml"]
         R["Module Registry"]
         C["Credential Injector"]
-        AU["Audit Logger"]
+        EX["Tool Execution\n(scope → run → audit)"]
 
         M --> R
         R --> C
-        C --> AU
+        C --> EX
     end
 
     subgraph backends["Backends (scoped)"]
         FS["Filesystem\nagents/research-01/"]
-        DB["SQLite\nschema: agent_research_01"]
+        DB["SQLite\nagent_research-01.db"]
         NT["ntfy\ntopic: research-research-01"]
     end
 
+    ALOG["Audit Log\n(JSONL)"]
+
     A -- "MCP (stdio)" --> proxy
-    AU --> FS
-    AU --> DB
-    AU --> NT
+    EX --> FS
+    EX --> DB
+    EX --> NT
+    EX --> ALOG

@@ -65,23 +65,26 @@ flowchart LR
         M["Manifest Loader<br/><i>research-agent.yml</i>"]
         R["Module Registry"]
         C["Credential Injector"]
-        AU["Audit Logger"]
+        EX["Tool Execution<br/>(scope → run → audit)"]
 
         M --> R
         R --> C
-        C --> AU
+        C --> EX
     end
 
     subgraph backends["Backends (scoped)"]
         FS["Filesystem<br/><code>agents/research-01/</code>"]
-        DB["SQLite<br/><code>schema: research_01</code>"]
+        DB["SQLite<br/><code>agent_research-01.db</code>"]
         NT["ntfy<br/><code>topic: research-research-01</code>"]
     end
 
+    ALOG["Audit Log<br/>(JSONL)"]
+
     A -- "MCP (stdio)" --> proxy
-    AU --> FS
-    AU --> DB
-    AU --> NT
+    EX --> FS
+    EX --> DB
+    EX --> NT
+    EX --> ALOG
 ```
 
 ---
@@ -138,7 +141,7 @@ MCP servers that need credentials, since stdio subprocesses do not inherit the p
 
 **Logging** — two structured JSON-L streams:
 
-1. **Audit log** — what agents did. Every tool call, every scope check.
+1. **Audit log** — what agents did. Every tool call, every scope check. Every entry includes a `session.id` UUID assigned at process start, for correlating all calls within one agent session.
 2. **Operational log** — what the server did. Startup, shutdown, config errors.
 
 ---
@@ -420,19 +423,26 @@ audit logging. To back that up:
 
 - **Threat model:** `docs/threat-model.md` documents the attack surface,
   trust boundaries, and what scoped-mcp does and does not protect against.
-- **Audit history:** `docs/security-audit.md` tracks every internal audit,
-  including the v0.1.0 audit that found 18 findings (1 critical, 3 high, 8
-  medium, 6 low) and their remediation in v0.2.0. v0.2.1 and v0.3.0 audits
-  returned clean.
+- **Audit history:** `docs/security-audit.md` tracks formal internal audits:
+  v0.1.0 found 18 findings (1 critical, 3 high, 8 medium, 6 low), remediated
+  in v0.2.0; the v0.2.1 follow-up audit returned clean. Post-v1.0 security
+  fixes (OTel exception redaction, audit log stdio isolation, ManifestError
+  secret suppression) are documented in CHANGELOG.md.
 - **Verifiable isolation:** the `examples/claude-code/multi-agent-setup.md`
   includes a step-by-step verification walkthrough — you can confirm filesystem
   isolation and credential non-exposure yourself in under five minutes.
 
-### Optional guardrails (v0.7 → v1.0)
+### Optional guardrails
 
-The v0.7 → v1.0 hardening roadmap added four opt-in middleware layers that
-sit on top of the core tool/scope/credential/audit guarantees. All are off
-by default; enable per-agent in the manifest:
+Six opt-in middleware layers sit on top of the core tool/scope/credential/audit
+guarantees. All are off by default; enable per-agent in the manifest:
+
+- **OpenTelemetry tracing** (`OTEL_EXPORTER_OTLP_ENDPOINT`, v0.6) — one span per
+  tool call with `scoped_mcp.*` attributes (`agent.id`, `agent.type`, `tool.name`,
+  `call.status`). Auto-enabled when `OTEL_EXPORTER_OTLP_ENDPOINT` is set in the
+  environment. Tool arguments are excluded from spans to prevent credential leakage.
+  Works with SigNoz, Grafana Tempo, Jaeger, and Langfuse OTLP ingest. Requires
+  `pip install scoped-mcp[otel]`.
 
 - **Rate limiting** (`rate_limits:`, v0.7) — sliding-window per-agent and
   per-tool limits with glob patterns. Backed by `InProcessBackend` (default)
@@ -452,6 +462,12 @@ by default; enable per-agent in the manifest:
   `scoped-mcp hitl approve|reject <id>`. Requires `state_backend.type:
   dragonfly` (cross-process pub/sub).
 
+- **Response filtering** (v1.0.2) — opt-in post-execution content scanning.
+  `block`, `warn`, or `redact` modes applied per-field via `ResponseFilterRule`
+  entries in the manifest's `audit:` section. Redaction applies to string leaves
+  in structured responses only — never to serialized dict/list blobs. See
+  `contrib/response_filter.py`.
+
 ---
 
 ## Non-Goals
@@ -459,7 +475,7 @@ by default; enable per-agent in the manifest:
 - **Not an enterprise gateway** — no OAuth, no multi-tenant SaaS, no Kubernetes. For self-hosters running multi-agent setups.
 - **Not a policy engine** — no prompt injection detection, no tool call classification.
 - **Not a process manager** — one MCP server that an agent connects to. Spawning agents is your orchestrator's job.
-- **Not E2EE** — the Matrix module supports unencrypted rooms only in v0.1 (no libolm dependency).
+- **Not E2EE** — the Matrix module supports unencrypted rooms only (no libolm dependency).
 
 ---
 
@@ -478,7 +494,16 @@ pip install "scoped-mcp[smtp]"
 # With SQLite async support
 pip install "scoped-mcp[sqlite]"
 
-# Everything
+# With OpenTelemetry tracing (auto-enabled when OTEL_EXPORTER_OTLP_ENDPOINT is set)
+pip install "scoped-mcp[otel]"
+
+# With shared state backend for rate limiting and HITL across processes
+pip install "scoped-mcp[dragonfly]"
+
+# With HashiCorp Vault credential source
+pip install "scoped-mcp[vault]"
+
+# HTTP + SMTP + SQLite bundle (does not include otel, dragonfly, or vault)
 pip install "scoped-mcp[all]"
 ```
 
