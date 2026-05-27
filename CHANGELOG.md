@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] — 2026-05-27
+
+### Security
+
+- **`manifest.py`: suppress secret values from `ManifestError` messages** — `yaml.YAMLError`
+  and Pydantic `ValidationError` messages were interpolated directly into `ManifestError`
+  strings. After env var substitution, those messages could include expanded secret values
+  (e.g. a password that corrupts YAML, or a Pydantic field dump). The YAML path now emits
+  a static `"YAML syntax error"` string; the validation path emits only `type(e).__name__`.
+  The `__cause__` chain is preserved for debugging. Docstring warning added to
+  `_expand_env_vars()` advising that substitution sites should be YAML-quoted to prevent
+  structure corruption from special characters in secret values.
+
 ## [1.2.1] — 2026-05-26
 
 ### Fixed
