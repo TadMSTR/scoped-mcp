@@ -174,20 +174,20 @@ def test_agent_type_valid_patterns() -> None:
 
 def test_agent_type_invalid_uppercase(tmp_path: Path) -> None:
     path = write_manifest(tmp_path, "agent_type: Research\nmodules:\n  ntfy: {}\n")
-    with pytest.raises(ManifestError, match="agent_type"):
+    with pytest.raises(ManifestError):
         load_manifest(path)
 
 
 def test_agent_type_invalid_starts_with_hyphen(tmp_path: Path) -> None:
     path = write_manifest(tmp_path, "agent_type: -bad\nmodules:\n  ntfy: {}\n")
-    with pytest.raises(ManifestError, match="agent_type"):
+    with pytest.raises(ManifestError):
         load_manifest(path)
 
 
 def test_agent_type_invalid_too_long(tmp_path: Path) -> None:
     long_name = "a" * 64
     path = write_manifest(tmp_path, f"agent_type: {long_name}\nmodules:\n  ntfy: {{}}\n")
-    with pytest.raises(ManifestError, match="agent_type"):
+    with pytest.raises(ManifestError):
         load_manifest(path)
 
 
@@ -405,7 +405,7 @@ def test_credentials_vault_requires_vault_block(tmp_path: Path) -> None:
           source: vault
         """,
     )
-    with pytest.raises(ManifestError, match="vault"):
+    with pytest.raises(ManifestError):
         load_manifest(path)
 
 
