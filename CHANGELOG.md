@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-05-29
+
 ### Added
 
 - **`mcp_proxy.py`: header injection for upstream HTTP connections** — new `headers`
@@ -14,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   custom headers (e.g. `Authorization: Bearer ${TOKEN}`) to upstream MCP servers.
   Stdio transports log a warning and ignore headers. Supports `${VAR}` substitution
   via scoped-mcp's existing env-var expansion.
+- **`manifest.py`: `max_auto_risk` and `interaction_permissions` manifest fields** — new
+  optional top-level fields accepted by the `Manifest` model. These are platform metadata
+  consumed by the task dispatcher and agent bus; scoped-mcp parses and stores them but
+  does not act on them. Fixes `ValidationError` for agents whose manifests include these
+  fields.
 
 ## [1.2.2] — 2026-05-27
 

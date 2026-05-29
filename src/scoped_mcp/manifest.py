@@ -338,6 +338,15 @@ class ModuleConfig(BaseModel):
         return v
 
 
+class InteractionPermissions(BaseModel):
+    """Agent interaction permission lists — consumed by the task dispatcher, not scoped-mcp."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    auto_approved: list[str] = []
+    needs_approval: list[str] = []
+
+
 class Manifest(BaseModel):
     """Top-level manifest model."""
 
@@ -345,6 +354,9 @@ class Manifest(BaseModel):
 
     agent_type: str
     description: str = ""
+    # Platform metadata — read by task dispatcher and agent bus, ignored by scoped-mcp.
+    max_auto_risk: str | None = None
+    interaction_permissions: InteractionPermissions | None = None
     modules: dict[str, ModuleConfig]
     credentials: CredentialSourceConfig = CredentialSourceConfig()
     state_backend: StateBackendConfig = StateBackendConfig()
