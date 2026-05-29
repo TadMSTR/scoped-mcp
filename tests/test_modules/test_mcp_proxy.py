@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastmcp.client.transports import StreamableHttpTransport
 from mcp.types import Tool
 
 from scoped_mcp.identity import AgentContext
@@ -449,3 +450,82 @@ async def test_proxy_call_strips_none_kwargs(search_module):
 
     # limit=None must be stripped; only query forwarded
     mock_cm.call_tool.assert_called_once_with("search", arguments={"query": "hello"})
+
+
+# ---------------------------------------------------------------------------
+# Header injection tests
+# ---------------------------------------------------------------------------
+
+
+def _make_http_module_with_headers(agent_ctx, headers: dict) -> McpProxyModule:
+    """Helper: build McpProxyModule with headers config (sync, patched discovery)."""
+    with patch("scoped_mcp.modules.mcp_proxy.Client") as MockClient:
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_cm.list_tools = AsyncMock(return_value=[_make_tool("health_check")])
+        MockClient.return_value = mock_cm
+        return McpProxyModule(
+            agent_ctx=agent_ctx,
+            credentials={},
+            config={"url": "http://127.0.0.1:8493/mcp", "headers": headers},
+        )
+
+
+def test_headers_config_builds_streamable_http_transport(agent_ctx):
+    """When headers are configured, _transport() returns StreamableHttpTransport."""
+    mod = _make_http_module_with_headers(agent_ctx, {"Authorization": "Bearer test-token-abc"})
+    transport = mod._transport()
+    assert isinstance(transport, StreamableHttpTransport)
+    assert transport.headers == {"Authorization": "Bearer test-token-abc"}
+
+
+def test_no_headers_config_returns_url_string(agent_ctx):
+    """Without headers config, _transport() returns the URL string unchanged."""
+    with patch("scoped_mcp.modules.mcp_proxy.Client") as MockClient:
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_cm.list_tools = AsyncMock(return_value=[_make_tool("health_check")])
+        MockClient.return_value = mock_cm
+        mod = McpProxyModule(
+            agent_ctx=agent_ctx,
+            credentials={},
+            config={"url": "http://127.0.0.1:8493/mcp"},
+        )
+    assert mod._transport() == "http://127.0.0.1:8493/mcp"
+
+
+def test_headers_on_stdio_transport_logs_warning(agent_ctx, capsys):
+    """Headers config on stdio transport emits a warning and is otherwise ignored.
+
+    structlog emits to stdout (not stdlib logging), so we capture via capsys.
+    """
+    with patch("scoped_mcp.modules.mcp_proxy.Client") as MockClient:
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_cm.list_tools = AsyncMock(return_value=[_make_tool("health_check")])
+        MockClient.return_value = mock_cm
+        McpProxyModule(
+            agent_ctx=agent_ctx,
+            credentials={},
+            config={
+                "command": "/usr/bin/python3",
+                "headers": {"Authorization": "Bearer token"},
+            },
+        )
+    out = capsys.readouterr().out
+    assert "mcp_proxy_headers_ignored" in out
+
+
+def test_multiple_headers_passed_to_transport(agent_ctx):
+    """All configured headers are forwarded to StreamableHttpTransport."""
+    headers = {
+        "Authorization": "Bearer secret-token",
+        "X-Agent-Id": "developer",
+    }
+    mod = _make_http_module_with_headers(agent_ctx, headers)
+    transport = mod._transport()
+    assert isinstance(transport, StreamableHttpTransport)
+    assert transport.headers == headers
