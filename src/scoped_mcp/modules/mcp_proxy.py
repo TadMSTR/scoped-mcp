@@ -23,6 +23,13 @@ Config:
     command (str): Executable path for a stdio MCP server.
     args (list[str]): Arguments to pass to the command.
 
+    headers (dict[str, str]): Optional HTTP headers to send with every request
+        to the upstream MCP server. Only applies to HTTP (url) transport — has
+        no effect on stdio transport. Header values support ${VAR_NAME}
+        substitution via the manifest credentials block (resolved before this
+        module is instantiated). Sensitive header values (e.g. Authorization)
+        are automatically redacted by the structlog sanitize processor.
+
     tool_allowlist (list[str]): If set, only these tools are exposed.
         Empty list or absent = all tools exposed.
     tool_denylist (list[str]): Tools in this list are never exposed.
@@ -47,6 +54,7 @@ from typing import Any, ClassVar
 import jsonschema
 import structlog
 from fastmcp import Client
+from fastmcp.client.transports import StreamableHttpTransport
 
 from ._base import ToolModule
 
@@ -83,11 +91,17 @@ class McpProxyModule(ToolModule):
         self._url: str | None = config.get("url")
         self._command: str | None = config.get("command")
         self._args: list[str] = config.get("args", [])
+        self._headers: dict[str, str] = config.get("headers") or {}
 
         if not self._url and not self._command:
             raise ValueError("mcp_proxy requires either 'url' or 'command' in config")
         if self._url and self._command:
             raise ValueError("mcp_proxy: specify 'url' OR 'command', not both")
+        if self._headers and self._command:
+            _log.warning(
+                "mcp_proxy_headers_ignored",
+                reason="headers config has no effect on stdio transport",
+            )
 
         allowlist = config.get("tool_allowlist", [])
         denylist = config.get("tool_denylist", [])
@@ -107,9 +121,11 @@ class McpProxyModule(ToolModule):
             asyncio.wait_for(self._discover_tools(), timeout=self._discovery_timeout)
         )
 
-    def _transport(self) -> str | dict:
+    def _transport(self) -> str | dict | StreamableHttpTransport:
         """Return a fastmcp.Client-compatible transport spec."""
         if self._url:
+            if self._headers:
+                return StreamableHttpTransport(url=self._url, headers=self._headers)
             return self._url
         return {"mcpServers": {"upstream": {"command": self._command, "args": self._args}}}
 
