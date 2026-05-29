@@ -292,6 +292,33 @@ Notification modules are **write-only by design** — every agent needs to send 
 | `slack_webhook` | Slack incoming webhook | Webhook URL | One webhook = one channel |
 | `discord_webhook` | Discord webhook | Webhook URL | One webhook = one channel |
 
+### Proxy
+
+| Module | Description | Key config |
+|--------|-------------|------------|
+| `mcp_proxy` | Forward tool calls to an upstream MCP server (HTTP or stdio) | `url` or `command`, optional `tool_denylist`, `headers` |
+
+`mcp_proxy` connects to upstream MCP servers and re-exposes their tools through scoped-mcp.
+Tools are prefixed with the module name (e.g. `memsearch-mcp_search_memory`). Use `tool_denylist`
+to hide specific upstream tools from the agent.
+
+**Header injection** — pass custom HTTP headers to upstream streamable-http servers:
+
+```yaml
+modules:
+  memsearch-mcp:
+    type: mcp_proxy
+    config:
+      url: http://localhost:8493/mcp
+      headers:
+        Authorization: "Bearer ${MEMSEARCH_API_TOKEN}"
+```
+
+Header values support `${VAR}` substitution (same rules as all manifest fields).
+Headers are only applied to HTTP transports — configuring headers on a stdio
+transport logs a warning and ignores them. `Authorization` header values are
+automatically redacted from structured logs.
+
 ### Infrastructure
 
 | Module | Scope | Read tools | Write tools |
