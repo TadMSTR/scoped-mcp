@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`mcp_proxy.py`: header injection for upstream HTTP connections** — new `headers`
+  config field on `McpProxyModule`. When set, uses `StreamableHttpTransport` to pass
+  custom headers (e.g. `Authorization: Bearer ${TOKEN}`) to upstream MCP servers.
+  Stdio transports log a warning and ignore headers. Supports `${VAR}` substitution
+  via scoped-mcp's existing env-var expansion.
+
 ## [1.2.2] — 2026-05-27
 
 ### Security
