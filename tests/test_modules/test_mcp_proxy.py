@@ -456,6 +456,7 @@ async def test_proxy_call_strips_none_kwargs(search_module):
 # Header injection tests
 # ---------------------------------------------------------------------------
 
+
 def _make_http_module_with_headers(agent_ctx, headers: dict) -> McpProxyModule:
     """Helper: build McpProxyModule with headers config (sync, patched discovery)."""
     with patch("scoped_mcp.modules.mcp_proxy.Client") as MockClient:
@@ -473,9 +474,7 @@ def _make_http_module_with_headers(agent_ctx, headers: dict) -> McpProxyModule:
 
 def test_headers_config_builds_streamable_http_transport(agent_ctx):
     """When headers are configured, _transport() returns StreamableHttpTransport."""
-    mod = _make_http_module_with_headers(
-        agent_ctx, {"Authorization": "Bearer test-token-abc"}
-    )
+    mod = _make_http_module_with_headers(agent_ctx, {"Authorization": "Bearer test-token-abc"})
     transport = mod._transport()
     assert isinstance(transport, StreamableHttpTransport)
     assert transport.headers == {"Authorization": "Bearer test-token-abc"}
