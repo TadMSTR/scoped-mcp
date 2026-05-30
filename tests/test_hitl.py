@@ -114,6 +114,7 @@ async def test_retry_with_preapproval_token_succeeds() -> None:
     msg = str(exc_info.value)
     # Extract approval_id from the error message (format: "research-01.<hex12>")
     import re
+
     approval_id_match = re.search(r"research-01\.[0-9a-f]{12}", msg)
     assert approval_id_match, f"approval_id not found in: {msg}"
 
