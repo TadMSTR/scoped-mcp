@@ -482,12 +482,27 @@ guarantees. All are off by default; enable per-agent in the manifest:
   `inputSchema` before forwarding; pattern-based argument filters can block
   or alert on values, with optional base64/url decoding. See
   `docs/threat-model.md` for the documented limits.
-- **Human-in-the-loop approval** (`hitl:`, v1.0) — operator-gated tool
-  calls. Glob patterns select tools that require explicit approval, or
-  shadow-mode tools that log a sanitised summary and return a synthetic
-  empty-success without forwarding upstream. Approve/reject via
-  `scoped-mcp hitl approve|reject <id>`. Requires `state_backend.type:
-  dragonfly` (cross-process pub/sub).
+- **Human-in-the-loop approval** (`hitl:`, v1.1) — operator-gated tool
+  calls using a reject-then-wait design. When an agent calls an
+  `approval_required` tool, the middleware rejects immediately with a
+  `HitlRejectedError` containing an approval ID and retry instructions —
+  the MCP connection stays open. The operator runs
+  `scoped-mcp hitl approve <id>`, which writes a one-time pre-approval
+  token to Dragonfly (60 s TTL). The agent retries the tool call; the
+  middleware finds and consumes the token and forwards the call upstream.
+  Shadow-mode tools log a sanitised argument summary and return a
+  synthetic empty-success without forwarding upstream — useful for
+  observing agent behaviour before enabling a tool.
+
+  CLI subcommands:
+  ```
+  scoped-mcp hitl list                      # pending approvals
+  scoped-mcp hitl approve <approval_id>     # write pre-approval token
+  scoped-mcp hitl reject  <approval_id>     # delete pending key
+  ```
+
+  Requires `state_backend.type: dragonfly`. Install with
+  `pip install scoped-mcp[dragonfly]`.
 
 - **Response filtering** (v1.0.2) — opt-in post-execution content scanning.
   `block`, `warn`, or `redact` modes applied per-field via `ResponseFilterRule`
