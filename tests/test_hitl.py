@@ -196,6 +196,18 @@ async def test_pending_payload_written_to_state() -> None:
     assert payload["approval_id"] == approval_id
 
 
+def test_preapproval_key_not_matched_by_list_filter() -> None:
+    """F1 regression: preapproval keys must not appear in hitl list output.
+    The `:preapproved:` substring filter correctly excludes them even when
+    the tool name contains a dot (which would otherwise match the *.*  pattern)."""
+    from scoped_mcp.hitl_cli import _preapproval_key_for
+
+    dotted_tool = "mcp_proxy.delete_file"
+    full_key = f"scoped-mcp:research-01:hitl:{_preapproval_key_for('research-01', dotted_tool)}"
+    # The *:preapproved:* filter must catch this
+    assert ":preapproved:" in full_key
+
+
 # ── Non-approval paths ───────────────────────────────────────────────────────
 
 

@@ -76,6 +76,10 @@ async def _list_pending(redis_url: str) -> int:
     try:
         pending: list[dict] = []
         async for key in client.scan_iter(match="scoped-mcp:*:hitl:*.*"):
+            # Skip pre-approval tokens — they share the hitl: namespace but
+            # are not pending approvals. Approval IDs never contain "preapproved:".
+            if ":preapproved:" in key:
+                continue
             raw = await client.get(key)
             if raw is None:
                 continue
