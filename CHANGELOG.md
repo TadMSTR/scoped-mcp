@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] — 2026-05-30
+
+### Fixed
+
+- **`hitl.py`: switch HITL from suspend-and-wait to reject-then-wait** — the v1.0
+  design blocked the MCP connection while waiting for a pub/sub approval decision,
+  causing session deadlocks in Claude (tool call hangs; no other tools can run,
+  including the CLI approval command). The middleware now rejects immediately with
+  an approval ID and retry instructions. The operator runs `scoped-mcp hitl approve
+  <id>`, which writes a one-time pre-approval token to Dragonfly (60 s TTL). The
+  agent retries the tool call; the middleware finds and consumes the token and
+  forwards the call upstream.
+- **`hitl_cli.py`: filter preapproval keys from `hitl list`** — the scan pattern
+  `*:hitl:*.*` matched preapproval keys for tools with dots in their names (e.g.
+  `mcp_proxy.delete_file`). Preapproval keys are now explicitly skipped before the
+  GET to avoid unnecessary Redis operations and silent `JSONDecodeError` swallowing.
+
 ## [1.3.0] — 2026-05-29
 
 ### Added
