@@ -25,8 +25,8 @@ import pytest
 
 from scoped_mcp.exceptions import HitlRejectedError, ManifestError
 from scoped_mcp.hitl import (
-    HitlMiddleware,
     PREAPPROVAL_TTL_SECONDS,
+    HitlMiddleware,
     _build_arguments_summary,
     _generate_approval_id,
     _preapproval_key,
