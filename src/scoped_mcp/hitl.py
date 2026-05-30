@@ -1,10 +1,20 @@
-"""Human-in-the-loop approval middleware (v1.0).
+"""Human-in-the-loop approval middleware (v1.1 — reject-then-wait).
 
 When an agent calls a tool whose name matches an ``approval_required`` glob
-pattern, the proxy suspends the call, writes a payload to the shared state
-backend, sends a notification to the configured operator channel, and waits
-for an ``approve``/``reject`` decision over pub/sub. Auto-rejects after
-``timeout_seconds`` with no decision.
+pattern, the proxy rejects the call immediately, writes a payload to the
+shared state backend, and sends a notification to the configured operator
+channel. The agent receives a ``HitlRejectedError`` containing the approval
+ID and retry instructions.
+
+The operator approves via the CLI (``scoped-mcp hitl approve <id>``), which
+writes a one-time pre-approval token to state. On the agent's next call to
+the same tool, the middleware finds the token, consumes it (deletes it), and
+forwards the call upstream.
+
+This replaces the v1.0 suspend-and-wait design, which blocked the MCP
+connection while waiting for a pub/sub decision. In a Claude session, the
+blocked tool call prevented any other tools from running — including the
+CLI approval command — causing a session deadlock.
 
 When the tool name matches a ``shadow`` pattern, the call is logged with a
 sanitised argument summary and returns a synthetic empty-success response
@@ -18,22 +28,20 @@ unguessable.
 
 State keys (under the agent-scoped prefix in DragonflyBackend):
 - ``hitl:{approval_id}`` — JSON payload, TTL = ``timeout_seconds``
-- pub/sub channel: ``hitl:{approval_id}`` (same name as the storage key)
+- ``hitl:preapproved:{tool_name}`` — one-time approval token, TTL = 60 s
 
 Security invariants:
 - Argument values pass through ``audit._sanitize_value`` before notification
   or storage. Operators see redacted summaries, never raw values.
 - The agent-facing rejection message is generic — it does not reveal which
-  pattern matched or any operator-side reasoning.
-- HITL fails closed: backend errors during ``set_with_ttl`` or ``publish``
-  bubble up to the agent as a ``HitlRejectedError`` rather than silently
-  forwarding the call.
+  pattern matched or any operator-side reasoning beyond the approval ID.
+- HITL fails closed: backend errors during ``set_with_ttl`` bubble up to the
+  agent as a ``HitlRejectedError`` rather than silently forwarding the call.
+- Pre-approval tokens are one-time-use: consumed on first matching retry.
 """
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import fnmatch
 import json
 import time
@@ -55,6 +63,11 @@ _log = structlog.get_logger("audit")
 # under the lifetime of a single approval window.
 _APPROVAL_ID_HEX_LEN = 12
 
+# TTL for the pre-approval token written by the CLI on approve. Must be long
+# enough for the agent to retry after receiving the approval notification,
+# but short enough that stale tokens don't accumulate.
+PREAPPROVAL_TTL_SECONDS = 60
+
 # Synthetic response returned for shadow-mode calls.
 _SHADOW_RESPONSE: dict[str, Any] = {
     "shadow": True,
@@ -75,6 +88,11 @@ def _build_arguments_summary(kwargs: dict[str, Any]) -> dict[str, Any]:
 def _generate_approval_id(agent_id: str) -> str:
     suffix = uuid.uuid4().hex[:_APPROVAL_ID_HEX_LEN]
     return f"{agent_id}.{suffix}"
+
+
+def _preapproval_key(tool_name: str) -> str:
+    """State key for a one-time pre-approval token for the given tool."""
+    return f"hitl:preapproved:{tool_name}"
 
 
 class HitlMiddleware:
@@ -115,7 +133,7 @@ class HitlMiddleware:
             return await self._handle_shadow(tool_name, kwargs)
 
         if self._matches(tool_name, self._approval_patterns):
-            return await self._await_approval(tool_name, kwargs, call_next)
+            return await self._handle_approval(tool_name, kwargs, call_next)
 
         return await call_next()
 
@@ -129,12 +147,27 @@ class HitlMiddleware:
         )
         return _SHADOW_RESPONSE
 
-    async def _await_approval(
+    async def _handle_approval(
         self,
         tool_name: str,
         kwargs: dict[str, Any],
         call_next: Callable[[], Any],
     ) -> Any:
+        # Check for a pre-approval token written by the operator CLI after
+        # approving a previous rejected call for this tool.
+        pre_key = _preapproval_key(tool_name)
+        preapproved = await self._state.get(pre_key)
+        if preapproved is not None:
+            # Consume the token — one-time use only.
+            await self._state.delete(pre_key)
+            _log.warning(
+                "hitl_preapproved",
+                agent_id=self._agent_id,
+                tool=tool_name,
+            )
+            return await call_next()
+
+        # No pre-approval found — register the request and reject immediately.
         approval_id = _generate_approval_id(self._agent_id)
         approval_key = f"hitl:{approval_id}"
         summary = _build_arguments_summary(kwargs)
@@ -151,13 +184,6 @@ class HitlMiddleware:
             }
         )
 
-        # Subscribe BEFORE writing the key, so a fast operator decision cannot
-        # arrive between the publish and our subscribe call. ``subscribe`` is a
-        # coroutine: registration / network handshake completes synchronously
-        # when this awaits, BEFORE we set the state key or notify the operator
-        # (audit v1.0 M1 fix).
-        sub = await self._state.subscribe(approval_key)
-
         try:
             await self._state.set_with_ttl(approval_key, payload, self._timeout)
         except Exception as e:
@@ -167,9 +193,7 @@ class HitlMiddleware:
                 error=type(e).__name__,
             )
             # Don't chain via ``from e`` — the underlying exception type is an
-            # operational fingerprint we should not surface to the agent
-            # (audit v1.0 L2). The structured log above keeps the detail for
-            # operator triage.
+            # operational fingerprint we should not surface to the agent.
             raise HitlRejectedError("approval rejected: state backend unavailable") from None
 
         _log.warning(
@@ -182,10 +206,7 @@ class HitlMiddleware:
         )
 
         # Notify the operator. A buggy or third-party notifier that raises must
-        # not propagate out of the middleware: it would orphan the approval key
-        # and surface a non-HitlRejectedError stack to the agent. Log and
-        # continue waiting for an operator decision via other channels (audit
-        # v1.0 L1).
+        # not propagate out of the middleware — log and continue to the rejection.
         try:
             await self._notifier.notify(
                 approval_id=approval_id,
@@ -202,62 +223,14 @@ class HitlMiddleware:
                 error=type(e).__name__,
             )
 
-        decision = await self._wait_for_decision(approval_id, sub)
-
-        # Always clean up the approval key — TTL would handle eventually, but
-        # explicit delete keeps `hitl list` tidy after a decision.
-        with contextlib.suppress(Exception):
-            await self._state.delete(approval_key)
-
-        if decision == "approve":
-            _log.warning(
-                "hitl_approved",
-                approval_id=approval_id,
-                agent_id=self._agent_id,
-                tool=tool_name,
-            )
-            return await call_next()
-
-        # decision is "reject", "reject:<reason>", or "timeout"
-        _log.warning(
-            "hitl_rejected",
-            approval_id=approval_id,
-            agent_id=self._agent_id,
-            tool=tool_name,
-            decision=decision,
+        # Reject immediately — do not block the MCP connection waiting for
+        # a pub/sub decision. The agent should surface the approval_id to the
+        # operator, wait for the approval notification, then retry the call.
+        raise HitlRejectedError(
+            f"Tool call to {tool_name!r} requires operator approval "
+            f"(approval ID: {approval_id}). "
+            f"Run: scoped-mcp hitl approve {approval_id} — then retry this tool call."
         )
-        # Generic agent-facing message — operator-side reasoning stays in the audit log.
-        raise HitlRejectedError(f"tool call to {tool_name!r} rejected by HITL approval policy")
-
-    async def _wait_for_decision(self, approval_id: str, sub: Any) -> str:
-        """Consume the subscribe stream until a decision message arrives or timeout."""
-        try:
-            async with asyncio.timeout(self._timeout):
-                async for msg in sub:
-                    if msg == "approve" or msg == "reject" or msg.startswith("reject:"):
-                        return msg
-                    # Unknown messages are ignored — defends against stray
-                    # publishes on the channel.
-                # Generator exhausted without a decision (shouldn't happen for
-                # an indefinite stream, but treat as rejection).
-                return "timeout"
-        except TimeoutError:
-            return "timeout"
-        finally:
-            # Best-effort close on the async generator. Some backends
-            # (DragonflyBackend) need explicit aclose() to release the pubsub.
-            with _suppress_all():
-                await sub.aclose()  # type: ignore[union-attr]
-
-
-class _suppress_all:
-    """Context manager that swallows any exception — used for best-effort cleanup."""
-
-    def __enter__(self) -> None:
-        return None
-
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
-        return True
 
 
 def build_hitl_middleware(

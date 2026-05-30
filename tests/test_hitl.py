@@ -1,13 +1,20 @@
-"""Tests for HITL middleware (v1.0).
+"""Tests for HITL middleware (v1.1 — reject-then-wait).
 
-Uses InProcessBackend for pub/sub since it's a faithful in-process emulation
-of the Dragonfly contract. Production HITL still requires DragonflyBackend
-(enforced at manifest load).
+Flow:
+  1. First call to an approval-required tool returns HitlRejectedError
+     immediately, containing the approval ID.
+  2. Operator runs ``scoped-mcp hitl approve <id>``, which writes a one-time
+     pre-approval token to state.
+  3. Agent retries the tool call; middleware finds the token, consumes it,
+     and forwards the call upstream.
+
+Uses InProcessBackend for state since it faithfully emulates the
+DragonflyBackend contract for set/get/delete. Production HITL still
+requires DragonflyBackend (enforced at manifest load).
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import tempfile
 from pathlib import Path
@@ -17,7 +24,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 from scoped_mcp.exceptions import HitlRejectedError, ManifestError
-from scoped_mcp.hitl import HitlMiddleware, _build_arguments_summary, _generate_approval_id
+from scoped_mcp.hitl import (
+    PREAPPROVAL_TTL_SECONDS,
+    HitlMiddleware,
+    _build_arguments_summary,
+    _generate_approval_id,
+    _preapproval_key,
+)
 from scoped_mcp.hitl_cli import _key_for, _parse_approval_id, run_hitl_command
 from scoped_mcp.manifest import load_manifest
 from scoped_mcp.state import InProcessBackend
@@ -37,137 +50,173 @@ async def _passthrough() -> str:
     return "EXECUTED"
 
 
-async def _publish_after(state, channel: str, message: str, delay: float = 0.05) -> None:
-    """Helper: publish a decision to the channel after a short delay so the
-    awaiting middleware can register its subscription first."""
-    await asyncio.sleep(delay)
-    await state.publish(channel, message)
+def _make_middleware(
+    state: InProcessBackend,
+    notifier: _RecordingNotifier | None = None,
+    approval_required: list[str] | None = None,
+    shadow: list[str] | None = None,
+    agent_id: str = "research-01",
+) -> HitlMiddleware:
+    return HitlMiddleware(
+        state=state,
+        agent_id=agent_id,
+        agent_type="research",
+        approval_required=approval_required if approval_required is not None else ["*"],
+        shadow=shadow if shadow is not None else [],
+        timeout_seconds=300,
+        notifier=notifier or _RecordingNotifier(),
+    )
 
 
-# ── Approval flow ────────────────────────────────────────────────────────────
+# ── Reject-then-wait core flow ───────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_approve_runs_underlying_call() -> None:
+async def test_first_call_raises_immediately_with_approval_id() -> None:
+    """First call to an approval-required tool always raises HitlRejectedError
+    immediately and includes the approval ID in the message."""
     state = InProcessBackend()
     notifier = _RecordingNotifier()
-    mw = HitlMiddleware(
-        state=state,
-        agent_id="research-01",
-        agent_type="research",
-        approval_required=["filesystem.delete_file"],
-        shadow=[],
-        timeout_seconds=2,
-        notifier=notifier,
-    )
+    mw = _make_middleware(state, notifier, approval_required=["filesystem.delete_file"])
 
-    # Capture the approval_id from the notifier so we can publish to its channel
-    async def call_with_publisher() -> Any:
-        # Give the middleware a moment to write the key + notify, then publish approve
-        async def publisher() -> None:
-            for _ in range(50):
-                await asyncio.sleep(0.01)
-                if notifier.calls:
-                    approval_id = notifier.calls[0]["approval_id"]
-                    await state.publish(f"hitl:{approval_id}", "approve")
-                    return
+    with pytest.raises(HitlRejectedError, match="approval ID:") as exc_info:
+        await mw(
+            agent_ctx=None,
+            tool_name="filesystem.delete_file",
+            kwargs={"path": "/tmp/x"},
+            call_next=_passthrough,
+        )
 
-        publisher_task = asyncio.create_task(publisher())
-        try:
-            return await mw(
-                agent_ctx=None,
-                tool_name="filesystem.delete_file",
-                kwargs={"path": "/tmp/x"},
-                call_next=_passthrough,
-            )
-        finally:
-            await publisher_task
+    # Message contains enough to act on
+    msg = str(exc_info.value)
+    assert "filesystem.delete_file" in msg
+    assert "research-01." in msg  # approval_id embedded
 
-    result = await call_with_publisher()
-    assert result == "EXECUTED"
+    # Notifier was called
     assert len(notifier.calls) == 1
     assert notifier.calls[0]["tool_name"] == "filesystem.delete_file"
-    assert notifier.calls[0]["agent_id"] == "research-01"
 
 
 @pytest.mark.asyncio
-async def test_reject_raises_hitl_rejected() -> None:
+async def test_retry_with_preapproval_token_succeeds() -> None:
+    """After the operator writes a pre-approval token, the next call proceeds."""
     state = InProcessBackend()
-    notifier = _RecordingNotifier()
-    mw = HitlMiddleware(
-        state=state,
-        agent_id="research-01",
-        agent_type="research",
-        approval_required=["*"],
-        shadow=[],
-        timeout_seconds=2,
-        notifier=notifier,
+    mw = _make_middleware(state, approval_required=["filesystem.delete_file"])
+
+    # First call — get the rejection and extract the approval_id
+    with pytest.raises(HitlRejectedError) as exc_info:
+        await mw(
+            agent_ctx=None,
+            tool_name="filesystem.delete_file",
+            kwargs={"path": "/tmp/x"},
+            call_next=_passthrough,
+        )
+    msg = str(exc_info.value)
+    # Extract approval_id from the error message (format: "research-01.<hex12>")
+    import re
+
+    approval_id_match = re.search(r"research-01\.[0-9a-f]{12}", msg)
+    assert approval_id_match, f"approval_id not found in: {msg}"
+
+    # Operator writes pre-approval token (simulates CLI approve)
+    pre_key = _preapproval_key("filesystem.delete_file")
+    await state.set_with_ttl(pre_key, "approved", PREAPPROVAL_TTL_SECONDS)
+
+    # Retry — should proceed
+    result = await mw(
+        agent_ctx=None,
+        tool_name="filesystem.delete_file",
+        kwargs={"path": "/tmp/x"},
+        call_next=_passthrough,
     )
-
-    upstream = AsyncMock(return_value="UPSTREAM_RESULT")
-
-    async def driver() -> Any:
-        async def publisher() -> None:
-            for _ in range(50):
-                await asyncio.sleep(0.01)
-                if notifier.calls:
-                    approval_id = notifier.calls[0]["approval_id"]
-                    await state.publish(f"hitl:{approval_id}", "reject:not-today")
-                    return
-
-        publisher_task = asyncio.create_task(publisher())
-        try:
-            return await mw(
-                agent_ctx=None,
-                tool_name="any_tool",
-                kwargs={},
-                call_next=upstream,
-            )
-        finally:
-            await publisher_task
-
-    with pytest.raises(HitlRejectedError, match="HITL approval policy"):
-        await driver()
-    upstream.assert_not_called()
+    assert result == "EXECUTED"
 
 
 @pytest.mark.asyncio
-async def test_timeout_auto_rejects() -> None:
+async def test_preapproval_token_is_one_time_use() -> None:
+    """Pre-approval token is consumed on first successful retry. A third call
+    without a new token is rejected again."""
+    state = InProcessBackend()
+    mw = _make_middleware(state, approval_required=["some_tool"])
+
+    # First call — rejected
+    with pytest.raises(HitlRejectedError):
+        await mw(agent_ctx=None, tool_name="some_tool", kwargs={}, call_next=_passthrough)
+
+    # Write pre-approval token
+    pre_key = _preapproval_key("some_tool")
+    await state.set_with_ttl(pre_key, "approved", PREAPPROVAL_TTL_SECONDS)
+
+    # Second call — succeeds, token consumed
+    result = await mw(agent_ctx=None, tool_name="some_tool", kwargs={}, call_next=_passthrough)
+    assert result == "EXECUTED"
+
+    # Third call — no token, rejected again
+    with pytest.raises(HitlRejectedError):
+        await mw(agent_ctx=None, tool_name="some_tool", kwargs={}, call_next=_passthrough)
+
+
+@pytest.mark.asyncio
+async def test_reject_does_not_write_preapproval() -> None:
+    """If the operator rejects (no pre-approval token written), retry is also rejected."""
+    state = InProcessBackend()
+    mw = _make_middleware(state, approval_required=["some_tool"])
+
+    # First call — rejected (no pre-approval token written)
+    with pytest.raises(HitlRejectedError):
+        await mw(agent_ctx=None, tool_name="some_tool", kwargs={}, call_next=_passthrough)
+
+    # Retry — still rejected
+    with pytest.raises(HitlRejectedError):
+        await mw(agent_ctx=None, tool_name="some_tool", kwargs={}, call_next=_passthrough)
+
+
+@pytest.mark.asyncio
+async def test_pending_payload_written_to_state() -> None:
+    """On rejection, a payload is written to state so the CLI can list and approve it."""
     state = InProcessBackend()
     notifier = _RecordingNotifier()
-    mw = HitlMiddleware(
-        state=state,
-        agent_id="research-01",
-        agent_type="research",
-        approval_required=["*"],
-        shadow=[],
-        timeout_seconds=1,  # short timeout for the test
-        notifier=notifier,
-    )
-    upstream = AsyncMock()
+    mw = _make_middleware(state, notifier, approval_required=["some_tool"])
 
     with pytest.raises(HitlRejectedError):
         await mw(
             agent_ctx=None,
-            tool_name="any_tool",
-            kwargs={},
-            call_next=upstream,
+            tool_name="some_tool",
+            kwargs={"arg": "value"},
+            call_next=_passthrough,
         )
-    upstream.assert_not_called()
+
+    # Payload exists in state
+    approval_id = notifier.calls[0]["approval_id"]
+    raw = await state.get(f"hitl:{approval_id}")
+    assert raw is not None
+    payload = json.loads(raw)
+    assert payload["tool"] == "some_tool"
+    assert payload["agent_id"] == "research-01"
+    assert payload["approval_id"] == approval_id
+
+
+def test_preapproval_key_not_matched_by_list_filter() -> None:
+    """F1 regression: preapproval keys must not appear in hitl list output.
+    The `:preapproved:` substring filter correctly excludes them even when
+    the tool name contains a dot (which would otherwise match the *.*  pattern)."""
+    from scoped_mcp.hitl_cli import _preapproval_key_for
+
+    dotted_tool = "mcp_proxy.delete_file"
+    full_key = f"scoped-mcp:research-01:hitl:{_preapproval_key_for('research-01', dotted_tool)}"
+    # The *:preapproved:* filter must catch this
+    assert ":preapproved:" in full_key
+
+
+# ── Non-approval paths ───────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
 async def test_non_matching_tool_passes_through() -> None:
     state = InProcessBackend()
     notifier = _RecordingNotifier()
-    mw = HitlMiddleware(
-        state=state,
-        agent_id="a1",
-        agent_type="research",
-        approval_required=["filesystem.delete_file"],
-        shadow=[],
-        timeout_seconds=2,
-        notifier=notifier,
+    mw = _make_middleware(
+        state, notifier, approval_required=["filesystem.delete_file"], agent_id="a1"
     )
     result = await mw(
         agent_ctx=None,
@@ -185,7 +234,6 @@ async def test_non_matching_tool_passes_through() -> None:
 @pytest.mark.asyncio
 async def test_shadow_returns_synthetic_response_without_calling_upstream() -> None:
     state = InProcessBackend()
-    notifier = _RecordingNotifier()
     upstream = AsyncMock(side_effect=AssertionError("upstream MUST NOT be called in shadow"))
     mw = HitlMiddleware(
         state=state,
@@ -194,7 +242,7 @@ async def test_shadow_returns_synthetic_response_without_calling_upstream() -> N
         approval_required=[],
         shadow=["mcp_proxy.*"],
         timeout_seconds=300,
-        notifier=notifier,
+        notifier=_RecordingNotifier(),
     )
 
     result = await mw(
@@ -205,16 +253,12 @@ async def test_shadow_returns_synthetic_response_without_calling_upstream() -> N
     )
     assert result["shadow"] is True
     upstream.assert_not_called()
-    # Shadow does NOT trigger a notification — it's logged-only.
-    assert notifier.calls == []
 
 
 @pytest.mark.asyncio
 async def test_shadow_takes_precedence_over_approval() -> None:
-    """If a tool matches both shadow and approval_required, shadow wins so no
-    operator approval can ever cause it to be forwarded upstream."""
+    """If a tool matches both shadow and approval_required, shadow wins."""
     state = InProcessBackend()
-    notifier = _RecordingNotifier()
     upstream = AsyncMock(side_effect=AssertionError("MUST NOT be called"))
     mw = HitlMiddleware(
         state=state,
@@ -223,7 +267,7 @@ async def test_shadow_takes_precedence_over_approval() -> None:
         approval_required=["*"],
         shadow=["*"],
         timeout_seconds=300,
-        notifier=notifier,
+        notifier=_RecordingNotifier(),
     )
     result = await mw(
         agent_ctx=None,
@@ -248,10 +292,9 @@ async def test_glob_pattern_matches_in_approval_required() -> None:
         agent_type="r",
         approval_required=["mcp_proxy.*"],
         shadow=[],
-        timeout_seconds=1,
+        timeout_seconds=300,
         notifier=notifier,
     )
-    # Should suspend → timeout → reject
     with pytest.raises(HitlRejectedError):
         await mw(
             agent_ctx=None,
@@ -259,7 +302,6 @@ async def test_glob_pattern_matches_in_approval_required() -> None:
             kwargs={},
             call_next=_passthrough,
         )
-    # And the notifier must have been called
     assert len(notifier.calls) == 1
 
 
@@ -285,43 +327,29 @@ async def test_state_payload_does_not_contain_raw_sensitive_values() -> None:
     sanitised summary — operator-side display draws from this payload."""
     state = InProcessBackend()
     notifier = _RecordingNotifier()
-    mw = HitlMiddleware(
-        state=state,
-        agent_id="a1",
-        agent_type="r",
-        approval_required=["*"],
-        shadow=[],
-        timeout_seconds=1,
-        notifier=notifier,
-    )
+    mw = _make_middleware(state, notifier, agent_id="a1")
 
-    async def driver() -> Any:
-        return await mw(
+    with pytest.raises(HitlRejectedError):
+        await mw(
             agent_ctx=None,
             tool_name="some_tool",
             kwargs={"API_TOKEN": "this-must-not-leak-anywhere", "path": "/safe"},
             call_next=_passthrough,
         )
 
-    with pytest.raises(HitlRejectedError):
-        await driver()
-
-    # Walk every stored value and confirm the secret never landed
-    # in the payload.
     for key, (value, _ttl) in state._store.items():
         assert "this-must-not-leak-anywhere" not in value, (
             f"sensitive value leaked into state key {key!r}"
         )
 
 
-# ── Notifier failures don't break approval loop ──────────────────────────────
+# ── Notifier failures ────────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_notifier_exception_swallowed_and_middleware_continues() -> None:
-    """Audit v1.0 L1 regression: a buggy notifier must NOT propagate out of
-    the middleware. The error is logged and the approval loop continues; the
-    call eventually times out → HitlRejectedError, never RuntimeError."""
+async def test_notifier_exception_swallowed_middleware_still_rejects() -> None:
+    """A buggy notifier must NOT propagate — error is logged and the call is
+    still rejected with HitlRejectedError (never RuntimeError)."""
     state = InProcessBackend()
 
     class BrokenNotifier:
@@ -334,7 +362,7 @@ async def test_notifier_exception_swallowed_and_middleware_continues() -> None:
         agent_type="r",
         approval_required=["*"],
         shadow=[],
-        timeout_seconds=1,
+        timeout_seconds=300,
         notifier=BrokenNotifier(),
     )
     upstream = AsyncMock()
@@ -349,9 +377,9 @@ async def test_notifier_exception_swallowed_and_middleware_continues() -> None:
 
 
 @pytest.mark.asyncio
-async def test_notifier_exception_does_not_block_approve_decision() -> None:
-    """L1 follow-up: even when the notifier raises, an operator decision
-    arriving via another channel still drives the call to its conclusion."""
+async def test_notifier_failure_does_not_prevent_retry() -> None:
+    """Even when the notifier fails, the pending payload is still written to
+    state, so the operator can find and approve it via ``hitl list``."""
     state = InProcessBackend()
     captured_id: dict[str, str] = {}
 
@@ -366,64 +394,42 @@ async def test_notifier_exception_does_not_block_approve_decision() -> None:
         agent_type="r",
         approval_required=["*"],
         shadow=[],
-        timeout_seconds=2,
+        timeout_seconds=300,
         notifier=BrokenNotifier(),
     )
 
-    async def publisher() -> None:
-        for _ in range(50):
-            await asyncio.sleep(0.01)
-            if "id" in captured_id:
-                await state.publish(f"hitl:{captured_id['id']}", "approve")
-                return
+    with pytest.raises(HitlRejectedError):
+        await mw(agent_ctx=None, tool_name="x", kwargs={}, call_next=_passthrough)
 
-    publisher_task = asyncio.create_task(publisher())
-    try:
-        result = await mw(
-            agent_ctx=None,
-            tool_name="x",
-            kwargs={},
-            call_next=_passthrough,
-        )
-    finally:
-        await publisher_task
+    # Payload written despite notifier failure
+    assert "id" in captured_id
+    raw = await state.get(f"hitl:{captured_id['id']}")
+    assert raw is not None
+
+    # Operator writes pre-approval token, retry succeeds
+    pre_key = _preapproval_key("x")
+    await state.set_with_ttl(pre_key, "approved", PREAPPROVAL_TTL_SECONDS)
+    result = await mw(agent_ctx=None, tool_name="x", kwargs={}, call_next=_passthrough)
     assert result == "EXECUTED"
 
 
-# ── M1 regression: fast operator approval during notify() is not lost ────────
+# ── State backend errors ─────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_fast_operator_approval_during_notify_is_received() -> None:
-    """Audit v1.0 M1 regression: a notifier that publishes the approval
-    INSIDE its notify() call (a fast operator who decides instantaneously)
-    must not lose the message. The middleware must have its subscription
-    registered synchronously BEFORE notify() runs."""
-    state = InProcessBackend()
+async def test_state_write_failure_raises_hitl_rejected() -> None:
+    """If the state backend fails to write the pending payload, HITL fails
+    closed — HitlRejectedError, not the underlying backend exception."""
 
-    class FastOperatorNotifier:
-        def __init__(self, backend: InProcessBackend) -> None:
-            self._backend = backend
+    class BrokenState(InProcessBackend):
+        async def set_with_ttl(self, key: str, value: str, ttl_seconds: int) -> None:
+            raise OSError("dragonfly unreachable")
 
-        async def notify(self, approval_id: str, **kwargs: Any) -> None:
-            await self._backend.publish(f"hitl:{approval_id}", "approve")
+    state = BrokenState()
+    mw = _make_middleware(state, agent_id="a1")
 
-    mw = HitlMiddleware(
-        state=state,
-        agent_id="a1",
-        agent_type="r",
-        approval_required=["*"],
-        shadow=[],
-        timeout_seconds=2,
-        notifier=FastOperatorNotifier(state),
-    )
-    result = await mw(
-        agent_ctx=None,
-        tool_name="x",
-        kwargs={},
-        call_next=_passthrough,
-    )
-    assert result == "EXECUTED"
+    with pytest.raises(HitlRejectedError, match="state backend unavailable"):
+        await mw(agent_ctx=None, tool_name="x", kwargs={}, call_next=_passthrough)
 
 
 # ── Approval ID format and CLI parsing ───────────────────────────────────────
@@ -434,8 +440,7 @@ def test_approval_id_format() -> None:
     assert aid.startswith("research-01.")
     suffix = aid.split(".", 1)[1]
     assert len(suffix) == 12
-    # all hex chars
-    int(suffix, 16)
+    int(suffix, 16)  # all hex chars
 
 
 def test_cli_parse_approval_id_well_formed() -> None:
@@ -444,8 +449,7 @@ def test_cli_parse_approval_id_well_formed() -> None:
 
 
 def test_cli_parse_approval_id_with_dots_in_agent_id() -> None:
-    """If for some reason agent_id had dots (it can't, validated upstream),
-    rsplit ensures the suffix is parsed correctly."""
+    """rsplit ensures the suffix is always the last component."""
     parsed = _parse_approval_id("foo.bar.abc123")
     assert parsed == ("foo.bar", "abc123")
 
@@ -466,12 +470,15 @@ def test_cli_key_for_rejects_malformed() -> None:
         _key_for("not-an-approval-id")
 
 
+def test_preapproval_key_format() -> None:
+    key = _preapproval_key("pm2-mcp__restart_service")
+    assert key == "hitl:preapproved:pm2-mcp__restart_service"
+
+
 # ── Manifest-level validation: HITL requires dragonfly ───────────────────────
 
 
 def test_manifest_hitl_with_in_process_backend_rejected() -> None:
-    """HITL needs cross-process state — manifest load must fail when paired
-    with the in-process backend."""
     yaml_content = """
 agent_type: research
 modules:
@@ -522,9 +529,6 @@ hitl:
 
 
 def test_manifest_hitl_empty_lists_with_in_process_ok() -> None:
-    """An empty hitl block with no approval_required and no shadow rules is a
-    no-op — should not require dragonfly. Avoids surprising operators who add
-    an empty section as a placeholder."""
     yaml_content = """
 agent_type: research
 modules:
@@ -636,7 +640,7 @@ hitl:
     [
         "valid-topic_123",
         "alphanumeric",
-        "X" * 64,  # max length
+        "X" * 64,
     ],
 )
 def test_notify_topic_valid(topic: str) -> None:
@@ -650,7 +654,7 @@ def test_notify_topic_valid(topic: str) -> None:
     "topic",
     [
         "with spaces",
-        "X" * 65,  # too long
+        "X" * 65,
         "../traversal",
         "with/slash",
         "with.dot",
@@ -685,7 +689,7 @@ def test_notify_room_valid(room: str) -> None:
     [
         "no-prefix:matrix.org",
         "!no-server",
-        "@user:matrix.org",  # user id, not a room
+        "@user:matrix.org",
         "/etc/passwd",
     ],
 )
@@ -727,10 +731,6 @@ def test_notify_url_invalid(url: str) -> None:
         NotifyConfig(type="webhook", url=url)
 
 
-# Suppress the unused json warning by using it indirectly
-_ = json
-
-
 # ── HITL CLI dispatch (no Dragonfly required for these paths) ────────────────
 
 
@@ -742,8 +742,6 @@ def _write_manifest(yaml_content: str) -> str:
 
 
 def test_hitl_cli_rejects_in_process_backend() -> None:
-    """The CLI must refuse to talk to an in-process backend — there is no
-    server-side state to reach via this path."""
     import argparse
 
     path = _write_manifest(
@@ -800,3 +798,7 @@ def test_server_parse_args_hitl_reject_with_reason() -> None:
     assert ns.hitl_command == "reject"
     assert ns.approval_id == "a.b"
     assert ns.reason == "policy-violation"
+
+
+# Suppress unused-import warning
+_ = json

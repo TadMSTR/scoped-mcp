@@ -1,4 +1,4 @@
-"""Operator CLI for HITL approvals.
+"""Operator CLI for HITL approvals (v1.1 — reject-then-wait).
 
 Talks directly to Dragonfly using the URL from the manifest's
 ``state_backend`` config. Bypasses ``StateBackend`` deliberately — operator
@@ -8,6 +8,17 @@ for ``hitl list``.
 Approval ID format (mirrored from hitl.py): ``"{agent_id}.{uuid_hex_12}"``.
 The agent_id is parsed out of the approval_id and used to construct the
 agent-scoped key prefix when reading the payload or publishing a decision.
+
+Approve flow (v1.1):
+  1. Verify pending key exists.
+  2. Read the payload to extract ``tool`` name.
+  3. Write a one-time pre-approval token: ``scoped-mcp:{agent_id}:hitl:preapproved:{tool}``
+     with a short TTL so the agent can retry and proceed.
+  4. Delete the pending key.
+
+Reject flow (v1.1):
+  1. Verify pending key exists.
+  2. Delete the pending key (no pre-approval token written).
 
 Subcommands:
     scoped-mcp hitl list                          — pending approvals
@@ -22,6 +33,7 @@ import asyncio
 import json
 import sys
 
+from .hitl import PREAPPROVAL_TTL_SECONDS
 from .manifest import load_manifest
 
 
@@ -44,8 +56,9 @@ def _key_for(approval_id: str) -> str:
     return f"scoped-mcp:{agent_id}:hitl:{approval_id}"
 
 
-def _channel_for(approval_id: str) -> str:
-    return _key_for(approval_id)
+def _preapproval_key_for(agent_id: str, tool_name: str) -> str:
+    """Build the full Dragonfly key for the pre-approval token."""
+    return f"scoped-mcp:{agent_id}:hitl:preapproved:{tool_name}"
 
 
 async def _list_pending(redis_url: str) -> int:
@@ -62,7 +75,11 @@ async def _list_pending(redis_url: str) -> int:
     client = aioredis.from_url(redis_url, decode_responses=True)
     try:
         pending: list[dict] = []
-        async for key in client.scan_iter(match="scoped-mcp:*:hitl:*"):
+        async for key in client.scan_iter(match="scoped-mcp:*:hitl:*.*"):
+            # Skip pre-approval tokens — they share the hitl: namespace but
+            # are not pending approvals. Approval IDs never contain "preapproved:".
+            if ":preapproved:" in key:
+                continue
             raw = await client.get(key)
             if raw is None:
                 continue
@@ -94,6 +111,12 @@ async def _decide(redis_url: str, approval_id: str, decision: str) -> int:
         )
         return 1
 
+    parsed = _parse_approval_id(approval_id)
+    if parsed is None:
+        print(f"error: malformed approval_id: {approval_id!r}", file=sys.stderr)
+        return 2
+    agent_id, _ = parsed
+
     try:
         key = _key_for(approval_id)
     except ValueError as e:
@@ -103,16 +126,39 @@ async def _decide(redis_url: str, approval_id: str, decision: str) -> int:
     client = aioredis.from_url(redis_url, decode_responses=True)
     try:
         # Verify the approval is still pending — guards against typoed IDs
-        # and prevents publishing to a channel for a request that has already
-        # been decided or expired.
-        if await client.get(key) is None:
+        # and prevents acting on a request that has already expired.
+        raw = await client.get(key)
+        if raw is None:
             print(
                 f"error: no pending approval with ID {approval_id!r} "
                 f"(may have expired or been decided already)",
                 file=sys.stderr,
             )
             return 3
-        await client.publish(_channel_for(approval_id), decision)
+
+        if decision == "approve":
+            # Extract the tool name from the stored payload so we can write a
+            # pre-approval token keyed by tool name. The middleware checks for
+            # this token on the agent's next call and consumes it to proceed.
+            try:
+                payload = json.loads(raw)
+                tool_name = payload.get("tool", "")
+            except (json.JSONDecodeError, AttributeError):
+                tool_name = ""
+
+            if tool_name:
+                pre_key = _preapproval_key_for(agent_id, tool_name)
+                await client.set(pre_key, "approved", ex=PREAPPROVAL_TTL_SECONDS)
+            else:
+                print(
+                    "warning: could not extract tool name from payload — "
+                    "pre-approval token not written; retry may not proceed",
+                    file=sys.stderr,
+                )
+
+        # Delete the pending key in both approve and reject cases.
+        await client.delete(key)
+
         verb = "approved" if decision == "approve" else "rejected"
         print(f"{verb}: {approval_id}")
         return 0
@@ -144,7 +190,8 @@ def run_hitl_command(args: argparse.Namespace) -> int:
     if cmd == "approve":
         return asyncio.run(_decide(redis_url, args.approval_id, "approve"))
     if cmd == "reject":
-        decision = "reject" if not args.reason else f"reject:{args.reason}"
+        reason = getattr(args, "reason", None)
+        decision = "reject" if not reason else f"reject:{reason}"
         return asyncio.run(_decide(redis_url, args.approval_id, decision))
 
     print(f"error: unknown hitl subcommand {cmd!r}", file=sys.stderr)
