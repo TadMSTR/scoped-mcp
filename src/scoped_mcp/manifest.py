@@ -350,7 +350,7 @@ class InteractionPermissions(BaseModel):
 class Manifest(BaseModel):
     """Top-level manifest model."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     agent_type: str
     description: str = ""
