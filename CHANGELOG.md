@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cleanup block can call `shutdown()` on any module that was cancelled or failed mid-startup.
   `shutdown()` already guards with `if self._client_handle is not None`, making the call a
   no-op for modules whose handles were never set. (SMCP-1)
+- **manifest: restore `extra="forbid"` on top-level Manifest model** — a prior commit
+  loosened this to `extra="ignore"`, silently dropping unknown top-level fields and
+  removing the shadowing-attack protection. All other models in the file use `extra="forbid"`;
+  this aligns `Manifest` with them. (SMCP-2)
 
 ## [1.3.1] — 2026-05-30
 
