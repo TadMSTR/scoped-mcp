@@ -276,7 +276,7 @@ async def test_lifespan_starts_modules_concurrently() -> None:
 
     assert elapsed < SLEEP * 2, (
         f"startup took {elapsed:.3f}s — expected < {SLEEP * 2:.3f}s "
-        f"for parallel startup of {N} modules × {SLEEP}s each"
+        f"for parallel startup of {N} modules x {SLEEP}s each"
     )
 
 
