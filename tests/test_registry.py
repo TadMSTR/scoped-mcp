@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import ClassVar
 
 import pytest
@@ -201,7 +202,12 @@ async def test_registry_lifespan_calls_shutdown_in_reverse(agent_ctx: AgentConte
 
 @pytest.mark.asyncio
 async def test_lifespan_partial_startup_cleans_up_started_modules() -> None:
-    """If module N raises in startup(), modules 0..N-1 that started still get shutdown()."""
+    """If module N raises in startup(), modules 0..N-1 that started still get shutdown().
+
+    With append-before-await, the failing module is also in started — shutdown() is called
+    on it but is a no-op because its handle was never set (shutdown guard: _client_handle is
+    not None).
+    """
     call_order: list[str] = []
 
     mock_a = MagicMock()
@@ -221,7 +227,7 @@ async def test_lifespan_partial_startup_cleans_up_started_modules() -> None:
 
     assert "start_a" in call_order
     assert "shutdown_a" in call_order
-    mock_b.shutdown.assert_not_awaited()
+    mock_b.shutdown.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -245,6 +251,115 @@ async def test_lifespan_shutdown_error_does_not_skip_remaining() -> None:
         pass
 
     # mod_a shutdown must still run despite mod_b raising
+    assert "shutdown_a" in call_order
+
+
+@pytest.mark.asyncio
+async def test_lifespan_starts_modules_concurrently() -> None:
+    """All modules start in parallel — total elapsed ≈ one sleep unit, not N units."""
+    import time
+
+    N = 4
+    SLEEP = 0.05  # 50ms; serial would be 200ms
+
+    async def slow_startup():
+        await asyncio.sleep(SLEEP)
+
+    mocks = []
+    for i in range(N):
+        m = MagicMock()
+        m.name = f"mod_{i}"
+        m.startup = slow_startup
+        m.shutdown = AsyncMock()
+        mocks.append(m)
+
+    lifespan = _make_module_lifespan(mocks)
+    t0 = time.monotonic()
+    async with lifespan(server=None):
+        pass
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < SLEEP * 2, (
+        f"startup took {elapsed:.3f}s — expected < {SLEEP * 2:.3f}s "
+        f"for parallel startup of {N} modules x {SLEEP}s each"
+    )
+
+
+@pytest.mark.asyncio
+async def test_lifespan_parallel_startup_failure_cleans_up_started_modules() -> None:
+    """Startup failure propagates; modules that finished startup concurrently get shutdown()."""
+    call_order: list[str] = []
+    mod_a_ready = asyncio.Event()
+
+    mock_a = MagicMock()
+    mock_a.name = "mod_a"
+
+    async def a_startup():
+        call_order.append("start_a")
+        mod_a_ready.set()
+
+    mock_a.startup = a_startup
+    mock_a.shutdown = AsyncMock(side_effect=lambda: call_order.append("shutdown_a"))
+
+    mock_b = MagicMock()
+    mock_b.name = "mod_b"
+
+    async def b_startup():
+        await mod_a_ready.wait()  # yield until mod_a has started
+        raise RuntimeError("b startup failed")
+
+    mock_b.startup = b_startup
+    mock_b.shutdown = AsyncMock()
+
+    lifespan = _make_module_lifespan([mock_a, mock_b])
+    with pytest.raises(RuntimeError, match="b startup failed"):
+        async with lifespan(server=None):
+            pass
+
+    assert "start_a" in call_order
+    assert "shutdown_a" in call_order
+    # mod_b is appended before its startup runs, so finally calls shutdown on it too.
+    # In practice this is a no-op: mcp_proxy.shutdown() guards with _client_handle is not None.
+    mock_b.shutdown.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_mid_startup_module_gets_shutdown_called() -> None:
+    """A module that is mid-startup when a sibling fails still gets shutdown() called.
+
+    With append-before-await, the module is in started before the gather raises, so the
+    finally block reaches it even when it never finished startup().
+    """
+    call_order: list[str] = []
+    a_in_startup = asyncio.Event()
+
+    mock_a = MagicMock()
+    mock_a.name = "mod_a"
+    mock_a.shutdown = AsyncMock(side_effect=lambda: call_order.append("shutdown_a"))
+
+    async def a_startup():
+        a_in_startup.set()
+        await asyncio.sleep(3600)  # stays mid-startup until the test ends
+
+    mock_a.startup = a_startup
+
+    mock_b = MagicMock()
+    mock_b.name = "mod_b"
+
+    async def b_startup():
+        await a_in_startup.wait()  # wait until mod_a is mid-startup
+        raise RuntimeError("b startup failed")
+
+    mock_b.startup = b_startup
+    mock_b.shutdown = AsyncMock()
+
+    lifespan = _make_module_lifespan([mock_a, mock_b])
+    with pytest.raises(RuntimeError, match="b startup failed"):
+        async with lifespan(server=None):
+            pass
+
+    # mod_a was appended before its startup ran — finally calls shutdown even though
+    # a_startup never completed.
     assert "shutdown_a" in call_order
 
 
