@@ -104,8 +104,8 @@ def _make_module_lifespan(module_instances: list, vault_source: object = None) -
 
             async def _start(mod):
                 ops.info("module_startup", module=mod.name)
+                started.append(mod)  # register before await so finally can call shutdown on cancel
                 await mod.startup()
-                started.append(mod)
 
             await asyncio.gather(*(_start(m) for m in module_instances))
             yield {}

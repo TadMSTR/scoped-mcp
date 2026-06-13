@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tool-unavailable window during per-connection restarts (e.g. under CloudCLI's stream-json
   driver). (SMCP-1)
 
+### Fixed
+- **registry: guard against subprocess handle leak on partial startup failure** — modules
+  are now registered to the `started` list before `await mod.startup()` so the `finally`
+  cleanup block can call `shutdown()` on any module that was cancelled or failed mid-startup.
+  `shutdown()` already guards with `if self._client_handle is not None`, making the call a
+  no-op for modules whose handles were never set. (SMCP-1)
+
 ## [1.3.1] — 2026-05-30
 
 ### Fixed
