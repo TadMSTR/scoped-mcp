@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import ClassVar
 
 import pytest
@@ -246,6 +247,73 @@ async def test_lifespan_shutdown_error_does_not_skip_remaining() -> None:
 
     # mod_a shutdown must still run despite mod_b raising
     assert "shutdown_a" in call_order
+
+
+@pytest.mark.asyncio
+async def test_lifespan_starts_modules_concurrently() -> None:
+    """All modules start in parallel — total elapsed ≈ one sleep unit, not N units."""
+    import time
+
+    N = 4
+    SLEEP = 0.05  # 50ms; serial would be 200ms
+
+    async def slow_startup():
+        await asyncio.sleep(SLEEP)
+
+    mocks = []
+    for i in range(N):
+        m = MagicMock()
+        m.name = f"mod_{i}"
+        m.startup = slow_startup
+        m.shutdown = AsyncMock()
+        mocks.append(m)
+
+    lifespan = _make_module_lifespan(mocks)
+    t0 = time.monotonic()
+    async with lifespan(server=None):
+        pass
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < SLEEP * 2, (
+        f"startup took {elapsed:.3f}s — expected < {SLEEP * 2:.3f}s "
+        f"for parallel startup of {N} modules × {SLEEP}s each"
+    )
+
+
+@pytest.mark.asyncio
+async def test_lifespan_parallel_startup_failure_cleans_up_started_modules() -> None:
+    """Startup failure propagates; modules that finished startup concurrently get shutdown()."""
+    call_order: list[str] = []
+    mod_a_ready = asyncio.Event()
+
+    mock_a = MagicMock()
+    mock_a.name = "mod_a"
+
+    async def a_startup():
+        call_order.append("start_a")
+        mod_a_ready.set()
+
+    mock_a.startup = a_startup
+    mock_a.shutdown = AsyncMock(side_effect=lambda: call_order.append("shutdown_a"))
+
+    mock_b = MagicMock()
+    mock_b.name = "mod_b"
+
+    async def b_startup():
+        await mod_a_ready.wait()  # yield until mod_a has started
+        raise RuntimeError("b startup failed")
+
+    mock_b.startup = b_startup
+    mock_b.shutdown = AsyncMock()
+
+    lifespan = _make_module_lifespan([mock_a, mock_b])
+    with pytest.raises(RuntimeError, match="b startup failed"):
+        async with lifespan(server=None):
+            pass
+
+    assert "start_a" in call_order
+    assert "shutdown_a" in call_order
+    mock_b.shutdown.assert_not_awaited()
 
 
 # ── _register_signing_hook_if_available ───────────────────────────────────────

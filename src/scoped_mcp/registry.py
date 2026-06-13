@@ -15,6 +15,7 @@ Namespace collisions (two modules with the same name) raise ManifestError at sta
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import inspect
 import pkgutil
@@ -100,10 +101,13 @@ def _make_module_lifespan(module_instances: list, vault_source: object = None) -
         try:
             if vault_source is not None:
                 await vault_source.start_renewal()
-            for mod in module_instances:
+
+            async def _start(mod):
                 ops.info("module_startup", module=mod.name)
                 await mod.startup()
                 started.append(mod)
+
+            await asyncio.gather(*(_start(m) for m in module_instances))
             yield {}
         finally:
             for mod in reversed(started):

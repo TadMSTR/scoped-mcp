@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.2] — 2026-06-13
+
+### Changed
+- **registry: start upstream modules concurrently** — `_make_module_lifespan` now starts
+  all proxied modules with `asyncio.gather` instead of serially, cutting cold-start time
+  from ~5.5s (17 upstreams) to roughly the slowest single module (<1s). Removes the
+  tool-unavailable window during per-connection restarts (e.g. under CloudCLI's stream-json
+  driver). (SMCP-1)
+
 ## [1.3.1] — 2026-05-30
 
 ### Fixed
