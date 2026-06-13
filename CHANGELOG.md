@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.3] — 2026-06-13
+
+### Fixed
+- **manifest: model `workspace_access` as an explicit optional field** — regression fix
+  (SMCP-4). 1.3.2 restored `extra="forbid"` on the top-level `Manifest` model, which rejected
+  the `workspace_access` block present in every agent manifest with
+  `ValidationError: workspace_access extra_forbidden`, breaking scoped-mcp connections
+  forge-wide after the venv upgraded. Rather than reverting to `extra="ignore"` (which
+  silently swallows all unknown top-level fields and loses shadowing-attack protection),
+  `workspace_access` is now a typed `list[WorkspaceAccessEntry]` field. `Manifest` keeps
+  `extra="forbid"`, so genuinely unknown fields are still rejected. (SMCP-4)
+
+### Added
+- **test: regression guard loading every real agent manifest** — `tests/test_real_manifests.py`
+  validates all `~/.claude/manifests/*-agent.yml` through `Manifest.model_validate` so a future
+  stale-branch merge cannot silently re-break manifest validation. (SMCP-4)
+
 ## [1.3.2] — 2026-06-13
 
 ### Changed

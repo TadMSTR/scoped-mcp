@@ -347,6 +347,22 @@ class InteractionPermissions(BaseModel):
     needs_approval: list[str] = []
 
 
+class WorkspaceAccessEntry(BaseModel):
+    """A filesystem path an agent may access — platform metadata, not consumed by scoped-mcp.
+
+    Modeled explicitly (rather than tolerated via extra="ignore") so the top-level Manifest
+    can keep extra="forbid" — preserving shadowing-attack protection against unknown fields
+    while still validating the workspace_access blocks present in every agent manifest.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    access: Literal["readonly", "readwrite"]
+    git_backed: bool = False
+    branch_required: bool = False
+
+
 class Manifest(BaseModel):
     """Top-level manifest model."""
 
@@ -357,6 +373,8 @@ class Manifest(BaseModel):
     # Platform metadata — read by task dispatcher and agent bus, ignored by scoped-mcp.
     max_auto_risk: str | None = None
     interaction_permissions: InteractionPermissions | None = None
+    # Platform metadata — filesystem access map read by other agents, not by scoped-mcp.
+    workspace_access: list[WorkspaceAccessEntry] | None = None
     modules: dict[str, ModuleConfig]
     credentials: CredentialSourceConfig = CredentialSourceConfig()
     state_backend: StateBackendConfig = StateBackendConfig()
