@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.4] — 2026-06-14
+
+### Fixed
+- **server: install SIGTERM handler for graceful shutdown** — Claude Desktop / Claude Code
+  send SIGTERM to the scoped-mcp subprocess when a session ends. Without a handler the
+  process could be killed mid-flight, bypassing module `shutdown()` hooks (open sockets,
+  Vault token-renewal tasks, mcp_proxy subprocess handles, etc.). The handler calls
+  `sys.exit(0)`, which raises `SystemExit` through anyio into FastMCP's lifespan
+  finally-block and then into `_make_module_lifespan`'s finally-block, giving every module
+  a clean shutdown. Prevents orphaned scoped-mcp processes. (SMCP-3)
+
+### Changed
+- **tests: clarify docstring for `test_extra_top_level_field_rejected`** — the test was
+  correct after the SMCP-4 fix but its docstring predated the two-phase story. Updated to
+  note it exercises the `load_manifest()` → `ManifestError` code path, distinct from the
+  model-level guard in `test_real_manifests.py::test_unknown_top_level_field_still_rejected`.
+  (SMCP-2)
+
 ## [1.3.3] — 2026-06-13
 
 ### Fixed

@@ -259,7 +259,15 @@ def test_smtp_requires_all_fields(tmp_path: Path) -> None:
 
 
 def test_extra_top_level_field_rejected(tmp_path: Path) -> None:
-    """Manifest rejects unknown top-level fields (prevents shadowing attacks)."""
+    """load_manifest() raises ManifestError on unknown top-level fields.
+
+    Prevents shadowing attacks; exercises the load_manifest() code path
+    (YAML parse → validate → ManifestError wrapper).  The model-level guard
+    (Manifest.model_validate raises ValidationError directly) is covered by
+    test_real_manifests.py::test_unknown_top_level_field_still_rejected, which
+    also documents the SMCP-4 regression context.  Both tests must pass; neither
+    is redundant.
+    """
     path = write_manifest(
         tmp_path,
         """\
