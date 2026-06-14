@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import sys
 
 from .audit import SESSION_ID, configure_audit, configure_logging, get_ops_logger
@@ -178,6 +179,19 @@ def _run_serve(args: argparse.Namespace) -> None:
 
         server = build_server(agent_ctx, manifest, middleware=middleware)
         ops.info("server_ready", transport="stdio")
+
+        # SMCP-3: graceful shutdown on SIGTERM.
+        # Claude Desktop / Claude Code spawn scoped-mcp as a stdio subprocess and
+        # send SIGTERM when the session ends.  Without a handler the process is
+        # killed mid-flight, bypassing module shutdown() hooks (open sockets,
+        # background renewal tasks, etc.).  sys.exit() inside the handler raises
+        # SystemExit which propagates through anyio back to FastMCP's lifespan
+        # finally-block, giving every module a clean chance to release resources.
+        def _sigterm_handler(signum: int, frame: object) -> None:
+            ops.info("sigterm_received")
+            sys.exit(0)
+
+        signal.signal(signal.SIGTERM, _sigterm_handler)
 
         server.run(transport="stdio")
 
