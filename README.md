@@ -144,6 +144,8 @@ MCP servers that need credentials, since stdio subprocesses do not inherit the p
 1. **Audit log** — what agents did. Every tool call, every scope check. Every entry includes a `session.id` UUID assigned at process start, for correlating all calls within one agent session.
 2. **Operational log** — what the server did. Startup, shutdown, config errors.
 
+**Module Startup** — when an agent connects, scoped-mcp starts all proxied/upstream modules concurrently (`asyncio.gather`) rather than one at a time. With ~17 upstream modules this cuts cold-start from ~5.5s to under 1s — roughly the time of the single slowest module — and removes the window where tools are briefly unavailable during per-connection restarts (e.g. under CloudCLI's stream-json driver). Startup is **fail-loud**: if any module raises during `startup()`, the error propagates and every module that already started is shut down cleanly in a `finally` block, so a partial startup never leaks a subprocess handle. (v1.3.2)
+
 ---
 
 ## Manifest Format
@@ -223,6 +225,49 @@ Rules:
 - Undefined variables at startup are a hard error — the agent will not start with incomplete config.
 - Expanded values are never written to audit or ops logs.
 - **Always YAML-quote fields receiving substitution** — a secret value containing `:`, `{`, or `}` can corrupt the YAML structure if the field is unquoted.
+
+### Top-Level Fields and Strict Validation
+
+The top-level manifest model rejects unknown fields (`extra="forbid"`). A misspelled
+or stale key fails the manifest at load time rather than being silently ignored — a
+deliberate guard against shadowing attacks, where an unrecognized field could mask a
+real setting. Every field an agent platform attaches to its manifests must therefore
+be modeled explicitly.
+
+Alongside the operational fields (`modules`, `credentials`, `state_backend`,
+`rate_limits`, `argument_filters`, `response_filters`, `hitl`, `audit`), the model
+accepts three **platform-metadata** fields. scoped-mcp validates and stores them but
+does not act on them — they are consumed by the task dispatcher, agent bus, and other
+agents on the platform:
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `max_auto_risk` | string | Highest risk tier the agent may auto-approve |
+| `interaction_permissions` | `{auto_approved: [...], needs_approval: [...]}` | Cross-agent task auto-approval lists |
+| `workspace_access` | list of entries (below) | Filesystem paths the agent may access |
+
+Each `workspace_access` entry (added v1.3.3):
+
+| Key | Type | Default | Purpose |
+|-----|------|---------|---------|
+| `path` | string | — | Filesystem path the agent may access |
+| `access` | `readonly` \| `readwrite` | — | Access mode for the path |
+| `git_backed` | bool | `false` | Path is a git repository |
+| `branch_required` | bool | `false` | Edits must be made on a branch, not the default branch |
+
+```yaml
+workspace_access:
+  - path: /srv/agents/research-01
+    access: readwrite
+    git_backed: true
+    branch_required: true
+  - path: /srv/shared/reference
+    access: readonly
+```
+
+`workspace_access` was previously tolerated only because the model briefly loosened to
+`extra="ignore"`; modeling it as a typed field lets the top-level model keep
+`extra="forbid"` while still validating the block present in every agent manifest.
 
 ### Manifest-to-Tools Mapping
 
