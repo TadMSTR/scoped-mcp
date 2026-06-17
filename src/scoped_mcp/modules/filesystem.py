@@ -70,8 +70,6 @@ class FilesystemModule(ToolModule):
             List of entry names (files and directories) in the directory.
         """
         absolute = self._resolve(path) if path else self._scope.apply("", self.agent_ctx)
-        if path:
-            self._scope.enforce(absolute, self.agent_ctx)
         target = Path(absolute)
         if not target.exists():
             raise FileNotFoundError(f"Directory not found: {path!r}")

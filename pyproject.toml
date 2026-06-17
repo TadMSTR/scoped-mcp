@@ -75,12 +75,12 @@ select = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["B", "SIM"]
+"tests/**/*.py" = ["B", "SIM", "E402"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.coverage.report]
-fail_under = 80
+fail_under = 82
 show_missing = true

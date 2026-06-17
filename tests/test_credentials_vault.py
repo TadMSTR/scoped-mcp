@@ -46,7 +46,7 @@ def test_filter_empty_bundle_empty_keys() -> None:
 # hvac is an optional dependency — skip all tests if not installed
 pytest.importorskip("hvac")
 
-from scoped_mcp.credentials_vault import VaultCredentialSource  # noqa: E402
+from scoped_mcp.credentials_vault import VaultCredentialSource
 
 
 def test_init_raises_on_missing_role_id(monkeypatch: pytest.MonkeyPatch) -> None:

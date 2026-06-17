@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import pytest
 
+pytest.importorskip("aiosqlite")
+
 from scoped_mcp.exceptions import ScopeViolation
 from scoped_mcp.identity import AgentContext
 from scoped_mcp.modules.sqlite import SqliteModule

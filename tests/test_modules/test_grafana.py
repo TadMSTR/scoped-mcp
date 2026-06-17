@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import pytest
-import respx
+
+respx = pytest.importorskip("respx")
 from httpx import Response
 
 from scoped_mcp.exceptions import ScopeViolation
