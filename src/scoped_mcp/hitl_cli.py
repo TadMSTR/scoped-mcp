@@ -61,7 +61,7 @@ def _preapproval_key_for(agent_id: str, tool_name: str) -> str:
     return f"scoped-mcp:{agent_id}:hitl:preapproved:{tool_name}"
 
 
-async def _list_pending(redis_url: str) -> int:
+async def _list_pending(redis_url: str, _client=None) -> int:
     try:
         import redis.asyncio as aioredis
     except ImportError:
@@ -72,7 +72,7 @@ async def _list_pending(redis_url: str) -> int:
         )
         return 1
 
-    client = aioredis.from_url(redis_url, decode_responses=True)
+    client = _client if _client is not None else aioredis.from_url(redis_url, decode_responses=True)
     try:
         pending: list[dict] = []
         async for key in client.scan_iter(match="scoped-mcp:*:hitl:*.*"):
@@ -98,10 +98,11 @@ async def _list_pending(redis_url: str) -> int:
             )
         return 0
     finally:
-        await client.aclose()
+        if _client is None:
+            await client.aclose()
 
 
-async def _decide(redis_url: str, approval_id: str, decision: str) -> int:
+async def _decide(redis_url: str, approval_id: str, decision: str, _client=None) -> int:
     try:
         import redis.asyncio as aioredis
     except ImportError:
@@ -123,7 +124,7 @@ async def _decide(redis_url: str, approval_id: str, decision: str) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
-    client = aioredis.from_url(redis_url, decode_responses=True)
+    client = _client if _client is not None else aioredis.from_url(redis_url, decode_responses=True)
     try:
         # Verify the approval is still pending — guards against typoed IDs
         # and prevents acting on a request that has already expired.
@@ -163,7 +164,8 @@ async def _decide(redis_url: str, approval_id: str, decision: str) -> int:
         print(f"{verb}: {approval_id}")
         return 0
     finally:
-        await client.aclose()
+        if _client is None:
+            await client.aclose()
 
 
 def run_hitl_command(args: argparse.Namespace) -> int:

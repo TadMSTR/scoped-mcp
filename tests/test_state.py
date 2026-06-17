@@ -189,18 +189,8 @@ async def test_inprocess_pubsub_publish_before_iteration_is_received() -> None:
 
 # ---------------------------------------------------------------------------
 # DragonflyBackend — requires running Dragonfly on localhost:6379
+# (dragonfly_backend fixture defined in conftest.py)
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def dragonfly_backend():
-    if not _dragonfly_reachable():
-        pytest.skip("Dragonfly not available on localhost:6379")
-    try:
-        from scoped_mcp.state_dragonfly import DragonflyBackend
-    except ImportError:
-        pytest.skip("redis-py not installed — install scoped-mcp[dragonfly]")
-    return DragonflyBackend(url="redis://localhost:6379/15", agent_id="test-agent")
 
 
 @pytest.mark.asyncio
