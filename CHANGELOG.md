@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.2] — 2026-06-17
+
+### Changed
+- **tests: `pytest.importorskip()` guards on 6 test files** — `test_grafana`,
+  `test_http_proxy`, `test_influxdb`, `test_matrix`, `test_notifications`, and
+  `test_sqlite` now skip gracefully when optional extras (`respx`, `aiosqlite`) are
+  absent instead of hard-failing at collection time. (SMCP-7)
+- **tests: coverage raised to 83% (`fail_under` 80 → 82)** — added `SmtpModule`
+  tests (`smtp.py` 14% → 100%) and `hitl_notify` tests covering `LogNotifier`,
+  `NtfyNotifier`, `WebhookNotifier`, `MatrixNotifier`, `_format_message`, and
+  `build_notifier` (`hitl_notify.py` 24% → 87%). (SMCP-7)
+- **ruff: `E402` added to `tests/**/*.py` per-file-ignores** — suppresses the
+  "import not at top of file" warning that the `importorskip` pattern legitimately
+  triggers in test files. (SMCP-7)
+
+### Fixed
+- **filesystem: redundant `enforce()` call removed from `list_dir`** — `_resolve()`
+  already enforces scope; the second call on the same resolved path was dead motion.
+  (SMCP-7)
+
 ## [1.4.1] — 2026-06-17
 
 ### Fixed
