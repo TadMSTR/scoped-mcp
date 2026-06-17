@@ -806,6 +806,7 @@ _ = json
 
 # ── hitl_notify.py coverage ───────────────────────────────────────────────────
 
+
 class TestFormatMessage:
     def test_contains_approval_id(self) -> None:
         from scoped_mcp.hitl_notify import _format_message
@@ -896,6 +897,7 @@ async def test_webhook_notifier_posts_json() -> None:
         await notifier.notify("a.b", "tool", "a", "tp", {"k": "v"}, 30)
     assert route.called
     import json as _json
+
     payload = _json.loads(route.calls[0].request.content)
     assert payload["approval_id"] == "a.b"
     assert payload["tool"] == "tool"
