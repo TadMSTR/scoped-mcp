@@ -282,6 +282,16 @@ class McpProxyModule(ToolModule):
             if isinstance(t, list):
                 non_null = [x for x in t if x != "null"]
                 t = non_null[0] if non_null else None
+            elif t is None:
+                # anyOf: [{type: X}, {type: null}] — emitted by pydantic/FastMCP 2.x
+                # for Optional[T] fields instead of type: [X, null].
+                any_of = prop.get("anyOf", [])
+                non_null = [
+                    x.get("type")
+                    for x in any_of
+                    if isinstance(x, dict) and x.get("type") not in ("null", None)
+                ]
+                t = non_null[0] if non_null else None
             return json_py.get(t, Any)
 
         rename: dict[str, str] = {}

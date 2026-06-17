@@ -77,6 +77,27 @@ def safe_tool_module(agent_ctx):
     yield from _module_fixture(agent_ctx, [_make_tool("safe_tool", {"type": "object"})])
 
 
+@pytest.fixture
+def optional_array_module(agent_ctx):
+    # Schema as emitted by pydantic/FastMCP 2.x for list[str] | None params —
+    # anyOf: [{type: array}, {type: null}] instead of type: [array, null].
+    schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "labels": {
+                "anyOf": [
+                    {"items": {"type": "string"}, "type": "array"},
+                    {"type": "null"},
+                ],
+                "default": None,
+            },
+        },
+        "required": ["name"],
+    }
+    yield from _module_fixture(agent_ctx, [_make_tool("create_item", schema)])
+
+
 # ── Schema cache population ──────────────────────────────────────────────────
 
 
@@ -242,3 +263,51 @@ async def test_refresh_overwrites_with_new_schema(read_file_module) -> None:
     await module._refresh_schemas_from_client(fake_client)
 
     assert module._schemas["read_file"] == new_schema
+
+
+# ── anyOf: [T, null] parameter handling (SMCP-6) ────────────────────────────
+
+
+def test_anyof_array_signature_annotated_as_list(optional_array_module) -> None:
+    """py_type() must resolve anyOf:[array,null] to list so the synthesized
+    signature advertises the correct type — not Any — to downstream LLMs."""
+    module, _ = optional_array_module
+    method = module._proxy_methods[0]
+    sig = method.__signature__
+    labels_param = sig.parameters["labels"]
+    assert labels_param.annotation is list, (
+        f"expected list annotation for anyOf:[array,null], got {labels_param.annotation}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_anyof_array_param_accepted(optional_array_module) -> None:
+    """A list value for an anyOf:[array,null] param must pass _validate_arguments
+    and be forwarded upstream — not raise _ProxyValidationError."""
+    module, mock_cm = optional_array_module
+    method = module._proxy_methods[0]
+    result = await method(name="ticket", labels=["uuid1", "uuid2"])
+    assert result == {"ok": True}
+    mock_cm.call_tool.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_anyof_array_param_omitted(optional_array_module) -> None:
+    """Omitting an anyOf:[array,null] optional param (None default) must succeed —
+    None is stripped before validation and the schema does not require it."""
+    module, mock_cm = optional_array_module
+    method = module._proxy_methods[0]
+    result = await method(name="ticket")
+    assert result == {"ok": True}
+    mock_cm.call_tool.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_anyof_array_param_string_rejected(optional_array_module) -> None:
+    """A string value where the upstream schema requires an array must be
+    rejected by _validate_arguments with _ProxyValidationError."""
+    module, mock_cm = optional_array_module
+    method = module._proxy_methods[0]
+    with pytest.raises(_ProxyValidationError, match="schema validation"):
+        await method(name="ticket", labels='["uuid1","uuid2"]')
+    mock_cm.call_tool.assert_not_awaited()
