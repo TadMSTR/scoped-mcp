@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.1] — 2026-06-17
+
+### Fixed
+- **mcp_proxy: `anyOf:[T,null]` params now advertise correct type** — FastMCP 2.x emits
+  `anyOf: [{type: X}, {type: null}]` for `Optional[T]` fields (e.g. `list[str] | None`).
+  `py_type()` in `_signature_from_schema` previously only handled the older
+  `type: [X, null]` list form, so optional array/object params got annotation `Any`.
+  scoped-mcp re-advertised these params with no type info, causing LLMs to pass JSON
+  strings instead of arrays — which were then rejected by `_validate_arguments` with
+  `_ProxyValidationError`. Fix: `py_type()` now unwraps `anyOf` and extracts the first
+  non-null type. Affects `assignees`, `labels`, and other `list[str] | None` params on
+  `plane-mcp create_work_item` and similar tools. (SMCP-6)
+
 ## [1.4.0] — 2026-06-17
 
 ### Added
