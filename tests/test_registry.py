@@ -210,7 +210,7 @@ def test_get_tool_methods_none_mode(agent_ctx: AgentContext) -> None:
 # ── type: field dispatch tests ────────────────────────────────────────────────
 
 
-from unittest.mock import MagicMock, patch  # noqa: E402
+from unittest.mock import MagicMock, patch
 
 
 def _mock_module_cls():
@@ -284,9 +284,9 @@ def test_type_field_none_uses_key_name(agent_ctx: AgentContext) -> None:
 # ── Lifespan wiring tests ─────────────────────────────────────────────────────
 
 
-from unittest.mock import AsyncMock  # noqa: E402
+from unittest.mock import AsyncMock
 
-from scoped_mcp.registry import _make_module_lifespan  # noqa: E402
+from scoped_mcp.registry import _make_module_lifespan
 
 
 @pytest.mark.asyncio

@@ -169,8 +169,8 @@ def test_discord_credential_not_in_config(discord_module: DiscordWebhookModule) 
 
 aiosmtplib = pytest.importorskip("aiosmtplib")
 
-from scoped_mcp.exceptions import ScopeViolation  # noqa: E402
-from scoped_mcp.modules.smtp import SmtpModule  # noqa: E402
+from scoped_mcp.exceptions import ScopeViolation
+from scoped_mcp.modules.smtp import SmtpModule
 
 
 @pytest.fixture
@@ -212,7 +212,9 @@ async def test_smtp_send_success(smtp_module: SmtpModule, monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
-async def test_smtp_multiple_allowed_recipients(smtp_module: SmtpModule, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_smtp_multiple_allowed_recipients(
+    smtp_module: SmtpModule, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from unittest.mock import AsyncMock
 
     mock_send = AsyncMock()

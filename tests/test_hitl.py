@@ -865,7 +865,7 @@ async def test_ntfy_notifier_sends_request() -> None:
 @pytest.mark.asyncio
 async def test_ntfy_notifier_swallows_transport_error() -> None:
     respx = pytest.importorskip("respx")
-    from httpx import ConnectError, Response
+    from httpx import ConnectError
 
     from scoped_mcp.hitl_notify import NtfyNotifier
 
