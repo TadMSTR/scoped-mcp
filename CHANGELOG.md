@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.3] — 2026-06-17
+
+### Changed
+- **CI: Redis 7 service added to test matrix** — Dragonfly-gated tests in
+  `test_state.py` now run in CI instead of being skipped; all four Python
+  versions (3.11–3.14) exercise the DragonflyBackend. (SMCP-7 addendum)
+- **tests: `dragonfly_backend` fixture moved to `conftest.py`** — shared by
+  `test_state.py` and the new `test_hitl_cli.py`; `redis_client` async fixture
+  added for raw-client injection. (SMCP-7 addendum)
+- **`hitl_cli`: `_client=None` injection param on `_list_pending` and `_decide`**
+  — allows tests to supply a pre-seeded client instead of calling
+  `aioredis.from_url()` internally; production path unchanged. (SMCP-7 addendum)
+- **tests: new `test_hitl_cli.py`** — 11 unit tests (no Redis) covering
+  `_parse_approval_id`, `_key_for`, `_preapproval_key_for`, and
+  `run_hitl_command` validation paths; 6 async integration tests covering
+  `_list_pending` and `_decide` (approve, reject, missing ID). (SMCP-7 addendum)
+
 ## [1.4.2] — 2026-06-17
 
 ### Changed
