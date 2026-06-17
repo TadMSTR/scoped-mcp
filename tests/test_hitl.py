@@ -802,3 +802,211 @@ def test_server_parse_args_hitl_reject_with_reason() -> None:
 
 # Suppress unused-import warning
 _ = json
+
+
+# ── hitl_notify.py coverage ───────────────────────────────────────────────────
+
+class TestFormatMessage:
+    def test_contains_approval_id(self) -> None:
+        from scoped_mcp.hitl_notify import _format_message
+
+        msg = _format_message("agent-1.abc123", "my_tool", "agent-1", "sysadmin", {}, 60)
+        assert "agent-1.abc123" in msg
+
+    def test_contains_tool_name(self) -> None:
+        from scoped_mcp.hitl_notify import _format_message
+
+        msg = _format_message("a.b", "my_tool", "a", "t", {"x": "y"}, 30)
+        assert "my_tool" in msg
+
+    def test_args_rendered(self) -> None:
+        from scoped_mcp.hitl_notify import _format_message
+
+        msg = _format_message("a.b", "t", "a", "tp", {"key": "val"}, 30)
+        assert "key: val" in msg
+
+    def test_no_args_shows_placeholder(self) -> None:
+        from scoped_mcp.hitl_notify import _format_message
+
+        msg = _format_message("a.b", "t", "a", "tp", {}, 30)
+        assert "(none)" in msg
+
+    def test_approve_reject_commands_present(self) -> None:
+        from scoped_mcp.hitl_notify import _format_message
+
+        msg = _format_message("a.b", "t", "a", "tp", {}, 30)
+        assert "approve a.b" in msg
+        assert "reject a.b" in msg
+
+
+@pytest.mark.asyncio
+async def test_log_notifier_calls_structlog(capfd) -> None:
+    from scoped_mcp.hitl_notify import LogNotifier
+
+    notifier = LogNotifier()
+    # Should not raise; output goes to structlog
+    await notifier.notify("a.b", "tool", "a", "tp", {"x": "1"}, 60)
+
+
+@pytest.mark.asyncio
+async def test_ntfy_notifier_sends_request() -> None:
+    respx = pytest.importorskip("respx")
+    from httpx import Response
+
+    from scoped_mcp.hitl_notify import NtfyNotifier
+
+    notifier = NtfyNotifier(url="http://ntfy.test", topic="alerts")
+    with respx.mock:
+        route = respx.post("http://ntfy.test/alerts").mock(return_value=Response(200))
+        await notifier.notify("a.b", "tool", "a", "tp", {}, 30)
+    assert route.called
+
+
+@pytest.mark.asyncio
+async def test_ntfy_notifier_swallows_transport_error() -> None:
+    respx = pytest.importorskip("respx")
+    from httpx import ConnectError, Response
+
+    from scoped_mcp.hitl_notify import NtfyNotifier
+
+    notifier = NtfyNotifier(url="http://ntfy.test", topic="alerts")
+    with respx.mock:
+        respx.post("http://ntfy.test/alerts").mock(side_effect=ConnectError("down"))
+        # Must not raise
+        await notifier.notify("a.b", "tool", "a", "tp", {}, 30)
+
+
+def test_ntfy_notifier_requires_topic() -> None:
+    from scoped_mcp.hitl_notify import NtfyNotifier
+
+    with pytest.raises(ValueError, match="topic"):
+        NtfyNotifier(url="http://ntfy.test", topic="")
+
+
+@pytest.mark.asyncio
+async def test_webhook_notifier_posts_json() -> None:
+    respx = pytest.importorskip("respx")
+    from httpx import Response
+
+    from scoped_mcp.hitl_notify import WebhookNotifier
+
+    notifier = WebhookNotifier(url="http://hooks.test/hook")
+    with respx.mock:
+        route = respx.post("http://hooks.test/hook").mock(return_value=Response(200))
+        await notifier.notify("a.b", "tool", "a", "tp", {"k": "v"}, 30)
+    assert route.called
+    import json as _json
+    payload = _json.loads(route.calls[0].request.content)
+    assert payload["approval_id"] == "a.b"
+    assert payload["tool"] == "tool"
+
+
+@pytest.mark.asyncio
+async def test_webhook_notifier_swallows_error() -> None:
+    respx = pytest.importorskip("respx")
+    from httpx import ConnectError
+
+    from scoped_mcp.hitl_notify import WebhookNotifier
+
+    notifier = WebhookNotifier(url="http://hooks.test/hook")
+    with respx.mock:
+        respx.post("http://hooks.test/hook").mock(side_effect=ConnectError("down"))
+        await notifier.notify("a.b", "tool", "a", "tp", {}, 30)
+
+
+def test_webhook_notifier_requires_url() -> None:
+    from scoped_mcp.hitl_notify import WebhookNotifier
+
+    with pytest.raises(ValueError, match="url"):
+        WebhookNotifier(url="")
+
+
+@pytest.mark.asyncio
+async def test_matrix_notifier_skips_when_no_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scoped_mcp.hitl_notify import MatrixNotifier
+
+    monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
+    monkeypatch.delenv("MATRIX_ACCESS_TOKEN", raising=False)
+    notifier = MatrixNotifier(room="!room:matrix.test")
+    # Should not raise — logs warning and returns
+    await notifier.notify("a.b", "tool", "a", "tp", {}, 30)
+
+
+@pytest.mark.asyncio
+async def test_matrix_notifier_sends_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    respx = pytest.importorskip("respx")
+    from httpx import Response
+
+    from scoped_mcp.hitl_notify import MatrixNotifier
+
+    monkeypatch.setenv("MATRIX_HOMESERVER", "http://matrix.test")
+    monkeypatch.setenv("MATRIX_ACCESS_TOKEN", "tok-example")
+    notifier = MatrixNotifier(room="!room:matrix.test")
+    with respx.mock:
+        route = respx.post(
+            url__regex=r"http://matrix\.test/_matrix/client/v3/rooms/.+/send/.+"
+        ).mock(return_value=Response(200, json={"event_id": "$x"}))
+        await notifier.notify("a.b", "tool", "a", "tp", {}, 30)
+    assert route.called
+
+
+def test_matrix_notifier_requires_room() -> None:
+    from scoped_mcp.hitl_notify import MatrixNotifier
+
+    with pytest.raises(ValueError, match="room"):
+        MatrixNotifier(room="")
+
+
+def test_build_notifier_log() -> None:
+    from unittest.mock import MagicMock
+
+    from scoped_mcp.hitl_notify import LogNotifier, build_notifier
+
+    cfg = MagicMock()
+    cfg.type = "log"
+    assert isinstance(build_notifier(cfg), LogNotifier)
+
+
+def test_build_notifier_ntfy() -> None:
+    from unittest.mock import MagicMock
+
+    from scoped_mcp.hitl_notify import NtfyNotifier, build_notifier
+
+    cfg = MagicMock()
+    cfg.type = "ntfy"
+    cfg.url = "http://ntfy.test"
+    cfg.topic = "alerts"
+    assert isinstance(build_notifier(cfg), NtfyNotifier)
+
+
+def test_build_notifier_webhook() -> None:
+    from unittest.mock import MagicMock
+
+    from scoped_mcp.hitl_notify import WebhookNotifier, build_notifier
+
+    cfg = MagicMock()
+    cfg.type = "webhook"
+    cfg.url = "http://hooks.test/hook"
+    assert isinstance(build_notifier(cfg), WebhookNotifier)
+
+
+def test_build_notifier_matrix() -> None:
+    from unittest.mock import MagicMock
+
+    from scoped_mcp.hitl_notify import MatrixNotifier, build_notifier
+
+    cfg = MagicMock()
+    cfg.type = "matrix"
+    cfg.room = "!r:matrix.test"
+    assert isinstance(build_notifier(cfg), MatrixNotifier)
+
+
+def test_build_notifier_unknown_type_raises() -> None:
+    from unittest.mock import MagicMock
+
+    from scoped_mcp.hitl_notify import build_notifier
+
+    cfg = MagicMock()
+    cfg.type = "unknown_channel"
+    with pytest.raises(Exception):
+        build_notifier(cfg)

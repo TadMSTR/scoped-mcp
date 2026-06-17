@@ -12,7 +12,8 @@ import socket
 from typing import Any
 
 import pytest
-import respx
+
+respx = pytest.importorskip("respx")
 from httpx import Response
 
 from scoped_mcp.exceptions import ScopeViolation

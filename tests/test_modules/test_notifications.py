@@ -7,7 +7,8 @@ connections are made during tests. Matrix tests live in test_matrix.py.
 from __future__ import annotations
 
 import pytest
-import respx
+
+respx = pytest.importorskip("respx")
 from httpx import Response
 
 from scoped_mcp.identity import AgentContext
@@ -162,3 +163,92 @@ async def test_discord_truncates_long_content(discord_module: DiscordWebhookModu
 
 def test_discord_credential_not_in_config(discord_module: DiscordWebhookModule) -> None:
     assert "DISCORD_WEBHOOK_URL" not in discord_module.config
+
+
+# ── SmtpModule ────────────────────────────────────────────────────────────────
+
+aiosmtplib = pytest.importorskip("aiosmtplib")
+
+from scoped_mcp.exceptions import ScopeViolation  # noqa: E402
+from scoped_mcp.modules.smtp import SmtpModule  # noqa: E402
+
+
+@pytest.fixture
+def smtp_module(agent_ctx) -> SmtpModule:
+    return SmtpModule(
+        agent_ctx=agent_ctx,
+        credentials={
+            "SMTP_HOST": "smtp.test",
+            "SMTP_PORT": "587",
+            "SMTP_USER": "user@test",
+            "SMTP_PASSWORD": "s3cr3t",
+        },
+        config={
+            "from_address": "noreply@test",
+            "allowed_recipients": ["admin@test", "ops@test"],
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_smtp_rejects_unlisted_recipient(smtp_module: SmtpModule) -> None:
+    with pytest.raises(ScopeViolation, match="allowed_recipients"):
+        await smtp_module.send(to="stranger@other.com", subject="hi", body="body")
+
+
+@pytest.mark.asyncio
+async def test_smtp_send_success(smtp_module: SmtpModule, monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import AsyncMock
+
+    mock_send = AsyncMock()
+    monkeypatch.setattr("scoped_mcp.modules.smtp.aiosmtplib.send", mock_send)
+    result = await smtp_module.send(to="admin@test", subject="Test", body="Hello")
+    assert result is True
+    mock_send.assert_awaited_once()
+    _, kwargs = mock_send.call_args
+    assert kwargs["hostname"] == "smtp.test"
+    assert kwargs["port"] == 587
+    assert kwargs["start_tls"] is True
+
+
+@pytest.mark.asyncio
+async def test_smtp_multiple_allowed_recipients(smtp_module: SmtpModule, monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import AsyncMock
+
+    mock_send = AsyncMock()
+    monkeypatch.setattr("scoped_mcp.modules.smtp.aiosmtplib.send", mock_send)
+    await smtp_module.send(to="ops@test", subject="s", body="b")
+    mock_send.assert_awaited_once()
+
+
+def test_smtp_missing_from_address_raises(agent_ctx) -> None:
+    with pytest.raises(ValueError, match="from_address"):
+        SmtpModule(
+            agent_ctx=agent_ctx,
+            credentials={
+                "SMTP_HOST": "h",
+                "SMTP_PORT": "587",
+                "SMTP_USER": "u",
+                "SMTP_PASSWORD": "p",
+            },
+            config={"allowed_recipients": ["a@b.com"]},
+        )
+
+
+def test_smtp_empty_allowed_recipients_raises(agent_ctx) -> None:
+    with pytest.raises(ValueError, match="allowed_recipients"):
+        SmtpModule(
+            agent_ctx=agent_ctx,
+            credentials={
+                "SMTP_HOST": "h",
+                "SMTP_PORT": "587",
+                "SMTP_USER": "u",
+                "SMTP_PASSWORD": "p",
+            },
+            config={"from_address": "noreply@test", "allowed_recipients": []},
+        )
+
+
+def test_smtp_credential_not_in_config(smtp_module: SmtpModule) -> None:
+    assert "SMTP_PASSWORD" not in smtp_module.config
+    assert "SMTP_USER" not in smtp_module.config
