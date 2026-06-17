@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-06-17
+
+### Added
+- **registry: module fault isolation** — a single module failing to import, instantiate,
+  or start up no longer kills the entire scoped-mcp process. Each phase is now isolated:
+  - **Import failure** (`_discover_module_classes`): if a module file raises on import (e.g.
+    missing optional dependency, syntax error), it is recorded in `failed_imports` and
+    discovery continues for all remaining modules. Only truly unknown modules (not in
+    `available` AND not in `failed_imports`) still raise `ManifestError` at startup.
+  - **Init failure** (`build_server`): if `module_cls.__init__()` raises (bad config,
+    missing credential), the exception is caught per-module; other modules are still
+    instantiated and registered normally.
+  - **Startup failure** (`_make_module_lifespan`): `asyncio.gather` now runs with
+    `return_exceptions=True` so a single `startup()` failure does not abort the lifespan.
+    Failed modules are recorded in `module_health`; the server yields and the remaining
+    modules' tools stay available. (SMCP-5)
+- **registry: `scoped_mcp_status` built-in tool** — always registered on the parent server
+  regardless of manifest content. Returns `{modules, failed_count, total_count, healthy}`.
+  Status values: `running`, `failed_import`, `failed_init`, `failed_startup`. Operators
+  can call this at session start to identify and diagnose degraded modules before running
+  tasks. (SMCP-5)
+- **registry: `SCOPED_MCP_HEALTH_FILE` env var** — if set, the lifespan writes a JSON
+  health report to this path after startup completes (success or failure). Intended for
+  session-start hooks and external health-check scripts that need stable file-based status
+  without calling MCP tools. (SMCP-5)
+
+### Changed
+- **registry: `_discover_module_classes` now returns `tuple[dict, dict]`** — the first
+  element is the existing `{name: class}` map; the second is `{file_stem: error_string}`
+  for modules that failed to import. Callers that patched this function in tests must
+  update their `return_value` to a two-element tuple: `({"name": cls}, {})`.
+- **registry: `_make_module_lifespan` takes `list[tuple[str, ToolModule]]`** — module
+  instances must now be passed as `(manifest_name, instance)` pairs so the lifespan can
+  use manifest-key names in health records and logs rather than the class-level `.name`
+  attribute (which differs when `type:` is used).
+
 ## [1.3.4] — 2026-06-14
 
 ### Fixed
