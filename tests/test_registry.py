@@ -340,9 +340,7 @@ async def test_lifespan_startup_failure_is_isolated() -> None:
     mock_b.startup = AsyncMock(side_effect=RuntimeError("startup failed"))
     mock_b.shutdown = AsyncMock()
 
-    lifespan = _make_module_lifespan(
-        [("mod_a", mock_a), ("mod_b", mock_b)], module_health=health
-    )
+    lifespan = _make_module_lifespan([("mod_a", mock_a), ("mod_b", mock_b)], module_health=health)
     server_entered = False
     async with lifespan(server=None):
         server_entered = True
@@ -450,9 +448,7 @@ async def test_lifespan_parallel_startup_failure_cleans_up_started_modules() -> 
     mock_b.startup = b_startup
     mock_b.shutdown = AsyncMock()
 
-    lifespan = _make_module_lifespan(
-        [("mod_a", mock_a), ("mod_b", mock_b)], module_health=health
-    )
+    lifespan = _make_module_lifespan([("mod_a", mock_a), ("mod_b", mock_b)], module_health=health)
     server_entered = False
     async with lifespan(server=None):
         server_entered = True
@@ -478,9 +474,7 @@ async def test_lifespan_updates_health_on_successful_startup() -> None:
     mock_b.startup = AsyncMock()
     mock_b.shutdown = AsyncMock()
 
-    lifespan = _make_module_lifespan(
-        [("mod_a", mock_a), ("mod_b", mock_b)], module_health=health
-    )
+    lifespan = _make_module_lifespan([("mod_a", mock_a), ("mod_b", mock_b)], module_health=health)
     async with lifespan(server=None):
         pass
 

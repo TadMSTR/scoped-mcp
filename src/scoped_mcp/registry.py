@@ -307,9 +307,7 @@ def build_server(
         class_name = _resolve_class_name(module_name, module_cfg)
         if class_name in failed_imports:
             err = failed_imports[class_name]
-            ops.error(
-                "module_load_failed", module=module_name, class_name=class_name, error=err
-            )
+            ops.error("module_load_failed", module=module_name, class_name=class_name, error=err)
             module_health[module_name] = {"status": "failed_import", "error": err}
         elif class_name not in available:
             unknown.append(f"{module_name!r} (type={class_name!r})")
