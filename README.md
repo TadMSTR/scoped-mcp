@@ -484,16 +484,32 @@ See `examples/custom-module/` for a full walkthrough and `docs/module-authoring.
 
 ## Comparison to Existing Tools
 
-| Capability | scoped-mcp | agent-mcp-gateway | local-mcp-gateway | Kong MCP |
-|---|---|---|---|---|
-| Tool aggregation | yes | yes | yes | yes |
-| Per-agent tool filtering | manifest | rules file | profiles | RBAC |
-| Resource scoping | **yes** | no | no | no |
-| Credential isolation | **yes** | no | no | partial |
-| Unified audit log | **yes** | no | no | yes |
-| Read/write modes | **yes** | per-tool | per-profile | per-role |
-| Self-hosted, single process | yes | yes | yes | no |
-| Built-in modules | 10 | 0 | 0 | 0 |
+The projects below are the closest real comparators in the 2026 MCP-gateway
+landscape. All are capable tools — but each targets server-level federation,
+container isolation, or team/enterprise RBAC. None isolates resources at the
+**per-agent-instance** boundary (Agent A cannot read Agent B's files, rows, or
+buckets *even with identical tools*), which is scoped-mcp's core design point.
+
+| Capability | scoped-mcp | [IBM ContextForge][cf] | [Docker MCP Gateway][dmg] | [Stacklok ToolHive][th] | [Kong MCP][kong] |
+|---|---|---|---|---|---|
+| Tool aggregation | yes | yes | yes | yes | yes |
+| Per-agent tool filtering | manifest | RBAC | per-server | RBAC | RBAC |
+| **Per-agent resource scoping** | **yes** | no | no | no | no |
+| Credential isolation | **yes** | partial | yes | yes | partial |
+| Unified audit log | yes | yes (OTel) | partial | yes | yes |
+| Read/write modes | **yes** | no | no | no | per-role |
+| Self-hosted, single process | **yes** | yes | no (containers) | no (containers/K8s) | no |
+| Built-in scoped modules | **10** | 0 | 0 | 0 | 0 |
+| Primary audience | self-hosted multi-agent | enterprise federation | dev-local / container | platform teams (K8s) | enterprise API teams |
+
+scoped-mcp does **not** compete with these on OAuth/OIDC, multi-tenant SaaS, or
+Kubernetes orchestration — see [Non-Goals](#non-goals). It occupies the gap they
+leave: per-agent resource isolation in a single self-hosted process.
+
+[cf]: https://github.com/IBM/mcp-context-forge
+[dmg]: https://github.com/docker/mcp-gateway
+[th]: https://github.com/stacklok/toolhive
+[kong]: https://konghq.com/blog/engineering/mcp-tool-governance-security-meets-context-efficiency
 
 ---
 
