@@ -144,7 +144,16 @@ MCP servers that need credentials, since stdio subprocesses do not inherit the p
 1. **Audit log** — what agents did. Every tool call, every scope check. Every entry includes a `session.id` UUID assigned at process start, for correlating all calls within one agent session.
 2. **Operational log** — what the server did. Startup, shutdown, config errors.
 
-**Module Startup** — when an agent connects, scoped-mcp starts all proxied/upstream modules concurrently (`asyncio.gather`) rather than one at a time. With ~17 upstream modules this cuts cold-start from ~5.5s to under 1s — roughly the time of the single slowest module — and removes the window where tools are briefly unavailable during per-connection restarts (e.g. under CloudCLI's stream-json driver). Startup is **fail-loud**: if any module raises during `startup()`, the error propagates and every module that already started is shut down cleanly in a `finally` block, so a partial startup never leaks a subprocess handle. (v1.3.2)
+**Module Startup** — when an agent connects, scoped-mcp starts all proxied/upstream modules concurrently (`asyncio.gather`) rather than one at a time. With ~17 upstream modules this cuts cold-start from ~5.5s to under 1s — roughly the time of the single slowest module — and removes the window where tools are briefly unavailable during per-connection restarts (e.g. under CloudCLI's stream-json driver). (v1.3.2)
+
+**Fault Isolation** — a single module failure does not kill the server. Isolation is applied at three phases (v1.4.0):
+- **Import** — if a module file raises on import (missing dependency, syntax error), it is recorded in `failed_imports` and discovery continues. Other modules are unaffected.
+- **Init** — if a module's `__init__` raises (bad config, missing credential), it is skipped. Other modules still instantiate and register normally.
+- **Startup** — `asyncio.gather` runs with `return_exceptions=True`. A startup failure is recorded in `module_health`; the server yields and remaining modules' tools stay available.
+
+**Module Health** — `scoped_mcp_status` is always registered regardless of manifest content. Call it at session start to get `{modules, failed_count, total_count, healthy}` with per-module status values: `running`, `failed_import`, `failed_init`, `failed_startup`. Set `SCOPED_MCP_HEALTH_FILE` to a path and the lifespan will write a JSON health report after startup completes — useful for session-start hooks or external health-check scripts that need file-based status without calling an MCP tool. (v1.4.0)
+
+**Graceful Shutdown** — scoped-mcp installs a SIGTERM handler that calls `sys.exit(0)`, routing cleanup through FastMCP's lifespan `finally` block and every module's `shutdown()` hook. This ensures open sockets, Vault token-renewal tasks, and `mcp_proxy` subprocess handles are released cleanly when Claude Desktop or Claude Code ends a session. Without this, a SIGTERM kill mid-flight could bypass shutdown hooks and leave orphaned processes. (v1.3.4)
 
 ---
 
