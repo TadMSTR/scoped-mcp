@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.1] — 2026-06-18
+
+### Fixed
+
+- **SMCP-9 — mcp_proxy stdio env propagation**: `McpProxyModule` now reads the `env`
+  key from the manifest config block and passes it to the `mcpServers` stdio transport
+  spec. Previously the key was silently dropped, causing tools that rely on environment
+  variables (e.g. `DOCKHAND_ENDPOINT`) to fail with "required env var missing" on the
+  post-HITL-approval retry — the only code path that actually spawns the subprocess.
+  (`modules/mcp_proxy.py`)
+
 ## [1.5.0] — 2026-06-18
 
 ### Security (SMCP-8)
