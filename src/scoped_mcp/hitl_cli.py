@@ -56,9 +56,9 @@ def _key_for(approval_id: str) -> str:
     return f"scoped-mcp:{agent_id}:hitl:{approval_id}"
 
 
-def _preapproval_key_for(agent_id: str, tool_name: str) -> str:
-    """Build the full Dragonfly key for the pre-approval token."""
-    return f"scoped-mcp:{agent_id}:hitl:preapproved:{tool_name}"
+def _preapproval_key_for(agent_id: str, tool_name: str, args_hash: str) -> str:
+    """Build the full Dragonfly key for the pre-approval token bound to (tool, args)."""
+    return f"scoped-mcp:{agent_id}:hitl:preapproved:{tool_name}:{args_hash}"
 
 
 async def _list_pending(redis_url: str, _client=None) -> int:
@@ -138,18 +138,32 @@ async def _decide(redis_url: str, approval_id: str, decision: str, _client=None)
             return 3
 
         if decision == "approve":
-            # Extract the tool name from the stored payload so we can write a
-            # pre-approval token keyed by tool name. The middleware checks for
+            # Extract tool name and args_hash from the stored payload to write a
+            # pre-approval token bound to (tool, args). The middleware checks for
             # this token on the agent's next call and consumes it to proceed.
+            # The args_hash binding prevents approving tool "X with args A" from
+            # authorising a later call to "X with args B" during the TTL window (H-01).
             try:
                 payload = json.loads(raw)
                 tool_name = payload.get("tool", "")
+                args_hash = payload.get("args_hash", "")
             except (json.JSONDecodeError, AttributeError):
                 tool_name = ""
+                args_hash = ""
 
-            if tool_name:
-                pre_key = _preapproval_key_for(agent_id, tool_name)
+            if tool_name and args_hash:
+                pre_key = _preapproval_key_for(agent_id, tool_name, args_hash)
                 await client.set(pre_key, "approved", ex=PREAPPROVAL_TTL_SECONDS)
+            elif tool_name:
+                # Legacy payload without args_hash (pre-H-01 fix): fall back to
+                # tool-name-only key so old pending approvals still work after upgrade.
+                pre_key = f"scoped-mcp:{agent_id}:hitl:preapproved:{tool_name}"
+                await client.set(pre_key, "approved", ex=PREAPPROVAL_TTL_SECONDS)
+                print(
+                    "warning: stored payload has no args_hash — writing tool-name-only "
+                    "pre-approval token (upgrade scoped-mcp to get argument binding)",
+                    file=sys.stderr,
+                )
             else:
                 print(
                     "warning: could not extract tool name from payload — "

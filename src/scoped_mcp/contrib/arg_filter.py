@@ -141,11 +141,16 @@ def _field_matches(field_name: str, rule_fields: list[str]) -> bool:
 
 
 def _iter_string_fields(kwargs: dict[str, Any]) -> list[tuple[str, str]]:
-    """Yield (field_name, string_value) for top-level string args.
+    """Return (field_name, string_value) pairs for top-level string args only.
 
-    Nested structures aren't walked — argument filters target the visible
-    argument surface declared by the upstream tool's inputSchema. Operators
-    needing deep inspection should write a more specific rule pattern.
+    IMPORTANT: Nested dicts and lists are NOT walked. A rule targeting field
+    ``body`` will not match strings inside ``body: {"key": "sensitive-value"}``.
+    This is intentional — filters target the argument surface declared by the
+    upstream tool's inputSchema, not arbitrary nested content.
+
+    ``response_filter`` recurses; the asymmetry is intentional but easy to
+    misjudge (L-02). For tools with structured args that carry sensitive data,
+    use HITL approval instead of block rules.
     """
     out: list[tuple[str, str]] = []
     for k, v in kwargs.items():
@@ -162,6 +167,11 @@ class ArgumentFilterMiddleware:
 
     Block rules are evaluated before warn rules across the rule list. Within a
     single rule, the first matching field short-circuits.
+
+    **Scope:** Only top-level string arguments are inspected. Strings nested
+    inside dict or list arguments are not walked (see ``_iter_string_fields``).
+    This differs from ``ResponseFilterMiddleware``, which recurses. Operators
+    must not assume these two have equivalent coverage depth.
     """
 
     def __init__(self, rules: list[dict[str, Any]], agent_id: str) -> None:

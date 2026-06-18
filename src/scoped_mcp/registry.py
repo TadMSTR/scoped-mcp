@@ -21,6 +21,7 @@ and fix the problem.
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import importlib
 import inspect
 import json
@@ -263,6 +264,48 @@ def _register_status_tool(server: FastMCP, module_health: dict) -> None:
     server.tool(name="scoped_mcp_status")(scoped_mcp_status)
 
 
+def _warn_unmatched_patterns(manifest: Manifest, tool_names: list[str], ops: object) -> None:
+    """Warn for any gating patterns that match no registered tool (H-02).
+
+    Tool names use the format ``{manifest_key}_{method}`` (underscores). Dotted
+    patterns such as ``mcp_proxy.*`` will never match — operators must use
+    ``mcp_proxy_*``. A pattern that matches nothing silently fails open
+    (approval_required / shadow / per_tool rules never fire).
+    """
+    naming_hint = (
+        "Tool names use {manifest_key}_{method} format — use underscores, not dots"
+        " (e.g. mcp_proxy_* not mcp_proxy.*)"
+    )
+
+    if manifest.hitl is not None:
+        for pattern in manifest.hitl.approval_required:
+            if not any(fnmatch.fnmatch(t, pattern) for t in tool_names):
+                ops.warning(
+                    "hitl_pattern_matches_no_tools",
+                    list="approval_required",
+                    pattern=pattern,
+                    hint=naming_hint,
+                )
+        for pattern in manifest.hitl.shadow:
+            if not any(fnmatch.fnmatch(t, pattern) for t in tool_names):
+                ops.warning(
+                    "hitl_pattern_matches_no_tools",
+                    list="shadow",
+                    pattern=pattern,
+                    hint=naming_hint,
+                )
+
+    if manifest.rate_limits is not None:
+        for pattern in manifest.rate_limits.per_tool:
+            if not any(fnmatch.fnmatch(t, pattern) for t in tool_names):
+                ops.warning(
+                    "rate_limit_pattern_matches_no_tools",
+                    list="per_tool",
+                    pattern=pattern,
+                    hint=naming_hint,
+                )
+
+
 def build_server(
     agent_ctx: AgentContext,
     manifest: Manifest,
@@ -377,6 +420,7 @@ def build_server(
     chain = MiddlewareChain(middleware or [])
 
     # Register tools with child servers and mount (only successfully instantiated modules).
+    registered_tool_names: list[str] = []
     for module_name, module_cfg, instance in all_instances:
         child = FastMCP(module_name)
         tool_methods = instance.get_tool_methods(module_cfg.mode)
@@ -387,6 +431,7 @@ def build_server(
             # child.tool() receives only the bare method name — server.mount(prefix=)
             # applies the module_name prefix, so using the full name here would double it.
             audit_tool_name = f"{module_name}_{method.__name__}"
+            registered_tool_names.append(audit_tool_name)
             # Wrap with @audited — this is the only place @audited is applied.
             # Module authors must not apply it themselves.
             wrapped = audited(audit_tool_name)(method)
@@ -398,6 +443,14 @@ def build_server(
 
     # Always-present status tool — no module namespace prefix.
     _register_status_tool(server, module_health)
+    registered_tool_names.append("scoped_mcp_status")
+
+    # Validate policy patterns against registered tool names (H-02).
+    # Tool names follow the format {manifest_key}_{method} (underscores, not dots).
+    # A pattern that matches no registered tool silently never fires — warn loudly
+    # so operators catch misconfigured approval_required/shadow/per_tool rules at
+    # startup rather than discovering them after a security incident.
+    _warn_unmatched_patterns(manifest, registered_tool_names, ops)
 
     ops.info("registry_complete", agent_id=agent_ctx.agent_id)
     return server

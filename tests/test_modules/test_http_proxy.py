@@ -27,15 +27,25 @@ from scoped_mcp.modules.http_proxy import (
 
 @pytest.fixture
 def _mock_public_dns(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Route every getaddrinfo to a public IP so H2's DNS check passes in tests
-    that use respx to mock httpx. Only applies to tests that request this
-    fixture explicitly — rebinding-defense tests override it per-test.
+    """Route every getaddrinfo to a public IP so the DNS-rebinding check passes in tests
+    that use respx to mock httpx. Also patches _resolve_and_check to return None so that
+    _PinnedHostTransport is a no-op and respx can match the original hostname URLs.
+    Only applies to tests that request this fixture explicitly — rebinding-defense tests
+    override it per-test.
     """
 
     def fake_getaddrinfo(host: str, port: Any, *args: Any, **kwargs: Any):
         return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0))]
 
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+    import scoped_mcp.modules.http_proxy as _hp
+
+    async def _no_pin(host: str) -> str | None:
+        # Validation passes; return None so _PinnedHostTransport is a no-op in tests.
+        return None
+
+    monkeypatch.setattr(_hp, "_resolve_and_check", _no_pin)
 
 
 @pytest.fixture

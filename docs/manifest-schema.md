@@ -152,10 +152,12 @@ rate_limits:
   global: 60/minute            # all tools combined, per agent instance
   per_tool:
     filesystem_write_file: 10/minute
-    "mcp_proxy.*": 30/minute   # glob — all matched tools share one counter
+    "mcp_proxy_*": 30/minute   # glob — all matched tools share one counter
 ```
 
 Format: `<N>/second`, `<N>/minute`, or `<N>/hour`. Glob patterns in `per_tool` share a single sliding window across all matched tool names. Rate limit violations fail closed — backend errors block tool calls rather than silently bypassing limits.
+
+> **Pattern grammar:** Tool names are always `{manifest_key}_{method}` (underscore-joined). Use `mcp_proxy_*`, not `mcp_proxy.*` — a dotted glob matches nothing. scoped-mcp warns at startup for any `per_tool` pattern that matches no registered tool.
 
 ## argument_filters
 
@@ -180,7 +182,7 @@ argument_filters:
 | `decode` | list[str] | no | Decode steps applied before matching: `base64`, `urlsafe_base64`, `url`. Capped at 64 KiB |
 | `case_insensitive` | bool | no | Case-insensitive matching (default: false) |
 
-Filters inspect top-level string arguments only — nested dicts/lists are not walked. Block rules short-circuit on first match. The audit log records rule name, tool name, field name, and a `raw`/`decoded` label — never the matched value.
+**Argument filters inspect top-level string arguments only — nested dicts/lists are not walked.** If a tool accepts a structured argument (e.g. `body: {...}`, `metadata: {...}`, `points: [...]`), patterns in `fields` will not match strings nested inside it. For deep inspection, write tool-specific rules targeting the exact top-level field that carries the sensitive data, or use HITL approval for tools with structured args. `response_filter` (which does recurse) is intentionally asymmetric — don't assume argument filters have equivalent depth. Block rules short-circuit on first match. The audit log records rule name, tool name, field name, and a `raw`/`decoded` label — never the matched value.
 
 ## hitl
 
@@ -189,7 +191,7 @@ Human-in-the-loop approval for selected tools. Optional. Requires `state_backend
 ```yaml
 hitl:
   approval_required: ["filesystem_delete_*", "sqlite_execute"]
-  shadow: ["mcp_proxy.*"]    # log-only — return synthetic empty-success, never forward
+  shadow: ["mcp_proxy_*"]    # log-only — return synthetic empty-success, never forward
   timeout_seconds: 300        # auto-reject after this many seconds (default: 300)
   notify:
     type: ntfy               # log (default), ntfy, webhook, or matrix
@@ -204,6 +206,8 @@ hitl:
 | `notify.type` | `"log"`, `"ntfy"`, `"webhook"`, `"matrix"` | `"log"` | Notification channel for pending approval requests |
 
 Shadow takes precedence: a tool matched by both `shadow` and `approval_required` is always shadowed. Transport failures in the notifier are logged and swallowed — a notification outage cannot wedge the approval loop.
+
+> **Pattern grammar:** Tool names are `{manifest_key}_{method}` (underscore-joined, e.g. `mcp_proxy_call`, `filesystem_read_file`). Use `mcp_proxy_*`, not `mcp_proxy.*` — a dotted glob matches nothing and the rule silently never fires (fail-open). scoped-mcp warns at startup for any `approval_required` or `shadow` pattern that matches no registered tool.
 
 Approve or reject from the CLI:
 

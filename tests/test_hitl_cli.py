@@ -49,8 +49,8 @@ class TestKeyFor:
 
 class TestPreapprovalKeyFor:
     def test_structure(self):
-        key = _preapproval_key_for("agent-1", "githost-mcp_git_push")
-        assert key == "scoped-mcp:agent-1:hitl:preapproved:githost-mcp_git_push"
+        key = _preapproval_key_for("agent-1", "githost-mcp_git_push", "abc123def45678")
+        assert key == "scoped-mcp:agent-1:hitl:preapproved:githost-mcp_git_push:abc123def45678"
 
 
 class TestRunHitlCommandNoRedis:
@@ -132,9 +132,15 @@ async def test_list_pending_skips_preapproval_keys(redis_client, capsys):
 async def test_decide_approve_writes_preapproval_and_deletes_pending(redis_client):
     approval_id = "test-agent-1.ddeeff445566"
     pending_key = f"scoped-mcp:test-agent-1:hitl:{approval_id}"
-    pre_key = "scoped-mcp:test-agent-1:hitl:preapproved:git_push"
+    args_hash = "deadbeef01234567"
+    pre_key = f"scoped-mcp:test-agent-1:hitl:preapproved:git_push:{args_hash}"
     payload = json.dumps(
-        {"approval_id": approval_id, "agent_id": "test-agent-1", "tool": "git_push"}
+        {
+            "approval_id": approval_id,
+            "agent_id": "test-agent-1",
+            "tool": "git_push",
+            "args_hash": args_hash,
+        }
     )
     await redis_client.set(pending_key, payload, ex=60)
     try:

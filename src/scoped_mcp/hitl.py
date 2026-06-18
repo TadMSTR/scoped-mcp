@@ -43,6 +43,7 @@ Security invariants:
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
 import time
 import uuid
@@ -90,9 +91,27 @@ def _generate_approval_id(agent_id: str) -> str:
     return f"{agent_id}.{suffix}"
 
 
-def _preapproval_key(tool_name: str) -> str:
-    """State key for a one-time pre-approval token for the given tool."""
-    return f"hitl:preapproved:{tool_name}"
+def _canonical_args_hash(kwargs: dict[str, Any]) -> str:
+    """Stable 16-char hex hash of tool call arguments for pre-approval binding.
+
+    Binds the pre-approval token to the exact arguments the operator saw, so
+    approving ``run_command(command="ls")`` cannot authorize a later call with
+    different arguments during the 60-second TTL window (H-01).
+
+    Uses sorted keys for stability and ``default=str`` to handle non-JSON-serializable
+    values deterministically. Fails to "unhashable" on serialisation error — callers
+    treat this as a cache miss and re-trigger approval.
+    """
+    try:
+        canonical = json.dumps(kwargs, sort_keys=True, default=str)
+        return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+    except Exception:
+        return "unhashable"
+
+
+def _preapproval_key(tool_name: str, args_hash: str) -> str:
+    """State key for a one-time pre-approval token bound to (tool, args)."""
+    return f"hitl:preapproved:{tool_name}:{args_hash}"
 
 
 class HitlMiddleware:
@@ -155,7 +174,10 @@ class HitlMiddleware:
     ) -> Any:
         # Check for a pre-approval token written by the operator CLI after
         # approving a previous rejected call for this tool.
-        pre_key = _preapproval_key(tool_name)
+        # The token is bound to (tool_name, args_hash) so approving one call
+        # cannot authorize a different call with different arguments (H-01).
+        args_hash = _canonical_args_hash(kwargs)
+        pre_key = _preapproval_key(tool_name, args_hash)
         preapproved = await self._state.get(pre_key)
         if preapproved is not None:
             # Consume the token — one-time use only.
@@ -178,6 +200,7 @@ class HitlMiddleware:
                 "agent_id": self._agent_id,
                 "agent_type": self._agent_type,
                 "arguments_summary": summary,
+                "args_hash": args_hash,
                 "approval_id": approval_id,
                 "timestamp": time.time(),
                 "timeout_seconds": self._timeout,
