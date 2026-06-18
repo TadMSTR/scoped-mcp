@@ -28,7 +28,8 @@ unguessable.
 
 State keys (under the agent-scoped prefix in DragonflyBackend):
 - ``hitl:{approval_id}`` — JSON payload, TTL = ``timeout_seconds``
-- ``hitl:preapproved:{tool_name}:{args_hash}`` — one-time approval token, TTL = ``PREAPPROVAL_TTL_SECONDS``
+- ``hitl:preapproved:{tool_name}:{args_hash}`` — one-time approval token,
+  TTL = ``PREAPPROVAL_TTL_SECONDS``
 
 Security invariants:
 - Argument values pass through ``audit._sanitize_value`` before notification
