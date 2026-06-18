@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.2] — 2026-06-18
+
+### Fixed
+
+- **HITL pre-approval TTL too short**: `PREAPPROVAL_TTL_SECONDS` was 60 seconds — shorter
+  than the default `hitl.timeout_seconds` of 300 seconds. After the operator ran
+  `scoped-mcp hitl approve <id>`, the CLI wrote a 60-second one-time pre-approval token
+  and deleted the pending key. If the agent took longer than 60 seconds to retry (common
+  in a Claude session where reasoning steps occur between tool calls), the token expired,
+  the middleware found no pre-approval, generated a fresh UUID, and fired a new
+  notification — creating an infinite approval loop. Fixed by raising
+  `PREAPPROVAL_TTL_SECONDS` to 300 seconds to match the approval window. (`hitl.py`)
+
 ## [1.5.1] — 2026-06-18
 
 ### Fixed

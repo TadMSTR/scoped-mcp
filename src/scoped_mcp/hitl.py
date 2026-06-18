@@ -28,7 +28,7 @@ unguessable.
 
 State keys (under the agent-scoped prefix in DragonflyBackend):
 - ``hitl:{approval_id}`` — JSON payload, TTL = ``timeout_seconds``
-- ``hitl:preapproved:{tool_name}`` — one-time approval token, TTL = 60 s
+- ``hitl:preapproved:{tool_name}:{args_hash}`` — one-time approval token, TTL = ``PREAPPROVAL_TTL_SECONDS``
 
 Security invariants:
 - Argument values pass through ``audit._sanitize_value`` before notification
@@ -67,7 +67,10 @@ _APPROVAL_ID_HEX_LEN = 12
 # TTL for the pre-approval token written by the CLI on approve. Must be long
 # enough for the agent to retry after receiving the approval notification,
 # but short enough that stale tokens don't accumulate.
-PREAPPROVAL_TTL_SECONDS = 60
+# Set to 300 s (matching the default hitl.timeout_seconds) so the agent has
+# the full approval window to retry — 60 s was too short for a Claude session
+# where the agent may do several reasoning steps before retrying.
+PREAPPROVAL_TTL_SECONDS = 300
 
 # Synthetic response returned for shadow-mode calls.
 _SHADOW_RESPONSE: dict[str, Any] = {
