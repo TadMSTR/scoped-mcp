@@ -78,6 +78,12 @@ class _ProxyValidationError(ValueError):
 
 class McpProxyModule(ToolModule):
     name: ClassVar[str] = "mcp_proxy"
+    # scoping=None: mcp_proxy forwards to upstream servers that carry their own
+    # access model. Room/resource scoping for upstream services (e.g. which Matrix
+    # rooms an agent may read/write) must be enforced at the upstream token level —
+    # issue a per-agent token with the required scope, not a shared operator token.
+    # Attempting to enforce scope here would require parsing every upstream tool's
+    # semantics, which is not feasible generically (M-01).
     scoping = None
     required_credentials: ClassVar[list[str]] = []
 
@@ -357,7 +363,12 @@ class McpProxyModule(ToolModule):
                 kwargs = await run_before_hooks(module._manifest_key, upstream_tool_name, kwargs)
 
             if module._persistent_client is not None:
-                # stdio: reuse the persistent subprocess opened in startup()
+                # stdio: reuse the persistent subprocess opened in startup().
+                # The single subprocess is shared across all concurrent calls — MCP
+                # JSON-RPC multiplexes requests by id, but the subprocess stdin/stdout
+                # are a single pipe. This is a reliability concern under high concurrency
+                # (I-01), not a security issue. HTTP upstreams (below) are unaffected —
+                # each call opens a fresh connection.
                 result = await module._persistent_client.call_tool(
                     upstream_tool_name, arguments=kwargs
                 )

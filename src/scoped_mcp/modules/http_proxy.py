@@ -77,12 +77,14 @@ def _is_ssrf_target(url: str) -> bool:
     return _ip_is_blocked(addr)
 
 
-async def _resolve_and_check(host: str) -> None:
-    """Resolve ``host`` and raise ``ScopeViolation`` if any address is blocked.
+async def _resolve_and_check(host: str) -> str | None:
+    """Resolve ``host``, validate all returned IPs, and return the IP to pin to.
 
-    Runs on every request (not once at startup) so a hostname whose DNS record
-    is flipped to an internal IP — the DNS-rebinding case — is caught before
-    the HTTP call is issued.
+    Returns the first resolved IP string for hostname inputs so the caller can
+    connect directly to that IP and avoid re-resolving (DNS rebinding TOCTOU).
+    Returns None for literal-IP inputs — they are already validated, no pinning needed.
+
+    Raises ScopeViolation if any resolved address is in the blocked ranges.
     """
     # Literal IPs are already handled by _is_ssrf_target; skip DNS lookup.
     try:
@@ -92,10 +94,11 @@ async def _resolve_and_check(host: str) -> None:
     else:
         if _ip_is_blocked(addr):
             raise ScopeViolation(f"Host '{host}' is a blocked address: {addr}")
-        return
+        return None  # literal IP, validated; no pinning needed
 
     loop = asyncio.get_running_loop()
     infos = await loop.getaddrinfo(host, None)
+    pinned_ip: str | None = None
     for _family, _type, _proto, _canon, sockaddr in infos:
         ip = sockaddr[0]
         try:
@@ -104,6 +107,44 @@ async def _resolve_and_check(host: str) -> None:
             continue
         if _ip_is_blocked(addr):
             raise ScopeViolation(f"Host '{host}' resolves to a blocked address: {ip}")
+        if pinned_ip is None:
+            pinned_ip = ip
+    return pinned_ip
+
+
+class _PinnedHostTransport(httpx.AsyncHTTPTransport):
+    """Connect to a pre-validated IP instead of letting httpx re-resolve the hostname.
+
+    Eliminates the DNS rebinding TOCTOU between ``_resolve_and_check`` and the
+    actual HTTP connection: once we have a validated IP, all subsequent DNS
+    resolution is bypassed. For TLS, the original hostname is passed via the
+    ``sni_hostname`` extension so certificate validation uses the correct name.
+
+    When ``pinned_ip`` is None (host was already a literal IP), the transport
+    behaves identically to the default AsyncHTTPTransport.
+    """
+
+    def __init__(self, *, host: str, pinned_ip: str | None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._host = host
+        self._pinned_ip = pinned_ip
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if self._pinned_ip is not None and request.url.host == self._host:
+            new_url = request.url.copy_with(host=self._pinned_ip)
+            # Reconstruct the request pointing at the pinned IP.
+            # request.headers already contains Host: <original_hostname> as set by AsyncClient.
+            # The sni_hostname extension tells httpcore to use the original hostname for TLS SNI
+            # so certificate validation works correctly against the pinned IP.
+            pinned_request = httpx.Request(
+                method=request.method,
+                url=new_url,
+                headers=request.headers,
+                content=request.content,
+                extensions={**request.extensions, "sni_hostname": self._host.encode()},
+            )
+            return await super().handle_async_request(pinned_request)
+        return await super().handle_async_request(request)
 
 
 class HttpProxyModule(ToolModule):
@@ -152,11 +193,17 @@ class HttpProxyModule(ToolModule):
         return url
 
     @staticmethod
-    async def _check_host(url: str) -> None:
+    async def _check_host(url: str) -> tuple[str, str | None]:
+        """Return (host, pinned_ip) after validating the URL's host.
+
+        pinned_ip is the resolved IP to connect to directly (eliminating
+        DNS re-lookup TOCTOU), or None if the host is already a literal IP.
+        """
         host = (urlparse(url).hostname or "").lower()
         if not host:
             raise ScopeViolation(f"URL '{url}' has no host")
-        await _resolve_and_check(host)
+        pinned_ip = await _resolve_and_check(host)
+        return host, pinned_ip
 
     @tool(mode="read")
     async def get(
@@ -174,8 +221,10 @@ class HttpProxyModule(ToolModule):
         """
         svc = self._get_service(service)
         url = self._build_url(svc, path)
-        await self._check_host(url)
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        host, pinned_ip = await self._check_host(url)
+        async with httpx.AsyncClient(
+            transport=_PinnedHostTransport(host=host, pinned_ip=pinned_ip), timeout=15.0
+        ) as client:
             response = await client.get(url, params=params or {}, headers=self._make_headers(svc))
             response.raise_for_status()
         try:
@@ -199,8 +248,10 @@ class HttpProxyModule(ToolModule):
         """
         svc = self._get_service(service)
         url = self._build_url(svc, path)
-        await self._check_host(url)
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        host, pinned_ip = await self._check_host(url)
+        async with httpx.AsyncClient(
+            transport=_PinnedHostTransport(host=host, pinned_ip=pinned_ip), timeout=15.0
+        ) as client:
             response = await client.post(url, json=body or {}, headers=self._make_headers(svc))
             response.raise_for_status()
         try:
@@ -224,8 +275,10 @@ class HttpProxyModule(ToolModule):
         """
         svc = self._get_service(service)
         url = self._build_url(svc, path)
-        await self._check_host(url)
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        host, pinned_ip = await self._check_host(url)
+        async with httpx.AsyncClient(
+            transport=_PinnedHostTransport(host=host, pinned_ip=pinned_ip), timeout=15.0
+        ) as client:
             response = await client.put(url, json=body or {}, headers=self._make_headers(svc))
             response.raise_for_status()
         try:
@@ -246,8 +299,10 @@ class HttpProxyModule(ToolModule):
         """
         svc = self._get_service(service)
         url = self._build_url(svc, path)
-        await self._check_host(url)
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        host, pinned_ip = await self._check_host(url)
+        async with httpx.AsyncClient(
+            transport=_PinnedHostTransport(host=host, pinned_ip=pinned_ip), timeout=15.0
+        ) as client:
             response = await client.delete(url, headers=self._make_headers(svc))
             response.raise_for_status()
         if response.content:

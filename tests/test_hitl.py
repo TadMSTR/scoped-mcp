@@ -28,6 +28,7 @@ from scoped_mcp.hitl import (
     PREAPPROVAL_TTL_SECONDS,
     HitlMiddleware,
     _build_arguments_summary,
+    _canonical_args_hash,
     _generate_approval_id,
     _preapproval_key,
 )
@@ -118,15 +119,17 @@ async def test_retry_with_preapproval_token_succeeds() -> None:
     approval_id_match = re.search(r"research-01\.[0-9a-f]{12}", msg)
     assert approval_id_match, f"approval_id not found in: {msg}"
 
-    # Operator writes pre-approval token (simulates CLI approve)
-    pre_key = _preapproval_key("filesystem.delete_file")
+    # Operator writes pre-approval token (simulates CLI approve).
+    # Token is bound to (tool_name, args_hash) so the retry must use the same args.
+    kwargs_to_retry = {"path": "/tmp/x"}
+    pre_key = _preapproval_key("filesystem.delete_file", _canonical_args_hash(kwargs_to_retry))
     await state.set_with_ttl(pre_key, "approved", PREAPPROVAL_TTL_SECONDS)
 
     # Retry — should proceed
     result = await mw(
         agent_ctx=None,
         tool_name="filesystem.delete_file",
-        kwargs={"path": "/tmp/x"},
+        kwargs=kwargs_to_retry,
         call_next=_passthrough,
     )
     assert result == "EXECUTED"
@@ -143,8 +146,8 @@ async def test_preapproval_token_is_one_time_use() -> None:
     with pytest.raises(HitlRejectedError):
         await mw(agent_ctx=None, tool_name="some_tool", kwargs={}, call_next=_passthrough)
 
-    # Write pre-approval token
-    pre_key = _preapproval_key("some_tool")
+    # Write pre-approval token bound to (tool, args)
+    pre_key = _preapproval_key("some_tool", _canonical_args_hash({}))
     await state.set_with_ttl(pre_key, "approved", PREAPPROVAL_TTL_SECONDS)
 
     # Second call — succeeds, token consumed
@@ -203,7 +206,7 @@ def test_preapproval_key_not_matched_by_list_filter() -> None:
     from scoped_mcp.hitl_cli import _preapproval_key_for
 
     dotted_tool = "mcp_proxy.delete_file"
-    full_key = f"scoped-mcp:research-01:hitl:{_preapproval_key_for('research-01', dotted_tool)}"
+    full_key = f"scoped-mcp:research-01:hitl:{_preapproval_key_for('research-01', dotted_tool, 'deadbeef12345678')}"
     # The *:preapproved:* filter must catch this
     assert ":preapproved:" in full_key
 
@@ -407,7 +410,7 @@ async def test_notifier_failure_does_not_prevent_retry() -> None:
     assert raw is not None
 
     # Operator writes pre-approval token, retry succeeds
-    pre_key = _preapproval_key("x")
+    pre_key = _preapproval_key("x", _canonical_args_hash({}))
     await state.set_with_ttl(pre_key, "approved", PREAPPROVAL_TTL_SECONDS)
     result = await mw(agent_ctx=None, tool_name="x", kwargs={}, call_next=_passthrough)
     assert result == "EXECUTED"
@@ -471,8 +474,9 @@ def test_cli_key_for_rejects_malformed() -> None:
 
 
 def test_preapproval_key_format() -> None:
-    key = _preapproval_key("pm2-mcp__restart_service")
-    assert key == "hitl:preapproved:pm2-mcp__restart_service"
+    args_hash = _canonical_args_hash({"service": "pm2"})
+    key = _preapproval_key("pm2-mcp__restart_service", args_hash)
+    assert key == f"hitl:preapproved:pm2-mcp__restart_service:{args_hash}"
 
 
 # ── Manifest-level validation: HITL requires dragonfly ───────────────────────

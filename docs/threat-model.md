@@ -46,7 +46,7 @@ stdio transport (the default) runs in-process. If you use HTTP/SSE transport, TL
 The Matrix module supports unencrypted rooms only. No libolm dependency.
 
 **DNS-based SSRF**
-The http_proxy SSRF check validates IP addresses at init time but cannot perform DNS resolution without an async context. If a hostname resolves to an internal IP, this is not caught by the proxy — it relies on network-level controls. Run in a restricted network environment for defense in depth.
+Per-request async DNS resolution (`_resolve_and_check`) validates all resolved IPs before each HTTP call, preventing DNS rebinding attacks where an initially-safe hostname is flipped to an internal IP between requests. The resolved IP is pinned for the connection (`_PinnedHostTransport`) to eliminate the TOCTOU window between validation and the actual TCP connect. This applies only to hostname inputs — literal IPs in `base_url` are validated at init time by `_is_ssrf_target`. The `base_url` is operator-declared; agents control only the `path`. Defense in depth: run in a restricted network environment regardless.
 
 **mcp_proxy loopback access**
 Unlike `http_proxy`, `mcp_proxy` does not block loopback or RFC1918 URLs — its purpose is specifically to proxy services running on the local host. The upstream URL or command is operator-declared in the manifest, not user-supplied. Agents can call any tool exposed by the upstream server that passes `tool_allowlist`/`tool_denylist` filtering. If an upstream server has weak input validation, that is not a scoped-mcp concern.

@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-06-18
+
+### Security (SMCP-8)
+
+- **H-01 — HITL pre-approval token bound to (tool, args) hash**: Previously, approving
+  a tool call wrote a token keyed by tool name only, allowing any call to the same tool
+  within the 60-second TTL to proceed regardless of arguments. Tokens are now bound to
+  a SHA-256 hash of the canonicalized arguments; a retry with different arguments does
+  not consume the token and triggers a fresh approval request. CLI updated to read and
+  store `args_hash` from the stored payload; legacy payloads (no `args_hash`) fall back
+  to tool-name-only with a warning. (`hitl.py`, `hitl_cli.py`)
+
+- **H-02 — Startup validation of gating glob patterns**: `approval_required`, `shadow`,
+  and `rate_limits.per_tool` patterns that match no registered tool now emit a WARNING
+  at startup. Tool names follow `{manifest_key}_{method}` format (underscores); dotted
+  patterns such as `mcp_proxy.*` matched nothing and silently failed open. (`registry.py`)
+
+- **H-02 — Docs: corrected glob pattern examples**: `mcp_proxy.*` fixed to `mcp_proxy_*`
+  in rate_limit and hitl examples; tool naming convention documented with explicit
+  fail-open warning. (`docs/manifest-schema.md`)
+
+- **L-01 — DNS rebinding TOCTOU closed in http_proxy**: `_resolve_and_check` now returns
+  the validated IP, and `_PinnedHostTransport` connects directly to that IP instead of
+  letting httpx re-resolve the hostname. TLS SNI uses the original hostname via the
+  `sni_hostname` extension so certificate validation is unaffected. Contradictory
+  threat-model docs reconciled. (`modules/http_proxy.py`, `docs/threat-model.md`)
+
+- **L-02 — arg_filter top-level-only scope documented prominently**: `_iter_string_fields`,
+  `ArgumentFilterMiddleware`, and the manifest-schema docs now prominently state that
+  argument filters inspect top-level string fields only — nested dicts/lists are not
+  walked. (`contrib/arg_filter.py`, `docs/manifest-schema.md`)
+
+- **M-01 / I-01 — mcp_proxy code comments**: Added comment on `scoping=None` explaining
+  that room/resource scoping must be enforced at the upstream token level; added
+  reliability note on stdio client multiplexing. (`modules/mcp_proxy.py`)
+
 ## [1.4.3] — 2026-06-17
 
 ### Changed
