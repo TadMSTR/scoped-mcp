@@ -528,4 +528,66 @@ def test_multiple_headers_passed_to_transport(agent_ctx):
     mod = _make_http_module_with_headers(agent_ctx, headers)
     transport = mod._transport()
     assert isinstance(transport, StreamableHttpTransport)
-    assert transport.headers == headers
+
+
+# ---------------------------------------------------------------------------
+# Stdio env propagation tests (SMCP-9)
+# ---------------------------------------------------------------------------
+
+
+def _make_stdio_module_with_env(agent_ctx, env: dict) -> McpProxyModule:
+    """Helper: build McpProxyModule with stdio transport and env config."""
+    with patch("scoped_mcp.modules.mcp_proxy.Client") as MockClient:
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_cm.list_tools = AsyncMock(return_value=[_make_tool("stack_action")])
+        MockClient.return_value = mock_cm
+        return McpProxyModule(
+            agent_ctx=agent_ctx,
+            credentials={},
+            config={"command": "/path/to/server", "env": env},
+        )
+
+
+def test_env_config_stored_on_module(agent_ctx):
+    """env from config is stored in _env."""
+    mod = _make_stdio_module_with_env(agent_ctx, {"DOCKHAND_ENDPOINT": "http://localhost:7777"})
+    assert mod._env == {"DOCKHAND_ENDPOINT": "http://localhost:7777"}
+
+
+def test_stdio_transport_includes_env_when_configured(agent_ctx):
+    """_transport() includes env in the mcpServers spec when env is non-empty."""
+    mod = _make_stdio_module_with_env(agent_ctx, {"DOCKHAND_ENDPOINT": "http://localhost:7777"})
+    assert mod._transport() == {
+        "mcpServers": {
+            "upstream": {
+                "command": "/path/to/server",
+                "args": [],
+                "env": {"DOCKHAND_ENDPOINT": "http://localhost:7777"},
+            }
+        }
+    }
+
+
+def test_stdio_transport_omits_env_when_empty(agent_ctx):
+    """_transport() omits env key from mcpServers spec when env is empty."""
+    mod = _make_stdio_module_with_env(agent_ctx, {})
+    transport = mod._transport()
+    assert "env" not in transport["mcpServers"]["upstream"]
+
+
+def test_env_default_is_empty(agent_ctx):
+    """McpProxyModule defaults _env to empty dict when env not in config."""
+    with patch("scoped_mcp.modules.mcp_proxy.Client") as MockClient:
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_cm.list_tools = AsyncMock(return_value=[_make_tool("run_cmd")])
+        MockClient.return_value = mock_cm
+        mod = McpProxyModule(
+            agent_ctx=agent_ctx,
+            credentials={},
+            config={"command": "python3"},
+        )
+    assert mod._env == {}

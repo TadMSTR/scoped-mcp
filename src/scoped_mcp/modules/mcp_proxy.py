@@ -97,6 +97,7 @@ class McpProxyModule(ToolModule):
         self._url: str | None = config.get("url")
         self._command: str | None = config.get("command")
         self._args: list[str] = config.get("args", [])
+        self._env: dict[str, str] = config.get("env", {}) or {}
         self._headers: dict[str, str] = config.get("headers") or {}
 
         if not self._url and not self._command:
@@ -133,7 +134,10 @@ class McpProxyModule(ToolModule):
             if self._headers:
                 return StreamableHttpTransport(url=self._url, headers=self._headers)
             return self._url
-        return {"mcpServers": {"upstream": {"command": self._command, "args": self._args}}}
+        spec: dict = {"command": self._command, "args": self._args}
+        if self._env:
+            spec["env"] = self._env
+        return {"mcpServers": {"upstream": spec}}
 
     async def _discover_tools(self) -> list[Any]:
         """Connect to upstream, enumerate tools, build proxy callables.
