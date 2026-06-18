@@ -206,7 +206,11 @@ def test_preapproval_key_not_matched_by_list_filter() -> None:
     from scoped_mcp.hitl_cli import _preapproval_key_for
 
     dotted_tool = "mcp_proxy.delete_file"
-    full_key = f"scoped-mcp:research-01:hitl:{_preapproval_key_for('research-01', dotted_tool, 'deadbeef12345678')}"
+    args_hash = "deadbeef12345678"
+    full_key = (
+        f"scoped-mcp:research-01:hitl:"
+        f"{_preapproval_key_for('research-01', dotted_tool, args_hash)}"
+    )
     # The *:preapproved:* filter must catch this
     assert ":preapproved:" in full_key
 

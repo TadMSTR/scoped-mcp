@@ -272,7 +272,10 @@ def _warn_unmatched_patterns(manifest: Manifest, tool_names: list[str], ops: obj
     ``mcp_proxy_*``. A pattern that matches nothing silently fails open
     (approval_required / shadow / per_tool rules never fire).
     """
-    naming_hint = "Tool names use {manifest_key}_{method} format — use underscores, not dots (e.g. mcp_proxy_* not mcp_proxy.*)"
+    naming_hint = (
+        "Tool names use {manifest_key}_{method} format — use underscores, not dots"
+        " (e.g. mcp_proxy_* not mcp_proxy.*)"
+    )
 
     if manifest.hitl is not None:
         for pattern in manifest.hitl.approval_required:
