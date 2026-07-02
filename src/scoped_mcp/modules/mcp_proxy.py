@@ -46,11 +46,13 @@ Required credentials: none (upstream credentials stay in the upstream service)
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import keyword
 import re
 from typing import Any, ClassVar
 
+import anyio
 import jsonschema
 import structlog
 from fastmcp import Client
@@ -59,6 +61,28 @@ from fastmcp.client.transports import StreamableHttpTransport
 from ._base import ToolModule
 
 _log = structlog.get_logger("audit")
+
+# Errors that indicate the persistent stdio upstream's transport is dead (subprocess
+# exited, pipe closed, connection reset) — as opposed to a legitimate tool-level error
+# from a healthy upstream. A single transparent reconnect+retry is attempted for these;
+# anything else propagates untouched so real upstream outages are not masked (plan item 4).
+_RECONNECTABLE_ERRORS: tuple[type[BaseException], ...] = (
+    anyio.BrokenResourceError,
+    anyio.ClosedResourceError,
+    anyio.EndOfStream,
+    ConnectionError,  # includes ConnectionResetError / BrokenPipeError
+    ProcessLookupError,
+    EOFError,
+)
+
+
+def _is_reconnectable(exc: BaseException) -> bool:
+    """True if exc (or, unwrapping an ExceptionGroup, any leaf) is a dead-transport error."""
+    if isinstance(exc, _RECONNECTABLE_ERRORS):
+        return True
+    if isinstance(exc, BaseExceptionGroup):
+        return any(_is_reconnectable(e) for e in exc.exceptions)
+    return False
 
 
 def _coerce_schema(raw: Any) -> dict[str, Any] | None:
@@ -117,6 +141,10 @@ class McpProxyModule(ToolModule):
         self._discovery_timeout: float = float(config.get("discovery_timeout_seconds", 10.0))
         self._client_handle: Any | None = None  # outer Client for stdio — retained for __aexit__
         self._persistent_client: Any | None = None  # return value of __aenter__; used for calls
+        # Serializes dead-transport reconnects so N concurrent callers that hit the same broken
+        # pipe don't each tear down and replace the handle (F-02). Created here (outside the
+        # event loop) — asyncio.Lock binds to the running loop lazily on first use.
+        self._reconnect_lock = asyncio.Lock()
 
         # {upstream_tool_name: inputSchema_dict | None} — populated at discovery, refreshed
         # on stdio reconnect via _refresh_schemas(). Used by proxy_call to validate arguments
@@ -230,6 +258,34 @@ class McpProxyModule(ToolModule):
             await self._client_handle.__aexit__(None, None, None)
             self._client_handle = None
             self._persistent_client = None
+
+    async def _reconnect_persistent(self, failed_client: Any) -> None:
+        """Tear down and re-open the persistent stdio upstream client (single attempt).
+
+        Called by proxy_call when a call fails with a dead-transport error, passing the
+        client handle that failed. Serialized by ``self._reconnect_lock`` and guarded by a
+        re-check (F-02): if a concurrent caller already replaced the dead handle, this returns
+        without reconnecting so the peer's fresh client is not torn down mid-call — the caller
+        then simply retries against the current handle.
+
+        Best-effort cleanup of the old (already-broken) handle — its __aexit__ may itself
+        raise, which we swallow — then a fresh Client is opened exactly as in startup(), and
+        schemas are refreshed against the new connection. Any failure here propagates to the
+        caller, which surfaces it as a normal tool error (no second reconnect).
+        """
+        async with self._reconnect_lock:
+            if self._persistent_client is not failed_client:
+                return  # a concurrent caller already healed the transport
+            old = self._client_handle
+            self._client_handle = None
+            self._persistent_client = None
+            if old is not None:
+                # old transport already broken — cleanup errors are expected, ignore them
+                with contextlib.suppress(Exception):
+                    await old.__aexit__(None, None, None)
+            self._client_handle = Client(self._transport())
+            self._persistent_client = await self._client_handle.__aenter__()
+            await self._refresh_schemas_from_client(self._persistent_client)
 
     def _validate_arguments(self, upstream_tool_name: str, kwargs: dict[str, Any]) -> None:
         """Validate kwargs against the cached upstream inputSchema.
@@ -373,9 +429,29 @@ class McpProxyModule(ToolModule):
                 # are a single pipe. This is a reliability concern under high concurrency
                 # (I-01), not a security issue. HTTP upstreams (below) are unaffected —
                 # each call opens a fresh connection.
-                result = await module._persistent_client.call_tool(
-                    upstream_tool_name, arguments=kwargs
-                )
+                #
+                # Under a long-lived scoped-mcp process (SMCP-15) this subprocess lives for
+                # hours/days, so an upstream that dies or restarts leaves a dead pipe. On a
+                # dead-transport error, reconnect once and retry transparently so the agent
+                # never sees a spurious failure it would have to retry itself (plan item 4).
+                failed_client = module._persistent_client
+                try:
+                    result = await failed_client.call_tool(upstream_tool_name, arguments=kwargs)
+                except Exception as exc:
+                    if not _is_reconnectable(exc):
+                        raise
+                    _log.warning(
+                        "mcp_proxy_reconnect",
+                        module=module.name,
+                        tool=upstream_tool_name,
+                        error=type(exc).__name__,
+                    )
+                    # Reconnect only if this handle is still the live one (else a concurrent
+                    # caller already healed it), then retry against the current handle.
+                    await module._reconnect_persistent(failed_client)
+                    result = await module._persistent_client.call_tool(
+                        upstream_tool_name, arguments=kwargs
+                    )
             else:
                 # HTTP: open a connection per call (cheap, stateless)
                 async with Client(module._transport()) as client:

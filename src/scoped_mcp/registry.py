@@ -28,6 +28,7 @@ import json
 import os
 import pkgutil
 from contextlib import asynccontextmanager
+from typing import Any
 
 import structlog
 from fastmcp import FastMCP
@@ -310,6 +311,7 @@ def build_server(
     agent_ctx: AgentContext,
     manifest: Manifest,
     middleware: list[ToolCallMiddleware] | None = None,
+    auth: Any = None,
 ) -> FastMCP:
     """Discover modules, filter to manifest, register tools, return a ready FastMCP server.
 
@@ -408,6 +410,9 @@ def build_server(
         all_instances.append((module_name, module_cfg, instance))
 
     # Create the parent server with the module lifespan.
+    # auth (a FastMCP TokenVerifier / AuthProvider) is set only for the HTTP transport —
+    # it enforces bearer authentication on every request before tool dispatch. None (stdio)
+    # leaves the server unauthenticated, matching stdio's private-pipe isolation.
     server = FastMCP(
         f"scoped-mcp/{agent_ctx.agent_id}",
         lifespan=_make_module_lifespan(
@@ -415,6 +420,7 @@ def build_server(
             vault_source=vault_source,
             module_health=module_health,
         ),
+        auth=auth,
     )
 
     chain = MiddlewareChain(middleware or [])

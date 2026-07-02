@@ -22,6 +22,7 @@ import contextlib
 import functools
 import json
 import logging
+import logging.handlers
 import os
 import re
 import sys
@@ -33,6 +34,8 @@ from pathlib import Path
 from typing import Any
 
 import structlog
+
+from .identity import resolve_request_identity
 
 # ── Session ID ───────────────────────────────────────────────────────────────
 
@@ -78,6 +81,7 @@ async def _emit_agent_bus_event(
     agent_id: str,
     outcome: str,
     elapsed_ms: float,
+    session_id: str,
     error: str | None = None,
 ) -> None:
     """Write a tool.called event to the agent-bus JSONL log. Never raises."""
@@ -104,7 +108,7 @@ async def _emit_agent_bus_event(
                 "tool": tool_name,
                 "outcome": outcome,
                 "latency_ms": elapsed_ms,
-                "session_id": SESSION_ID,
+                "session_id": session_id,
                 "error": error,
             },
         }
@@ -119,18 +123,18 @@ async def _emit_agent_bus_event(
 # ── OTel session injection ───────────────────────────────────────────────────
 
 
-def _inject_session_id_to_current_span() -> None:
+def _inject_session_id_to_current_span(session_id: str) -> None:
     """Set scoped_mcp.session on the active OTel span, if one is recording.
 
-    Called at the start of every @audited wrapper so the session ID is stamped
-    on the span created by OtelMiddleware before the tool body runs.
+    Called at the start of every @audited wrapper so the per-connection session ID
+    is stamped on the span created by OtelMiddleware before the tool body runs.
     """
     try:
         from opentelemetry import trace as _otel
 
         span = _otel.get_current_span()
         if span.is_recording():
-            span.set_attribute("scoped_mcp.session", SESSION_ID)
+            span.set_attribute("scoped_mcp.session", session_id)
     except ImportError:
         pass
 
@@ -242,12 +246,39 @@ def _sanitize_processor(logger: Any, method: str, event_dict: dict[str, Any]) ->
 # ── Logger configuration ─────────────────────────────────────────────────────
 
 
+class _RedactionFilter(logging.Filter):
+    """Apply pattern-based redaction to stdlib log records on the stderr handler (F-05).
+
+    The structlog ``_sanitize_processor`` only scrubs records emitted through structlog
+    loggers. Third-party libraries (uvicorn / starlette / fastmcp) log via plain stdlib
+    logging, bypassing it — and under the long-lived HTTP process their stderr is captured
+    persistently by PM2. A dependency that logs an ``Authorization: Bearer <token>`` header at
+    DEBUG would otherwise persist the secret. This filter runs the same pattern redaction over
+    every formatted stderr record so a leaked bearer/token never reaches the log.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            record.msg = _redact_string(record.getMessage())
+            record.args = ()
+        except Exception:
+            pass  # never let redaction drop a log record
+        return True
+
+
 def configure_logging(audit_log: str | None = None, ops_log: str | None = None) -> None:
     """Configure structlog. Call once at server startup.
 
     Args:
         audit_log: optional file path for audit stream output.
         ops_log:   optional file path for ops stream output.
+
+    File sinks use a size-based ``RotatingFileHandler`` so a long-lived HTTP process
+    (SMCP-15) cannot grow a single audit/ops file without bound. Under the legacy
+    stdio-per-turn launcher each short-lived process writes a small per-pid file that
+    never reaches the rotation threshold, so behaviour there is unchanged. Tunable via
+    ``SCOPED_MCP_LOG_MAX_BYTES`` (default 50 MiB) and ``SCOPED_MCP_LOG_BACKUPS``
+    (default 5); set max-bytes to 0 to disable rotation.
     """
     # Route through stdlib so file handlers can be attached per named logger.
     # JSONRenderer already serialises the event; %(message)s preserves it as-is.
@@ -271,18 +302,27 @@ def configure_logging(audit_log: str | None = None, ops_log: str | None = None) 
     root.setLevel(logging.DEBUG)
     stderr_handler = logging.StreamHandler(sys.stderr)
     stderr_handler.setFormatter(_json_fmt)
+    stderr_handler.addFilter(_RedactionFilter())  # F-05: scrub stdlib/dep logs on stderr
     root.addHandler(stderr_handler)
+
+    # Rotation knobs — bound disk for a long-lived process; no-op for tiny stdio files.
+    max_bytes = int(os.environ.get("SCOPED_MCP_LOG_MAX_BYTES", str(50 * 1024 * 1024)))
+    backups = int(os.environ.get("SCOPED_MCP_LOG_BACKUPS", "5"))
+
+    def _file_handler(path: str) -> logging.Handler:
+        # maxBytes=0 disables rotation (stdlib RotatingFileHandler semantics).
+        fh = logging.handlers.RotatingFileHandler(
+            path, maxBytes=max(max_bytes, 0), backupCount=max(backups, 0)
+        )
+        fh.setFormatter(_json_fmt)
+        return fh
 
     # Optional file sinks: named loggers propagate to root (stderr) AND write to file.
     if audit_log:
-        fh = logging.FileHandler(audit_log)
-        fh.setFormatter(_json_fmt)
-        logging.getLogger("audit").addHandler(fh)
+        logging.getLogger("audit").addHandler(_file_handler(audit_log))
 
     if ops_log:
-        fh = logging.FileHandler(ops_log)
-        fh.setFormatter(_json_fmt)
-        logging.getLogger("ops").addHandler(fh)
+        logging.getLogger("ops").addHandler(_file_handler(ops_log))
 
 
 def get_audit_logger() -> structlog.stdlib.BoundLogger:
@@ -322,14 +362,22 @@ def audited(tool_name: str) -> Callable:
             agent_ctx = _agent_ctx_from_binding or (
                 getattr(args[0], "agent_ctx", None) if args else None
             )
-            agent_id = agent_ctx.agent_id if agent_ctx else "unknown"
+            default_agent_id = agent_ctx.agent_id if agent_ctx else "unknown"
 
-            _inject_session_id_to_current_span()
+            # Per-connection identity: session_id (and, forward-compat, agent_id) come from
+            # the in-flight request context, not the process globals — so one long-lived HTTP
+            # process keeps distinct session ids across concurrent clients. Falls back to the
+            # process SESSION_ID / env agent_id on stdio or outside a request.
+            identity = resolve_request_identity(default_agent_id, SESSION_ID)
+            agent_id = identity.agent_id
+            session_id = identity.session_id
+
+            _inject_session_id_to_current_span(session_id)
 
             log_kwargs: dict[str, Any] = {
                 "tool": tool_name,
                 "agent_id": agent_id,
-                "session_id": SESSION_ID,
+                "session_id": session_id,
             }
             if _log_args:
                 log_kwargs["args"] = kwargs
@@ -346,7 +394,7 @@ def audited(tool_name: str) -> Callable:
                 if _agent_bus_emit and _agent_bus_comms_dir:
                     with contextlib.suppress(RuntimeError):
                         _t = asyncio.create_task(
-                            _emit_agent_bus_event(tool_name, agent_id, "ok", elapsed_ms)
+                            _emit_agent_bus_event(tool_name, agent_id, "ok", elapsed_ms, session_id)
                         )
                         _t.add_done_callback(lambda _: None)
 
@@ -376,7 +424,12 @@ def audited(tool_name: str) -> Callable:
                     with contextlib.suppress(RuntimeError):
                         _t = asyncio.create_task(
                             _emit_agent_bus_event(
-                                tool_name, agent_id, "error", elapsed_ms, type(exc).__name__
+                                tool_name,
+                                agent_id,
+                                "error",
+                                elapsed_ms,
+                                session_id,
+                                type(exc).__name__,
                             )
                         )
                         _t.add_done_callback(lambda _: None)

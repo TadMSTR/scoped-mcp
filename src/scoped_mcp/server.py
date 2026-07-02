@@ -12,6 +12,7 @@ import signal
 import sys
 
 from .audit import SESSION_ID, configure_audit, configure_logging, get_ops_logger
+from .exceptions import ConfigError
 from .identity import AgentContext
 from .manifest import load_manifest
 from .middleware import ToolCallMiddleware
@@ -177,8 +178,26 @@ def _run_serve(args: argparse.Namespace) -> None:
             hitl_cfg=manifest.hitl,
         )
 
-        server = build_server(agent_ctx, manifest, middleware=middleware)
-        ops.info("server_ready", transport="stdio")
+        # Transport selection (SMCP-15). Default stays stdio so existing spawns are
+        # unaffected; http runs one long-lived streamable-http process per agent under PM2,
+        # so CloudCLI's per-turn recycle only drops a client connection to a warm process.
+        transport = getattr(args, "transport", "stdio") or "stdio"
+
+        # HTTP transport replaces stdio's private-pipe isolation with a localhost TCP port,
+        # so it MUST authenticate. Build the per-agent bearer verifier before the server.
+        auth = None
+        if transport == "http":
+            from .http_auth import BearerTokenVerifier
+
+            token = os.environ.get("SCOPED_MCP_BEARER_TOKEN", "").strip()
+            if not token:
+                raise ConfigError(
+                    "transport=http requires SCOPED_MCP_BEARER_TOKEN in the environment "
+                    "(per-agent bearer secret); refusing to bind an unauthenticated HTTP port"
+                )
+            auth = BearerTokenVerifier(expected_token=token, agent_id=agent_ctx.agent_id)
+
+        server = build_server(agent_ctx, manifest, middleware=middleware, auth=auth)
 
         # SMCP-3: graceful shutdown on SIGTERM.
         # Claude Desktop / Claude Code spawn scoped-mcp as a stdio subprocess and
@@ -187,13 +206,39 @@ def _run_serve(args: argparse.Namespace) -> None:
         # background renewal tasks, etc.).  sys.exit() inside the handler raises
         # SystemExit which propagates through anyio back to FastMCP's lifespan
         # finally-block, giving every module a clean chance to release resources.
+        # Under http the same handler lets PM2's SIGTERM stop the long-lived process cleanly.
         def _sigterm_handler(signum: int, frame: object) -> None:
             ops.info("sigterm_received")
             sys.exit(0)
 
         signal.signal(signal.SIGTERM, _sigterm_handler)
 
-        server.run(transport="stdio")
+        if transport == "http":
+            host = getattr(args, "host", "127.0.0.1") or "127.0.0.1"
+            port = int(getattr(args, "port", 0) or 0)
+            path = getattr(args, "path", "/mcp") or "/mcp"
+            # SECURITY: loopback bind only. A non-loopback host would expose the agent's
+            # entire tool surface to the LAN behind one static bearer — refuse it outright.
+            if host not in ("127.0.0.1", "localhost", "::1"):
+                raise ConfigError(
+                    f"transport=http refuses non-loopback host {host!r}; "
+                    f"bind 127.0.0.1 only (localhost-only by design)"
+                )
+            if not port:
+                raise ConfigError("transport=http requires --port <PORT>")
+            ops.info(
+                "server_ready",
+                transport="streamable-http",
+                host=host,
+                port=port,
+                path=path,
+                bind="loopback-only",
+                auth="bearer",
+            )
+            server.run(transport="streamable-http", host=host, port=port, path=path)
+        else:
+            ops.info("server_ready", transport="stdio")
+            server.run(transport="stdio")
 
     except Exception as e:
         ops.error("startup_failed", error=type(e).__name__, detail=str(e))
@@ -213,6 +258,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     run_parser.add_argument("--manifest", required=True, metavar="PATH")
     run_parser.add_argument("--audit-log", default=None, metavar="PATH")
     run_parser.add_argument("--ops-log", default=None, metavar="PATH")
+    run_parser.add_argument(
+        "--transport",
+        choices=("stdio", "http"),
+        default="stdio",
+        help="Transport to serve on. 'http' = long-lived streamable-http (requires "
+        "SCOPED_MCP_BEARER_TOKEN + --port). Default: stdio.",
+    )
+    run_parser.add_argument(
+        "--host", default="127.0.0.1", metavar="HOST", help="HTTP bind host (loopback only)."
+    )
+    run_parser.add_argument(
+        "--port", type=int, default=None, metavar="PORT", help="HTTP bind port (required for http)."
+    )
+    run_parser.add_argument(
+        "--path", default="/mcp", metavar="PATH", help="HTTP endpoint path. Default: /mcp."
+    )
 
     # "validate" subcommand
     validate_parser = subparsers.add_parser(
