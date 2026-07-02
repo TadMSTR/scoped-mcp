@@ -246,6 +246,26 @@ def _sanitize_processor(logger: Any, method: str, event_dict: dict[str, Any]) ->
 # ── Logger configuration ─────────────────────────────────────────────────────
 
 
+class _RedactionFilter(logging.Filter):
+    """Apply pattern-based redaction to stdlib log records on the stderr handler (F-05).
+
+    The structlog ``_sanitize_processor`` only scrubs records emitted through structlog
+    loggers. Third-party libraries (uvicorn / starlette / fastmcp) log via plain stdlib
+    logging, bypassing it — and under the long-lived HTTP process their stderr is captured
+    persistently by PM2. A dependency that logs an ``Authorization: Bearer <token>`` header at
+    DEBUG would otherwise persist the secret. This filter runs the same pattern redaction over
+    every formatted stderr record so a leaked bearer/token never reaches the log.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            record.msg = _redact_string(record.getMessage())
+            record.args = ()
+        except Exception:
+            pass  # never let redaction drop a log record
+        return True
+
+
 def configure_logging(audit_log: str | None = None, ops_log: str | None = None) -> None:
     """Configure structlog. Call once at server startup.
 
@@ -282,6 +302,7 @@ def configure_logging(audit_log: str | None = None, ops_log: str | None = None) 
     root.setLevel(logging.DEBUG)
     stderr_handler = logging.StreamHandler(sys.stderr)
     stderr_handler.setFormatter(_json_fmt)
+    stderr_handler.addFilter(_RedactionFilter())  # F-05: scrub stdlib/dep logs on stderr
     root.addHandler(stderr_handler)
 
     # Rotation knobs — bound disk for a long-lived process; no-op for tiny stdio files.

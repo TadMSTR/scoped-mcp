@@ -58,6 +58,13 @@ def test_bearer_verifier_refuses_empty_secret() -> None:
         BearerTokenVerifier(expected_token="", agent_id="research")
 
 
+@pytest.mark.asyncio
+async def test_bearer_verifier_handles_non_ascii_token() -> None:
+    """F-04: a non-ASCII bearer must fail closed (None → 401), not raise TypeError → 500."""
+    v = BearerTokenVerifier(expected_token="s3cret", agent_id="research")
+    assert await _verify(v, "nön-ascii-🔑") is None
+
+
 def test_http_app_rejects_unauthenticated_requests() -> None:
     """A TokenVerifier-protected streamable-http app 401s a request with no/invalid bearer,
     and lets a valid bearer past auth (subsequent 406 is content negotiation, not auth)."""
@@ -113,6 +120,14 @@ def test_resolve_identity_uses_token_agent_id_claim() -> None:
     assert ident.agent_id == "research-07"  # forward-compat: per-connection agent id
 
 
+def test_resolve_identity_rejects_malformed_agent_id_claim() -> None:
+    """F-01: a claim that violates the agent-id trust boundary is ignored, default kept."""
+    for bad in ("../etc", "a/b", "has space", "UPPER", ""):
+        with _fake_request(session_id="conn-A", agent_id_claim=bad):
+            ident = resolve_request_identity("dev", "proc-sess")
+        assert ident.agent_id == "dev", f"claim {bad!r} should have been rejected"
+
+
 def test_two_connections_get_distinct_session_ids() -> None:
     with _fake_request(session_id="conn-A"):
         a = resolve_request_identity("dev", "proc-sess")
@@ -130,6 +145,26 @@ def test_normalized_session_id_survives_audit_sanitizer() -> None:
     assert _sanitize_value(raw_hex, "session_id") == "<redacted-hex>"  # proves the hazard
     normalized = _normalize_session_id(raw_hex)
     assert _sanitize_value(normalized, "session_id") == normalized  # survives intact
+
+
+def test_redaction_filter_scrubs_bearer_on_stderr_records() -> None:
+    """F-05: a stdlib (non-structlog) log record carrying a bearer is redacted on stderr."""
+    import logging
+
+    from scoped_mcp.audit import _RedactionFilter
+
+    rec = logging.LogRecord(
+        "uvicorn.access",
+        logging.DEBUG,
+        __file__,
+        1,
+        "req headers: Authorization: Bearer abcdef0123456789abcdef",
+        None,
+        None,
+    )
+    assert _RedactionFilter().filter(rec) is True  # record is kept
+    assert "abcdef0123456789abcdef" not in rec.getMessage()
+    assert "<redacted-bearer>" in rec.getMessage()
 
 
 class _MockModule:

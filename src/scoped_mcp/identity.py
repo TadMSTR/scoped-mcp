@@ -133,7 +133,13 @@ def resolve_request_identity(default_agent_id: str, default_session_id: str) -> 
         token = get_access_token()
         if token is not None:
             claim = (getattr(token, "claims", None) or {}).get("agent_id")
-            if claim:
+            # F-01: only trust a claim that satisfies the agent-id trust boundary — agent_id
+            # is interpolated into filesystem paths, bucket prefixes, and log fields, so an
+            # unvalidated value containing '/', '..', or whitespace escapes scope. An invalid
+            # or malformed claim is ignored, keeping the validated default. Not reachable while
+            # the only issuer stamps the validated env AGENT_ID, but the guard ships with the
+            # trusting code so the clone-pool token issuer cannot introduce a traversal sink.
+            if claim and _AGENT_ID_PATTERN.match(claim):
                 agent_id = claim
     except Exception:
         pass  # unauthenticated transport (stdio) — keep default

@@ -50,7 +50,10 @@ class BearerTokenVerifier(TokenVerifier):
 
     async def verify_token(self, token: str) -> AccessToken | None:
         """Return an AccessToken on exact match, else None (→ 401 before dispatch)."""
-        if not token or not hmac.compare_digest(token, self._expected_token):
+        # F-04: compare as UTF-8 bytes. hmac.compare_digest on two str operands raises
+        # TypeError if either holds non-ASCII — a non-ASCII bearer would 500 instead of a
+        # clean 401. Bytes are always comparable, keeping the path fail-closed and quiet.
+        if not token or not hmac.compare_digest(token.encode(), self._expected_token.encode()):
             return None
         claims: dict[str, Any] = {"agent_id": self._agent_id}
         return AccessToken(

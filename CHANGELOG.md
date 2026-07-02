@@ -40,6 +40,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   long-lived process cannot grow an unbounded audit/ops file. stdio-per-turn behaviour is
   unchanged. (`audit.py`)
 
+### Security
+
+- Hardening from the SMCP-15 security audit (all Low/Info, none exploitable at ship):
+  - **F-01**: the per-connection `agent_id` token claim is validated against
+    `_AGENT_ID_PATTERN` before use, so a future clone-pool token issuer cannot introduce a
+    path-traversal / scope-escape via a malformed claim. (`identity.py`)
+  - **F-02**: the mcp_proxy dead-transport reconnect is serialized with an `asyncio.Lock` and
+    re-checks the handle under the lock — concurrent callers no longer race to tear down and
+    replace the persistent client. (`mcp_proxy.py`)
+  - **F-04**: bearer comparison encodes to bytes so a non-ASCII token fails closed (clean 401)
+    instead of raising. (`http_auth.py`)
+  - **F-05**: a redaction filter scrubs the root stderr handler, so a dependency logging an
+    `Authorization` header at DEBUG cannot persist a bearer to the long-lived process's logs.
+    (`audit.py`)
+
 ## [1.5.2] — 2026-06-18
 
 ### Fixed
