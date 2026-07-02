@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-07-02
+
+### Added
+
+- **SMCP-15 — long-lived HTTP transport**: `scoped-mcp run` gains `--transport {stdio,http}`
+  (default `stdio`, unchanged) plus `--host`/`--port`/`--path`. Under `http` the server runs
+  as a long-lived streamable-http process (one per agent, under PM2), so a per-turn client
+  recycle only drops a connection to a warm process — tool discovery no longer re-runs and
+  tools never disappear mid-session. (`server.py`, `registry.py`)
+- **Per-agent bearer authentication** (`http_auth.py`): the HTTP transport requires
+  `Authorization: Bearer <SCOPED_MCP_BEARER_TOKEN>` and rejects missing/invalid tokens with
+  401 before any tool dispatch (constant-time compare). Binds `127.0.0.1` only; a non-loopback
+  `--host` is refused. stdio keeps its implicit private-pipe isolation (no auth). The verifier
+  stamps the caller's `agent_id` onto the access token (`client_id` + `claims`) as a
+  forward-compat guardrail for the future clone pool.
+- **Per-connection session identity**: audit `session_id` is now resolved per request from the
+  MCP connection context, not the process global — so one long-lived HTTP process emits distinct
+  `session_id` values for concurrent clients. The raw MCP session id is mapped to a stable,
+  non-reversible UUID so it both survives the audit sanitizer and never leaks a session secret
+  into logs. `RequestIdentity` also carries a per-connection `agent_id` (clone-pool ready).
+  (`identity.py`, `audit.py`)
+
+### Changed
+
+- **mcp_proxy self-healing**: a persistent stdio upstream call that fails with a dead-transport
+  error (broken/closed pipe, subprocess exit) now transparently reconnects **once** and retries,
+  logging `mcp_proxy_reconnect`. Long-lived processes previously left a dead pipe until restart;
+  normal tool errors still propagate untouched so real outages are not masked. (`mcp_proxy.py`)
+- **Audit/ops log rotation**: file sinks use a size-based `RotatingFileHandler`
+  (`SCOPED_MCP_LOG_MAX_BYTES`, default 50 MiB; `SCOPED_MCP_LOG_BACKUPS`, default 5) so a
+  long-lived process cannot grow an unbounded audit/ops file. stdio-per-turn behaviour is
+  unchanged. (`audit.py`)
+
 ## [1.5.2] — 2026-06-18
 
 ### Fixed
