@@ -125,6 +125,63 @@ MCP servers that need credentials, since stdio subprocesses do not inherit the p
 
 ---
 
+## Transports
+
+`scoped-mcp run` supports two transports via `--transport` (default `stdio`, unchanged):
+
+| Transport | Process model | Isolation | Auth |
+|-----------|---------------|-----------|------|
+| `stdio` (default) | one subprocess per turn, spawned by the MCP client | private pipe — no network surface | none needed (implicit) |
+| `http` | one long-lived streamable-http process per agent, under PM2 | loopback-only bind | bearer token (required) |
+
+**stdio** is the default and needs no extra flags — it is what the Quickstart and Claude
+Code `settings.json` examples above use.
+
+**http** (added v1.6.0) runs scoped-mcp as a persistent streamable-http server so a
+per-turn client recycle only drops a connection to a warm process — tool discovery no
+longer re-runs and tools never disappear mid-session. It is intended for one long-lived
+process per agent, supervised by PM2.
+
+```bash
+export AGENT_ID="research-01"
+export AGENT_TYPE="research"
+export SCOPED_MCP_BEARER_TOKEN="$(openssl rand -hex 32)"   # required for http
+
+scoped-mcp run \
+  --manifest manifests/research-agent.yml \
+  --transport http \
+  --port 9200 \
+  --path /mcp            # default; --host defaults to 127.0.0.1
+```
+
+HTTP transport constraints:
+
+- **Bearer required** — every request must send `Authorization: Bearer <SCOPED_MCP_BEARER_TOKEN>`.
+  Missing or invalid tokens are rejected with `401` before any tool dispatch, using a
+  constant-time compare. Startup refuses to run the HTTP transport if the env var is unset.
+- **Loopback only** — the server binds `127.0.0.1`; a non-loopback `--host` is refused.
+  `--port` is required under `http`.
+- **Per-connection audit identity** — each request resolves its own audit `session_id`
+  from the MCP connection context, so a single long-lived process still emits distinct
+  session ids for concurrent clients. The raw MCP session id is mapped to a stable,
+  non-reversible UUID that never leaks into logs.
+
+Client `settings.json` for an HTTP agent points at the URL rather than a command:
+
+```json
+{
+  "mcpServers": {
+    "tools": {
+      "type": "http",
+      "url": "http://127.0.0.1:9200/mcp",
+      "headers": { "Authorization": "Bearer ${SCOPED_MCP_BEARER_TOKEN}" }
+    }
+  }
+}
+```
+
+---
+
 ## Core Concepts
 
 **Agent Identity** — `AGENT_ID` (unique instance) and `AGENT_TYPE` (role) set via environment variables at spawn time. The manifest maps agent types to allowed modules.
@@ -141,8 +198,12 @@ MCP servers that need credentials, since stdio subprocesses do not inherit the p
 
 **Logging** — two structured JSON-L streams:
 
-1. **Audit log** — what agents did. Every tool call, every scope check. Every entry includes a `session.id` UUID assigned at process start, for correlating all calls within one agent session.
+1. **Audit log** — what agents did. Every tool call, every scope check. Under stdio each entry carries the process-start `session.id`; under the long-lived HTTP transport the `session.id` is resolved per connection so concurrent clients stay distinguishable.
 2. **Operational log** — what the server did. Startup, shutdown, config errors.
+
+Both file sinks use a size-based `RotatingFileHandler` (v1.6.0) so a long-lived HTTP
+process cannot grow an unbounded log — tune with `SCOPED_MCP_LOG_MAX_BYTES` (default
+50 MiB) and `SCOPED_MCP_LOG_BACKUPS` (default 5). stdio-per-turn behaviour is unchanged.
 
 **Module Startup** — when an agent connects, scoped-mcp starts all proxied/upstream modules concurrently (`asyncio.gather`) rather than one at a time. With ~17 upstream modules this cuts cold-start from ~5.5s to under 1s — roughly the time of the single slowest module — and removes the window where tools are briefly unavailable during per-connection restarts (e.g. under CloudCLI's stream-json driver). (v1.3.2)
 
@@ -372,6 +433,13 @@ Header values support `${VAR}` substitution (same rules as all manifest fields).
 Headers are only applied to HTTP transports — configuring headers on a stdio
 transport logs a warning and ignores them. `Authorization` header values are
 automatically redacted from structured logs.
+
+**Self-healing stdio upstreams** (v1.6.0) — a persistent stdio upstream call that fails
+with a dead-transport error (broken/closed pipe, subprocess exit) transparently
+reconnects **once** and retries, logging `mcp_proxy_reconnect`. This matters under the
+long-lived HTTP transport, where a dead pipe would otherwise persist until restart. The
+reconnect is serialized with a lock so concurrent callers do not race to replace the
+client; normal tool errors still propagate untouched so real outages are not masked.
 
 ### Infrastructure
 
