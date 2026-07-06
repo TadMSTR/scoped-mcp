@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Vault token renewal called the wrong hvac API** (`credentials_vault.py`):
+  `_renew_once()` called `self._client.auth.renew_self`, which does not exist on
+  `hvac.Client` — the method is nested under `.auth.token.renew_self`. Every renewal
+  raised `AttributeError`, so AppRole tokens were never renewed after process start
+  (100% failure across all per-agent `scoped-mcp-*` PM2 processes since the 1.6.0
+  PM2/HTTP deploy on 2026-07-02). Added a regression test that exercises the real
+  hvac attribute chain instead of patching `asyncio.to_thread` wholesale.
+
 ## [1.6.0] — 2026-07-02
 
 ### Added

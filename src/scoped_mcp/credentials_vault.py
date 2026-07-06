@@ -168,7 +168,7 @@ class VaultCredentialSource:
 
     async def _renew_once(self) -> None:
         try:
-            resp = await asyncio.to_thread(self._client.auth.renew_self)
+            resp = await asyncio.to_thread(self._client.auth.token.renew_self)
             self._token_lease_duration = resp["auth"].get(
                 "lease_duration", self._token_lease_duration
             )

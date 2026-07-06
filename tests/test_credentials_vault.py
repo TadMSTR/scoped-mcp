@@ -240,3 +240,27 @@ async def test_renewal_resets_failures_on_success(monkeypatch: pytest.MonkeyPatc
 
     assert src._consecutive_failures == 0
     assert src._token_lease_duration == 1800
+
+
+@pytest.mark.asyncio
+async def test_renewal_uses_real_hvac_token_renew_self(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: renewal must call auth.token.renew_self, not auth.renew_self.
+
+    A real hvac.Client has renew_self nested under .auth.token; the top-level
+    .auth.renew_self does not exist. Earlier tests patched asyncio.to_thread
+    wholesale and so never exercised the actual attribute chain, letting a wrong
+    path ship. This test uses a real client so a bad path raises AttributeError.
+    """
+    import hvac
+
+    src = _make_source(monkeypatch)
+    client = hvac.Client(url="https://vault.example.com")
+    client.auth.token.renew_self = MagicMock(return_value={"auth": {"lease_duration": 1800}})
+    src._client = client
+    src._consecutive_failures = 3
+
+    await src._renew_once()  # real asyncio.to_thread — exercises the true attribute path
+
+    client.auth.token.renew_self.assert_called_once()
+    assert src._consecutive_failures == 0
+    assert src._token_lease_duration == 1800
