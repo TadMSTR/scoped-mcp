@@ -197,7 +197,9 @@ def _run_serve(args: argparse.Namespace) -> None:
                 )
             auth = BearerTokenVerifier(expected_token=token, agent_id=agent_ctx.agent_id)
 
-        server = build_server(agent_ctx, manifest, middleware=middleware, auth=auth)
+        server = build_server(
+            agent_ctx, manifest, middleware=middleware, auth=auth, manifest_path=args.manifest
+        )
 
         # SMCP-3: graceful shutdown on SIGTERM.
         # Claude Desktop / Claude Code spawn scoped-mcp as a stdio subprocess and
