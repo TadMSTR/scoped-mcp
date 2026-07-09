@@ -28,6 +28,7 @@ import json
 import os
 import pkgutil
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -233,15 +234,59 @@ def _register_signing_hook_if_available(vault_bundle: dict[str, str], ops: objec
         pass  # cryptography package not installed — signing unavailable
 
 
-def _register_status_tool(server: FastMCP, module_health: dict) -> None:
+def _manifest_status_fields(manifest_snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Compute manifest-staleness fields for scoped_mcp_status (SMCP-24).
+
+    manifest_snapshot holds manifest_path/manifest_loaded_at/manifest_mtime_at_load,
+    captured once in build_server() when the manifest was loaded. This re-stats the
+    file at call time and compares against that captured mtime — under SMCP-15's
+    long-lived HTTP transport, a module is only re-discovered at process start, so a
+    manifest edit made after that has no effect until a PM2 restart. Without this
+    signal, nothing distinguishes "warm and current" from "warm and stale".
+
+    Returns {} if no manifest_path was captured (e.g. build_server() called without
+    one, as in most tests). If the file can no longer be stat()'d at call time, the
+    static path/loaded_at fields are still returned but manifest_stale is omitted —
+    this is a soft diagnostic signal and must never raise from scoped_mcp_status.
+    """
+    path = manifest_snapshot.get("manifest_path")
+    mtime_at_load = manifest_snapshot.get("manifest_mtime_at_load")
+    if path is None or mtime_at_load is None:
+        return {}
+
+    fields: dict[str, Any] = {
+        "manifest_path": path,
+        "manifest_loaded_at": manifest_snapshot.get("manifest_loaded_at"),
+    }
+    try:
+        current_mtime = os.path.getmtime(path)
+    except OSError:
+        return fields
+
+    if current_mtime > mtime_at_load:
+        fields["manifest_stale"] = True
+        fields["manifest_stale_hint"] = (
+            "manifest file has changed since this process started — restart the "
+            "scoped-mcp-<agent> PM2 process to pick up the change"
+        )
+    return fields
+
+
+def _register_status_tool(
+    server: FastMCP,
+    module_health: dict,
+    manifest_snapshot: dict[str, Any] | None = None,
+) -> None:
     """Register scoped_mcp_status as a built-in tool on the parent server.
 
     This tool is always present regardless of manifest content. Operators can call it
     at session start to identify degraded modules and act before running further tasks.
 
     module_health is captured by closure and updated live by the lifespan, so the tool
-    reflects startup failures that occur after build_server() returns.
+    reflects startup failures that occur after build_server() returns. manifest_snapshot
+    is likewise captured by closure so each call re-stats the manifest file fresh.
     """
+    manifest_snapshot = manifest_snapshot or {}
 
     async def scoped_mcp_status() -> dict:
         """Return the health status of all manifest-declared modules.
@@ -252,15 +297,21 @@ def _register_status_tool(server: FastMCP, module_health: dict) -> None:
           failed_init    — module class could not be instantiated (bad config, missing credential)
           failed_startup — module startup() raised (service unreachable, bad state, etc.)
 
+        manifest_stale (bool, present only if true) signals the manifest file has
+        changed since this process started — under the HTTP transport, that requires
+        a PM2 restart to take effect (see manifest_stale_hint for the exact command).
+
         Call this at session start to check for degraded modules before running tasks.
         """
         failed = {k: v for k, v in module_health.items() if v.get("status") != "running"}
-        return {
+        result = {
             "modules": module_health,
             "failed_count": len(failed),
             "total_count": len(module_health),
             "healthy": len(failed) == 0,
         }
+        result.update(_manifest_status_fields(manifest_snapshot))
+        return result
 
     server.tool(name="scoped_mcp_status")(scoped_mcp_status)
 
@@ -312,6 +363,7 @@ def build_server(
     manifest: Manifest,
     middleware: list[ToolCallMiddleware] | None = None,
     auth: Any = None,
+    manifest_path: str | None = None,
 ) -> FastMCP:
     """Discover modules, filter to manifest, register tools, return a ready FastMCP server.
 
@@ -333,9 +385,25 @@ def build_server(
     middleware: optional list of ToolCallMiddleware applied to every tool call.
         Middleware wraps the @audited function — spans include the full call duration.
         Empty list (default) adds no overhead.
+
+    manifest_path: optional path the manifest was loaded from (SMCP-24). When given,
+        its mtime is captured here and re-checked on every scoped_mcp_status call, so
+        a manifest edit made after this process started is visible as manifest_stale
+        instead of silently having no effect until the next PM2 restart.
     """
     ops = get_ops_logger()
     ops.info("registry_start", agent_id=agent_ctx.agent_id, agent_type=agent_ctx.agent_type)
+
+    manifest_snapshot: dict[str, Any] = {}
+    if manifest_path is not None:
+        try:
+            manifest_snapshot = {
+                "manifest_path": manifest_path,
+                "manifest_loaded_at": datetime.now(UTC).isoformat(),
+                "manifest_mtime_at_load": os.path.getmtime(manifest_path),
+            }
+        except OSError as exc:
+            ops.warning("manifest_stat_failed_at_load", path=manifest_path, error=str(exc))
 
     available, failed_imports = _discover_module_classes()
     ops.info("modules_discovered", count=len(available), names=list(available.keys()))
@@ -448,7 +516,7 @@ def build_server(
         server.mount(child, prefix=module_name)
 
     # Always-present status tool — no module namespace prefix.
-    _register_status_tool(server, module_health)
+    _register_status_tool(server, module_health, manifest_snapshot)
     registered_tool_names.append("scoped_mcp_status")
 
     # Validate policy patterns against registered tool names (H-02).

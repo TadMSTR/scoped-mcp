@@ -165,6 +165,15 @@ HTTP transport constraints:
   from the MCP connection context, so a single long-lived process still emits distinct
   session ids for concurrent clients. The raw MCP session id is mapped to a stable,
   non-reversible UUID that never leaks into logs.
+- **Manifest edits require a restart** — module discovery (`_discover_tools()`) runs
+  exactly once, when the process starts. Under `stdio`, every new client connection was
+  a fresh subprocess, so a manifest edit took effect automatically on the next session.
+  Under `http`, the process is long-lived and a client reconnecting is just a new
+  connection to the same warm server — a manifest edit (new `tool_allowlist` entries,
+  new modules, etc.) has **no effect** until you run
+  `pm2 restart scoped-mcp-<agent>`. `scoped_mcp_status` surfaces a `manifest_stale: true`
+  flag (with a restart hint) once the manifest file's mtime moves past what the running
+  process loaded — see **Module Health** below. (SMCP-24)
 
 Client `settings.json` for an HTTP agent points at the URL rather than a command:
 
@@ -213,6 +222,8 @@ process cannot grow an unbounded log — tune with `SCOPED_MCP_LOG_MAX_BYTES` (d
 - **Startup** — `asyncio.gather` runs with `return_exceptions=True`. A startup failure is recorded in `module_health`; the server yields and remaining modules' tools stay available.
 
 **Module Health** — `scoped_mcp_status` is always registered regardless of manifest content. Call it at session start to get `{modules, failed_count, total_count, healthy}` with per-module status values: `running`, `failed_import`, `failed_init`, `failed_startup`. Set `SCOPED_MCP_HEALTH_FILE` to a path and the lifespan will write a JSON health report after startup completes — useful for session-start hooks or external health-check scripts that need file-based status without calling an MCP tool. (v1.4.0)
+
+**Manifest Staleness** — under `--transport http`, `scoped_mcp_status` also reports `manifest_path` and `manifest_loaded_at` (when this process loaded its manifest). If the manifest file's mtime has moved since then, the response adds `manifest_stale: true` and a `manifest_stale_hint` string telling you to run `pm2 restart scoped-mcp-<agent>`. This is diagnostic only — it never fails the status call, even if the manifest file has since been deleted or become unreadable. See **Transports → HTTP transport constraints** for why this class of drift is possible under the long-lived process model. (SMCP-24)
 
 **Graceful Shutdown** — scoped-mcp installs a SIGTERM handler that calls `sys.exit(0)`, routing cleanup through FastMCP's lifespan `finally` block and every module's `shutdown()` hook. This ensures open sockets, Vault token-renewal tasks, and `mcp_proxy` subprocess handles are released cleanly when Claude Desktop or Claude Code ends a session. Without this, a SIGTERM kill mid-flight could bypass shutdown hooks and leave orphaned processes. (v1.3.4)
 

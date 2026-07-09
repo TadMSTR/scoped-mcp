@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from typing import ClassVar
 
 import pytest
@@ -14,6 +15,7 @@ from scoped_mcp.manifest import Manifest, ModuleConfig
 from scoped_mcp.modules._base import ToolModule, tool
 from scoped_mcp.registry import (
     _discover_module_classes,
+    _manifest_status_fields,
     _register_signing_hook_if_available,
     build_server,
 )
@@ -555,6 +557,110 @@ async def test_scoped_mcp_status_present_even_when_all_modules_fail(
 
     tools = await server.list_tools()
     assert any(t.name == "scoped_mcp_status" for t in tools)
+
+
+# ── manifest staleness detection (SMCP-24) ────────────────────────────────────
+
+
+def test_manifest_status_fields_empty_without_path() -> None:
+    """No manifest_path captured (e.g. build_server() called without one) → no fields."""
+    assert _manifest_status_fields({}) == {}
+
+
+def test_manifest_status_fields_not_stale(tmp_path) -> None:
+    """Manifest untouched since load → path/loaded_at present, manifest_stale absent."""
+    manifest_file = tmp_path / "agent.yml"
+    manifest_file.write_text("agent_type: test\nmodules: {}\n")
+    loaded_at_mtime = os.path.getmtime(manifest_file)
+
+    fields = _manifest_status_fields(
+        {
+            "manifest_path": str(manifest_file),
+            "manifest_loaded_at": "2026-07-09T16:00:00+00:00",
+            "manifest_mtime_at_load": loaded_at_mtime,
+        }
+    )
+
+    assert fields["manifest_path"] == str(manifest_file)
+    assert fields["manifest_loaded_at"] == "2026-07-09T16:00:00+00:00"
+    assert "manifest_stale" not in fields
+
+
+def test_manifest_status_fields_stale_after_edit(tmp_path) -> None:
+    """Manifest mtime newer than the captured load-time mtime → manifest_stale + hint."""
+    manifest_file = tmp_path / "agent.yml"
+    manifest_file.write_text("agent_type: test\nmodules: {}\n")
+    loaded_at_mtime = os.path.getmtime(manifest_file)
+
+    # Simulate an edit strictly after process start, regardless of filesystem mtime
+    # resolution (some filesystems only have 1-second granularity).
+    os.utime(manifest_file, (loaded_at_mtime + 5, loaded_at_mtime + 5))
+
+    fields = _manifest_status_fields(
+        {
+            "manifest_path": str(manifest_file),
+            "manifest_loaded_at": "2026-07-09T16:00:00+00:00",
+            "manifest_mtime_at_load": loaded_at_mtime,
+        }
+    )
+
+    assert fields["manifest_stale"] is True
+    assert "restart" in fields["manifest_stale_hint"]
+    assert "scoped-mcp-<agent>" in fields["manifest_stale_hint"]
+
+
+def test_manifest_status_fields_missing_file_degrades(tmp_path) -> None:
+    """A manifest path that can no longer be stat()'d degrades to omitting staleness,
+    rather than raising — this must never break a live scoped_mcp_status call."""
+    missing_path = str(tmp_path / "deleted-agent.yml")
+
+    fields = _manifest_status_fields(
+        {
+            "manifest_path": missing_path,
+            "manifest_loaded_at": "2026-07-09T16:00:00+00:00",
+            "manifest_mtime_at_load": 1_000_000.0,
+        }
+    )
+
+    assert fields["manifest_path"] == missing_path
+    assert "manifest_stale" not in fields
+    assert "manifest_stale_hint" not in fields
+
+
+@pytest.mark.asyncio
+async def test_scoped_mcp_status_reports_staleness_end_to_end(
+    agent_ctx: AgentContext, tmp_path
+) -> None:
+    """build_server(manifest_path=...) wires through to a live scoped_mcp_status call."""
+    from unittest.mock import patch
+
+    from fastmcp import Client
+
+    manifest_file = tmp_path / "agent.yml"
+    manifest_file.write_text("agent_type: test\nmodules:\n  my-mod: {}\n")
+    manifest = Manifest.model_validate(
+        {"agent_type": "test", "modules": {"my-mod": {"type": "mock", "config": {}}}}
+    )
+    mock_cls = _mock_module_cls()
+
+    with patch(
+        "scoped_mcp.registry._discover_module_classes",
+        return_value=({"mock": mock_cls}, {}),
+    ):
+        server = build_server(agent_ctx, manifest, manifest_path=str(manifest_file))
+
+    async with Client(server) as client:
+        result = await client.call_tool("scoped_mcp_status", {})
+    assert not result.data.get("manifest_stale")
+
+    # Edit strictly after load — some filesystems only have 1-second mtime granularity.
+    current_mtime = os.path.getmtime(manifest_file)
+    os.utime(manifest_file, (current_mtime + 5, current_mtime + 5))
+
+    async with Client(server) as client:
+        result = await client.call_tool("scoped_mcp_status", {})
+    assert result.data["manifest_stale"] is True
+    assert "restart" in result.data["manifest_stale_hint"]
 
 
 # ── _register_signing_hook_if_available ───────────────────────────────────────

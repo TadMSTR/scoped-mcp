@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Manifest staleness detection** (`registry.py`): `scoped_mcp_status` now reports
+  `manifest_path` and `manifest_loaded_at`, and adds `manifest_stale: true` plus a
+  restart hint if the manifest file's mtime has moved since this process loaded it.
+  Root cause of SMCP-24: under SMCP-15's long-lived HTTP transport, module discovery
+  runs once at process start, so a manifest edit (new `tool_allowlist` entries, new
+  modules) silently has no effect until a `pm2 restart scoped-mcp-<agent>` — this was
+  implicit and automatic under `stdio` (fresh process per session) and undocumented
+  under `http`. The staleness check is a soft diagnostic signal — a missing/unreadable
+  manifest path at check time degrades to omitting the staleness fields, it never fails
+  the call. `build_server()` gains an optional `manifest_path` parameter to enable it.
+
 ### Fixed
 
 - **Vault token renewal called the wrong hvac API** (`credentials_vault.py`):
