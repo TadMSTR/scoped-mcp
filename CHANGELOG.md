@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **SMCP-25 — `__version__` drifted from `pyproject.toml`** (`__init__.py`): was a
+  hardcoded string last bumped at `0.3.3` while the package moved on to `1.6.1`. Now
+  derived from `importlib.metadata.version("scoped-mcp")` — the installed package's own
+  metadata is the single source of truth, so this can't drift from `pyproject.toml`
+  again. Falls back to `"0.0.0+unknown"` if run from an uninstalled source checkout.
+
 ## [1.6.1] — 2026-07-09
 
 ### Added
