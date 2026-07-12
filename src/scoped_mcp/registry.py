@@ -139,8 +139,13 @@ def _write_health_file(
     if credential_health is not None:
         data["credentials"] = credential_health
     try:
-        with open(path, "w") as f:
+        # Atomic write: an external prober now polls this file on its own schedule, so a
+        # torn in-place write could hand it half-serialized JSON. Write a sibling temp
+        # file and os.replace() it into place (atomic on the same filesystem).
+        tmp_path = f"{path}.tmp"
+        with open(tmp_path, "w") as f:
             json.dump(data, f, indent=2)
+        os.replace(tmp_path, path)
         ops.info(
             "health_file_written",
             path=path,
