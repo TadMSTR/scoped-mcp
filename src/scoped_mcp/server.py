@@ -195,10 +195,19 @@ def _run_serve(args: argparse.Namespace) -> None:
                     "transport=http requires SCOPED_MCP_BEARER_TOKEN in the environment "
                     "(per-agent bearer secret); refusing to bind an unauthenticated HTTP port"
                 )
-            auth = BearerTokenVerifier(expected_token=token, agent_id=agent_ctx.agent_id)
+            auth = BearerTokenVerifier(
+                expected_token=token,
+                agent_id=agent_ctx.agent_id,
+                agent_type=agent_ctx.agent_type,
+            )
 
         server = build_server(
-            agent_ctx, manifest, middleware=middleware, auth=auth, manifest_path=args.manifest
+            agent_ctx,
+            manifest,
+            middleware=middleware,
+            auth=auth,
+            manifest_path=args.manifest,
+            transport=transport,
         )
 
         # SMCP-3: graceful shutdown on SIGTERM.

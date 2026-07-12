@@ -31,15 +31,112 @@ upstream servers are responsible for their own input validation.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from typing import Any
 
+import structlog
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
 from ..audit import _redact_string
 
 _TRACER_NAME = "scoped_mcp"
+_log = structlog.get_logger("ops")
+
+
+def _credential_gauge_values(health: dict) -> tuple[float, float]:
+    """Map a credential_health() snapshot to (healthy_gauge, failures_gauge).
+
+    Pure so the observable-gauge translation is unit-testable without an OTel SDK:
+      * scoped_mcp.credentials.healthy  → 1.0 healthy / 0.0 degraded
+      * scoped_mcp.vault.consecutive_renewal_failures → current failure streak
+    """
+    healthy = 1.0 if health.get("token_healthy", True) else 0.0
+    failures = float(health.get("consecutive_failures", 0) or 0)
+    return healthy, failures
+
+
+def init_credential_metrics(
+    credential_health_fn: Callable[[], dict],
+    agent_id: str,
+    agent_type: str,
+    meter_provider: Any = None,
+) -> bool:
+    """Register OTel observable gauges for Vault credential health (L4 / SMCP-26).
+
+    Two pull-based gauges observe ``credential_health_fn()`` on the SDK's collection
+    schedule, so no per-event plumbing is needed and a SigNoz alert rule can fire on
+    ``scoped_mcp.credentials.healthy == 0`` or a rising failure count. This is the
+    durable, queryable second alert path that complements the Matrix ops-alert.
+
+    Opt-in and degradeable exactly like the tracing path: returns False (no-op) if the
+    OpenTelemetry metrics SDK or an OTLP metric exporter is unavailable, and never
+    raises. Reuses an already-installed SDK MeterProvider; otherwise installs one wired
+    to the standard ``OTEL_EXPORTER_OTLP_*`` environment. ``meter_provider`` may be passed
+    to use an explicit provider instead of the process-global one (used by tests and any
+    caller that manages its own provider).
+    """
+    try:
+        from opentelemetry import metrics
+        from opentelemetry.metrics import Observation
+    except ImportError:
+        return False
+
+    provider = meter_provider
+    if provider is None:
+        try:
+            provider = metrics.get_meter_provider()
+            if "sdk" not in type(provider).__module__:
+                from opentelemetry.sdk.metrics import MeterProvider
+                from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+                from opentelemetry.sdk.resources import Resource
+
+                if os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL", "").startswith("http"):
+                    from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+                        OTLPMetricExporter,
+                    )
+                else:
+                    from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
+                        OTLPMetricExporter,
+                    )
+
+                reader = PeriodicExportingMetricReader(OTLPMetricExporter())
+                provider = MeterProvider(resource=Resource.create(), metric_readers=[reader])
+                metrics.set_meter_provider(provider)
+        except ImportError:
+            return False
+
+    meter = provider.get_meter(_TRACER_NAME)
+    attributes = {"scoped_mcp.agent.id": agent_id, "scoped_mcp.agent.type": agent_type}
+
+    def _safe_health() -> dict:
+        try:
+            return credential_health_fn()
+        except Exception:
+            # Never let a gauge callback raise into the SDK collector.
+            return {"token_healthy": False, "consecutive_failures": 0}
+
+    def _observe_healthy(_options: Any) -> list:
+        healthy, _ = _credential_gauge_values(_safe_health())
+        return [Observation(healthy, attributes)]
+
+    def _observe_failures(_options: Any) -> list:
+        _, failures = _credential_gauge_values(_safe_health())
+        return [Observation(failures, attributes)]
+
+    meter.create_observable_gauge(
+        "scoped_mcp.credentials.healthy",
+        callbacks=[_observe_healthy],
+        description="1 when the Vault token is healthy, 0 when degraded",
+    )
+    meter.create_observable_gauge(
+        "scoped_mcp.vault.consecutive_renewal_failures",
+        callbacks=[_observe_failures],
+        description="Consecutive Vault token renewal failures (0 when healthy)",
+    )
+    _log.info("credential_metrics_registered", agent_id=agent_id)
+    return True
 
 
 class OtelMiddleware:

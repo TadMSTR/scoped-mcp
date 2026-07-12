@@ -221,7 +221,14 @@ process cannot grow an unbounded log — tune with `SCOPED_MCP_LOG_MAX_BYTES` (d
 - **Init** — if a module's `__init__` raises (bad config, missing credential), it is skipped. Other modules still instantiate and register normally.
 - **Startup** — `asyncio.gather` runs with `return_exceptions=True`. A startup failure is recorded in `module_health`; the server yields and remaining modules' tools stay available.
 
-**Module Health** — `scoped_mcp_status` is always registered regardless of manifest content. Call it at session start to get `{modules, failed_count, total_count, healthy}` with per-module status values: `running`, `failed_import`, `failed_init`, `failed_startup`. Set `SCOPED_MCP_HEALTH_FILE` to a path and the lifespan will write a JSON health report after startup completes — useful for session-start hooks or external health-check scripts that need file-based status without calling an MCP tool. (v1.4.0)
+**Module Health** — `scoped_mcp_status` is always registered regardless of manifest content. Call it at session start to get `{modules, failed_count, total_count, healthy}` with per-module status values: `running`, `failed_import`, `failed_init`, `failed_startup`. Set `SCOPED_MCP_HEALTH_FILE` to a path and the lifespan will write a JSON health report after startup completes — useful for session-start hooks or external health-check scripts that need file-based status without calling an MCP tool. The health file is rewritten on every credential-health transition (see below) and carries a `written_at` timestamp so an external watcher can detect a wedged process by staleness. (v1.4.0)
+
+**Credential Health, Self-Heal & Alerting** — for `credentials.source: vault`, `scoped_mcp_status` and the health file also include a `credentials` block (`{source, token_healthy, consecutive_failures, last_renewal_ok_ts, last_reauth_ts, seconds_to_expiry_est, reauth_enabled}`), and top-level `healthy` goes `false` when the Vault token is unhealthy — so a process stuck in a permanent renewal-failure loop can no longer report `healthy: true`. Four layers make a silent credential failure both self-recovering and loud (SMCP-26):
+
+- **Self-heal re-auth** — when renewal fails with a permission/403 class error or crosses the critical-failure threshold, scoped-mcp mints a fresh token with a full AppRole login. This covers the hard `token_max_ttl` ceiling that `renew-self` alone can never exceed. **Opt-in via `SCOPED_MCP_VAULT_REAUTH=1`**, and only safe when the AppRole has a reusable secret_id (`secret_id_num_uses=0`) — re-logging in with a single-use secret_id would burn the only credential. When unset, re-auth is a no-op and the failure surfaces through the layers below.
+- **Out-of-band alert** — on each healthy⇄degraded transition scoped-mcp posts a Vault-independent alert to Matrix, configured from plain env (`SCOPED_MCP_ALERT_MATRIX_HOMESERVER`, `SCOPED_MCP_ALERT_MATRIX_TOKEN`, `SCOPED_MCP_ALERT_MATRIX_ROOM`) so it still fires when Vault is the broken dependency. A burst of `/mcp` `401`s (a misconfigured client bearer) also fires one rate-limited alert — the one signal a session-start `scoped_mcp_status` check can't catch, because a 401'd client never reaches any tool. If no alert channel is configured, a warning is logged once at startup.
+- **`/health` endpoint** — under `--transport http`, an unauthenticated `GET /health` on the existing port returns `200` when healthy and `503` when degraded (booleans/counts only, never token or lease values), so a dumb prober or load balancer can act on the status code alone.
+- **OTel metrics** — when `OTEL_EXPORTER_OTLP_ENDPOINT` is set (and the `[otel]` extra is installed), two observable gauges (`scoped_mcp.credentials.healthy`, `scoped_mcp.vault.consecutive_renewal_failures`) export to your collector for a durable, queryable alert rule. No-op if the endpoint or extra is absent.
 
 **Manifest Staleness** — under `--transport http`, `scoped_mcp_status` also reports `manifest_path` and `manifest_loaded_at` (when this process loaded its manifest). If the manifest file's mtime has moved since then, the response adds `manifest_stale: true` and a `manifest_stale_hint` string telling you to run `pm2 restart scoped-mcp-<agent>`. This is diagnostic only — it never fails the status call, even if the manifest file has since been deleted or become unreadable. See **Transports → HTTP transport constraints** for why this class of drift is possible under the long-lived process model. (SMCP-24)
 
@@ -625,7 +632,10 @@ guarantees. All are off by default; enable per-agent in the manifest:
   or `DragonflyBackend` (`[dragonfly]` extra) for cross-process state.
 - **Vault-backed credentials** (`credentials.source: vault`, v0.8) — fetch
   credentials from HashiCorp Vault via AppRole; client token auto-renewed in
-  the background. See `examples/vault/`.
+  the background, with opt-in self-heal re-auth, credential-health surfacing,
+  an unauthenticated `/health` probe, and out-of-band degradation alerts
+  (SMCP-26 — see **Credential Health, Self-Heal & Alerting** above).
+  See `examples/vault/`.
 - **mcp_proxy schema validation + argument filtering** (`argument_filters:`,
   v0.9) — proxied calls are validated against the upstream tool's
   `inputSchema` before forwarding; pattern-based argument filters can block

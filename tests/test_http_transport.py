@@ -296,3 +296,157 @@ def test_parse_args_defaults_to_stdio() -> None:
 
     a = parse_args(["run", "--manifest", "m.yaml"])
     assert a.transport == "stdio"
+
+
+# ── 401-burst detection (SMCP-28) ─────────────────────────────────────────────
+
+
+def test_burst_detector_fires_once_on_threshold() -> None:
+    """The 5th failure inside the window crosses the threshold; the 6th is cooled down."""
+    v = BearerTokenVerifier(expected_token="secret", agent_id="research")
+    # Four failures below threshold — no alert.
+    for t in range(4):
+        assert v._register_failure_and_check(float(t)) is False
+    # Fifth failure inside the window — fire.
+    assert v._register_failure_and_check(4.5) is True
+    # Immediate next — cooldown suppresses a second alert.
+    assert v._register_failure_and_check(5.0) is False
+
+
+def test_burst_detector_prunes_sliding_window() -> None:
+    """Failures older than the window are pruned so a slow drip never accumulates."""
+    v = BearerTokenVerifier(expected_token="secret", agent_id="research")
+    v._register_failure_and_check(0.0)
+    # 100s later (> 60s window) the first event is pruned.
+    v._register_failure_and_check(100.0)
+    assert len(v._recent_401s) == 1
+
+
+def test_burst_detector_refires_after_cooldown() -> None:
+    """Once the cooldown elapses a fresh burst alerts again."""
+    v = BearerTokenVerifier(expected_token="secret", agent_id="research")
+    base = 0.0
+    for i in range(5):
+        fired = v._register_failure_and_check(base + i)
+    assert fired is True  # fired on the 5th
+    # A fresh burst well after the cooldown window (past window + cooldown).
+    later = base + v._BURST_COOLDOWN_SECONDS + 10
+    fired_again = False
+    for i in range(5):
+        fired_again = v._register_failure_and_check(later + i)
+    assert fired_again is True
+
+
+@pytest.mark.asyncio
+async def test_verify_token_fires_burst_alert(monkeypatch) -> None:
+    """A run of bad-bearer 401s dispatches exactly one best-effort ops alert."""
+    import asyncio
+
+    import scoped_mcp.ops_alert as ops_alert
+
+    sent: list[tuple[str, dict]] = []
+
+    async def _fake_send(event: str, detail: dict) -> bool:
+        sent.append((event, detail))
+        return True
+
+    monkeypatch.setattr(ops_alert, "send_ops_alert", _fake_send)
+
+    v = BearerTokenVerifier(expected_token="secret", agent_id="research", agent_type="dev")
+    for _ in range(v._BURST_THRESHOLD):
+        assert await v.verify_token("wrong") is None
+
+    await asyncio.sleep(0.05)  # let the detached alert task run
+    assert len(sent) == 1
+    assert sent[0][0] == "bearer_auth_401_burst"
+    assert sent[0][1]["agent_id"] == "research"
+    assert sent[0][1]["agent_type"] == "dev"
+
+
+@pytest.mark.asyncio
+async def test_verify_token_success_does_not_record_failure() -> None:
+    """A good bearer neither records a 401 nor trips the burst detector."""
+    v = BearerTokenVerifier(expected_token="secret", agent_id="research")
+    tok = await v.verify_token("secret")
+    assert tok is not None
+    assert len(v._recent_401s) == 0
+
+
+# ── /health route (L3) ────────────────────────────────────────────────────────
+
+
+class _FakeVaultSource:
+    def __init__(self, health: dict) -> None:
+        self._health = health
+
+    def credential_health(self) -> dict:
+        return self._health
+
+
+def _health_client(module_health: dict, vault_source: object):
+    from starlette.testclient import TestClient
+
+    from scoped_mcp.registry import _register_health_route
+
+    server = FastMCP("scoped-mcp/test")
+    _register_health_route(server, module_health, vault_source)
+    return TestClient(server.http_app())
+
+
+def test_health_route_200_when_healthy() -> None:
+    vs = _FakeVaultSource({"source": "vault", "token_healthy": True, "consecutive_failures": 0})
+    with _health_client({"mod": {"status": "running"}}, vs) as client:
+        resp = client.get("/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "healthy"
+    assert body["credentials"]["token_healthy"] is True
+    assert body["modules"] == {"failed_count": 0, "total_count": 1}
+    assert "written_at" in body
+
+
+def test_health_route_503_when_token_degraded() -> None:
+    vs = _FakeVaultSource({"source": "vault", "token_healthy": False, "consecutive_failures": 5})
+    with _health_client({"mod": {"status": "running"}}, vs) as client:
+        resp = client.get("/health")
+    assert resp.status_code == 503
+    assert resp.json()["status"] == "degraded"
+
+
+def test_health_route_503_when_module_failed() -> None:
+    vs = _FakeVaultSource({"source": "vault", "token_healthy": True, "consecutive_failures": 0})
+    with _health_client({"mod": {"status": "failed_startup"}}, vs) as client:
+        resp = client.get("/health")
+    assert resp.status_code == 503
+
+
+def test_health_route_omits_credentials_without_vault() -> None:
+    with _health_client({"mod": {"status": "running"}}, None) as client:
+        resp = client.get("/health")
+    assert resp.status_code == 200
+    assert "credentials" not in resp.json()
+
+
+def test_health_route_exposes_no_secret_fields() -> None:
+    """The /health body must carry booleans/counts only — never a token or lease string.
+
+    credential_health() is the only place credential state reaches the wire; assert its
+    keys stay within a safe allowlist so a future field carrying a secret is caught here.
+    """
+    safe_keys = {
+        "source",
+        "token_healthy",
+        "consecutive_failures",
+        "last_renewal_ok_ts",
+        "last_reauth_ts",
+        "seconds_to_expiry_est",
+        "reauth_enabled",
+    }
+    vs = _FakeVaultSource({"source": "vault", "token_healthy": True, "consecutive_failures": 0})
+    with _health_client({"mod": {"status": "running"}}, vs) as client:
+        resp = client.get("/health")
+    creds = resp.json()["credentials"]
+    assert set(creds).issubset(safe_keys)
+    # No forbidden secret-bearing key names anywhere in the credentials block.
+    for forbidden in ("secret_id", "lease_id", "client_token", "access_token"):
+        assert forbidden not in creds

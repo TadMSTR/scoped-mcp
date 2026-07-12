@@ -156,6 +156,57 @@ If scoped-mcp starts but tools don't appear in the Claude Code tool list:
 
 ---
 
+## Vault token renewal failing
+
+If the ops log shows repeated `vault_token_renewal_failed` (escalating to `critical`
+after 3 consecutive failures), the agent's background token renewal is not succeeding.
+Diagnose by transport and cause:
+
+1. **Check credential health directly** — call `scoped_mcp_status` and read the
+   `credentials` block, or (under `--transport http`) `curl -s localhost:<port>/health`.
+   `token_healthy: false` with a rising `consecutive_failures` confirms the renewal loop
+   is stuck. `seconds_to_expiry_est` shows how long until hard expiry.
+2. **`403 Forbidden` on renew-self** — the AppRole token lacks the `auth/token/renew-self`
+   capability. Vault's built-in `default` policy grants it, so this only happens when the
+   AppRole sets `token_no_default_policy = true`. Re-add the grant (see
+   `examples/vault/vault-policy.hcl`) or drop `token_no_default_policy`.
+3. **Token dies ~24h after start even though renewal returns 200** — `renew-self` can only
+   extend a token up to its `token_max_ttl`; it can never exceed that ceiling. Set
+   `token_period` on the AppRole (periodic tokens renew indefinitely) **or** enable
+   scoped-mcp's app-side self-heal with `SCOPED_MCP_VAULT_REAUTH=1`. Re-auth requires a
+   reusable secret_id (`secret_id_num_uses=0`) — never enable it for a single-use
+   secret_id, as a failed re-login would burn the only credential.
+4. **Confirm self-heal fired** — with re-auth enabled, look for `vault_token_reauthenticated`
+   in the ops log after a failure. `vault_token_reauth_failed` means the fresh login also
+   failed (Vault unreachable or a bad secret_id) — the credential stays degraded and the
+   configured Matrix alert fires.
+
+Set `SCOPED_MCP_ALERT_MATRIX_{HOMESERVER,TOKEN,ROOM}` so a credential-degradation
+transition is surfaced out-of-band (independent of Vault) rather than only landing in an
+ops-log file nothing tails. An `ops_alert_unconfigured` warning at startup means no alert
+channel is set.
+
+---
+
+## Agent sees no tools / `401` on `/mcp`
+
+Under `--transport http`, a fresh client that suddenly sees **no tools at all** is almost
+always a bearer-auth failure, not a Vault or module problem: the request is rejected at
+the bearer before any tool (including `scoped_mcp_status`) can be dispatched.
+
+1. **Check for a 401 burst** — repeated `401 Unauthorized` on `/mcp` and a
+   `bearer_auth_401_burst` warning in the ops log confirm the client's bearer token is
+   wrong or unresolved.
+2. **Most common cause** — the client `.mcp.json` uses `Authorization: Bearer
+   ${SCOPED_MCP_BEARER_TOKEN}` but the launch environment (e.g. a headless `claude -p`
+   invocation) doesn't export `SCOPED_MCP_BEARER_TOKEN`, so the placeholder is sent
+   literally and every request 401s. Ensure the variable is present in the client's launch
+   env, matching the value the server was started with.
+3. `/health` (unauthenticated) still returns `200`/`503` in this state — the process and
+   its credentials are fine; only the client's auth is broken.
+
+---
+
 ## Credential values appearing in logs
 
 This should not happen — the sanitization processor redacts values whose keys match

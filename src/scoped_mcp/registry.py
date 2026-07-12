@@ -112,26 +112,42 @@ def _resolve_module_credentials(
     )
 
 
-def _write_health_file(module_health: dict, ops: object) -> None:
-    """Write module health JSON to SCOPED_MCP_HEALTH_FILE if the env var is set.
+def _write_health_file(
+    module_health: dict, ops: object, credential_health: dict | None = None
+) -> None:
+    """Write health JSON to SCOPED_MCP_HEALTH_FILE if the env var is set.
 
-    The file is written (or overwritten) at the end of each startup, giving
-    session-start hooks a stable location to check for degraded modules.
+    Written at the end of startup and again on every credential-health state
+    transition, giving an external watcher a stable, refreshable file to poll.
+    ``written_at`` lets that watcher detect a wedged process whose file has gone
+    stale. When a Vault credential source is present its ``credential_health()``
+    snapshot is folded in, and the top-level ``healthy`` reflects both module and
+    token health.
     """
     path = os.environ.get("SCOPED_MCP_HEALTH_FILE")
     if not path:
         return
     failed = {k: v for k, v in module_health.items() if v.get("status") != "running"}
+    token_healthy = credential_health is None or credential_health.get("token_healthy", True)
     data = {
         "modules": module_health,
         "failed_count": len(failed),
         "total_count": len(module_health),
-        "healthy": len(failed) == 0,
+        "healthy": len(failed) == 0 and token_healthy,
+        "written_at": datetime.now(UTC).isoformat(),
     }
+    if credential_health is not None:
+        data["credentials"] = credential_health
     try:
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
-        ops.info("health_file_written", path=path, failed=len(failed), total=len(module_health))
+        ops.info(
+            "health_file_written",
+            path=path,
+            failed=len(failed),
+            total=len(module_health),
+            token_healthy=token_healthy,
+        )
     except OSError as exc:
         ops.warning("health_file_write_failed", path=path, error=str(exc))
 
@@ -140,6 +156,7 @@ def _make_module_lifespan(
     module_instances: list[tuple[str, ToolModule]],
     vault_source: object = None,
     module_health: dict | None = None,
+    agent_ctx: AgentContext | None = None,
 ) -> object:
     """Build a FastMCP-compatible lifespan that calls startup/shutdown on all modules.
 
@@ -149,12 +166,42 @@ def _make_module_lifespan(
 
     module_instances: list of (manifest_name, instance) pairs
     vault_source: optional VaultCredentialSource; its token renewal task is started
-        before modules come up and cancelled on shutdown.
+        before modules come up and cancelled on shutdown. When present, a credential-
+        health transition callback is registered that rewrites the health file and
+        fires a Vault-independent ops alert on each healthy⇄degraded edge.
     module_health: mutable dict keyed by manifest_name. Caller pre-populates entries for
         discovery/init failures; this function updates entries for startup results.
+    agent_ctx: optional identity, included in ops-alert payloads.
     """
     if module_health is None:
         module_health = {}
+
+    agent_id = agent_ctx.agent_id if agent_ctx is not None else "unknown"
+    agent_type = agent_ctx.agent_type if agent_ctx is not None else "unknown"
+
+    async def _on_credential_health_change(health: dict) -> None:
+        """Fire once per token-health transition — rewrite health file + ops alert.
+
+        Runs inside the renewal loop's task; must be best-effort. _write_health_file
+        only touches the local filesystem and send_ops_alert never raises, so a
+        transition can rewrite the file and notify #alerts even while Vault is down.
+        """
+        ops = get_ops_logger()
+        _write_health_file(module_health, ops, credential_health=health)
+        from .ops_alert import send_ops_alert
+
+        token_healthy = health.get("token_healthy", True)
+        event = "vault_credentials_recovered" if token_healthy else "vault_credentials_degraded"
+        await send_ops_alert(
+            event,
+            {
+                "agent_id": agent_id,
+                "agent_type": agent_type,
+                "token_healthy": token_healthy,
+                "consecutive_failures": health.get("consecutive_failures"),
+                "reauth_enabled": health.get("reauth_enabled"),
+            },
+        )
 
     @asynccontextmanager
     async def lifespan(server):  # server arg required by FastMCP lifespan protocol
@@ -162,6 +209,15 @@ def _make_module_lifespan(
         started: list[tuple[str, ToolModule]] = []
         try:
             if vault_source is not None:
+                vault_source.set_health_change_callback(_on_credential_health_change)
+                from .ops_alert import alerting_configured
+
+                if not alerting_configured():
+                    ops.warning(
+                        "ops_alert_unconfigured",
+                        hint="set SCOPED_MCP_ALERT_MATRIX_{HOMESERVER,TOKEN,ROOM} to "
+                        "route credential-degradation alerts to #alerts",
+                    )
                 await vault_source.start_renewal()
 
             async def _start(manifest_name: str, mod: ToolModule) -> None:
@@ -193,7 +249,10 @@ def _make_module_lifespan(
                     total_count=len(module_health),
                 )
 
-            _write_health_file(module_health, ops)
+            startup_cred_health = (
+                vault_source.credential_health() if vault_source is not None else None
+            )
+            _write_health_file(module_health, ops, credential_health=startup_cred_health)
             yield {}
         finally:
             for manifest_name, mod in reversed(started):
@@ -276,6 +335,7 @@ def _register_status_tool(
     server: FastMCP,
     module_health: dict,
     manifest_snapshot: dict[str, Any] | None = None,
+    vault_source: object = None,
 ) -> None:
     """Register scoped_mcp_status as a built-in tool on the parent server.
 
@@ -285,6 +345,12 @@ def _register_status_tool(
     module_health is captured by closure and updated live by the lifespan, so the tool
     reflects startup failures that occur after build_server() returns. manifest_snapshot
     is likewise captured by closure so each call re-stats the manifest file fresh.
+
+    vault_source, when present, contributes a ``credentials`` block from its
+    ``credential_health()`` snapshot and drags top-level ``healthy`` to false when the
+    Vault token is unhealthy — so a process stuck in a permanent renewal-failure loop
+    can no longer report ``healthy: true``. stdio / env-credential agents pass None and
+    the block is omitted entirely.
     """
     manifest_snapshot = manifest_snapshot or {}
 
@@ -304,16 +370,61 @@ def _register_status_tool(
         Call this at session start to check for degraded modules before running tasks.
         """
         failed = {k: v for k, v in module_health.items() if v.get("status") != "running"}
+        healthy = len(failed) == 0
         result = {
             "modules": module_health,
             "failed_count": len(failed),
             "total_count": len(module_health),
-            "healthy": len(failed) == 0,
+            "healthy": healthy,
         }
+        # Credential health (Vault agents only). Never raises — a missing/None
+        # vault_source omits the block so stdio/env-cred agents are unaffected.
+        if vault_source is not None:
+            try:
+                cred_health = vault_source.credential_health()
+                result["credentials"] = cred_health
+                result["healthy"] = healthy and cred_health.get("token_healthy", True)
+            except Exception as exc:  # diagnostic tool must never fail
+                result["credentials"] = {"error": type(exc).__name__}
         result.update(_manifest_status_fields(manifest_snapshot))
         return result
 
     server.tool(name="scoped_mcp_status")(scoped_mcp_status)
+
+
+def _register_health_route(server: FastMCP, module_health: dict, vault_source: object) -> None:
+    """Register an unauthenticated GET /health route (http transport only).
+
+    FastMCP custom routes are unauthenticated by design and share the existing HTTP
+    port — no new port, no bearer — so an external prober (or a dumb load balancer)
+    can act on the status code alone: 200 when healthy, 503 when degraded.
+
+    SECURITY: the body exposes only booleans, counts, and derived timestamps — never
+    the client token, a lease id, or any secret. credential_health() is constructed to
+    the same contract; module details are reduced to failed/total counts here.
+    """
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse
+
+    @server.custom_route("/health", methods=["GET"])
+    async def health(request: Request) -> JSONResponse:
+        failed = {k: v for k, v in module_health.items() if v.get("status") != "running"}
+        healthy = len(failed) == 0
+        payload: dict[str, Any] = {
+            "status": "healthy",
+            "modules": {"failed_count": len(failed), "total_count": len(module_health)},
+            "written_at": datetime.now(UTC).isoformat(),
+        }
+        if vault_source is not None:
+            try:
+                cred_health = vault_source.credential_health()
+                payload["credentials"] = cred_health
+                healthy = healthy and cred_health.get("token_healthy", True)
+            except Exception as exc:  # a health probe must never 500
+                payload["credentials"] = {"error": type(exc).__name__}
+                healthy = False
+        payload["status"] = "healthy" if healthy else "degraded"
+        return JSONResponse(payload, status_code=200 if healthy else 503)
 
 
 def _warn_unmatched_patterns(manifest: Manifest, tool_names: list[str], ops: object) -> None:
@@ -364,6 +475,7 @@ def build_server(
     middleware: list[ToolCallMiddleware] | None = None,
     auth: Any = None,
     manifest_path: str | None = None,
+    transport: str = "stdio",
 ) -> FastMCP:
     """Discover modules, filter to manifest, register tools, return a ready FastMCP server.
 
@@ -390,6 +502,10 @@ def build_server(
         its mtime is captured here and re-checked on every scoped_mcp_status call, so
         a manifest edit made after this process started is visible as manifest_stale
         instead of silently having no effect until the next PM2 restart.
+
+    transport: "stdio" (default) or "http". Under "http" the unauthenticated /health
+        route is registered so an external prober can poll credential/module health on
+        the existing HTTP port; under stdio there is no HTTP server so it is skipped.
     """
     ops = get_ops_logger()
     ops.info("registry_start", agent_id=agent_ctx.agent_id, agent_type=agent_ctx.agent_type)
@@ -487,6 +603,7 @@ def build_server(
             [(name, inst) for name, _, inst in all_instances],
             vault_source=vault_source,
             module_health=module_health,
+            agent_ctx=agent_ctx,
         ),
         auth=auth,
     )
@@ -516,8 +633,27 @@ def build_server(
         server.mount(child, prefix=module_name)
 
     # Always-present status tool — no module namespace prefix.
-    _register_status_tool(server, module_health, manifest_snapshot)
+    _register_status_tool(server, module_health, manifest_snapshot, vault_source=vault_source)
     registered_tool_names.append("scoped_mcp_status")
+
+    # Unauthenticated /health route — only under http, where an external prober can
+    # reach it. Under stdio there is no HTTP server, so registration would be dead.
+    if transport == "http":
+        _register_health_route(server, module_health, vault_source)
+
+    # L4: OTel credential-health metrics for SigNoz (opt-in). No-op unless a Vault
+    # source is present and an OTLP endpoint is configured; the otel extra being
+    # absent (ImportError) degrades to nothing, matching the tracing path.
+    if vault_source is not None and os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+        try:
+            from .contrib.otel import init_credential_metrics
+
+            if init_credential_metrics(
+                vault_source.credential_health, agent_ctx.agent_id, agent_ctx.agent_type
+            ):
+                ops.info("credential_metrics_enabled")
+        except ImportError:
+            ops.warning("credential_metrics_unavailable", reason="otel_extra_missing")
 
     # Validate policy patterns against registered tool names (H-02).
     # Tool names follow the format {manifest_key}_{method} (underscores, not dots).
