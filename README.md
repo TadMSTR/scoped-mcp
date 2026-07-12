@@ -164,7 +164,11 @@ HTTP transport constraints:
 - **Per-connection audit identity** — each request resolves its own audit `session_id`
   from the MCP connection context, so a single long-lived process still emits distinct
   session ids for concurrent clients. The raw MCP session id is mapped to a stable,
-  non-reversible UUID that never leaks into logs.
+  non-reversible UUID that never leaks into logs. **Stateless clients** — one that
+  negotiates no MCP session id — used to collapse onto the process-global session id,
+  merging unrelated audit trails; the resolver now falls back to a stable per-connection
+  id derived from the TCP peer (`host:port`, itself `uuid5`-mapped) instead, so distinct
+  concurrent stateless connections still get distinct trails. (SMCP-16, v1.8.0)
 - **Manifest edits require a restart** — module discovery (`_discover_tools()`) runs
   exactly once, when the process starts. Under `stdio`, every new client connection was
   a fresh subprocess, so a manifest edit took effect automatically on the next session.
@@ -227,6 +231,7 @@ process cannot grow an unbounded log — tune with `SCOPED_MCP_LOG_MAX_BYTES` (d
 
 - **Self-heal re-auth** — when renewal fails with a permission/403 class error or crosses the critical-failure threshold, scoped-mcp mints a fresh token with a full AppRole login. This covers the hard `token_max_ttl` ceiling that `renew-self` alone can never exceed. **Opt-in via `SCOPED_MCP_VAULT_REAUTH=1`**, and only safe when the AppRole has a reusable secret_id (`secret_id_num_uses=0`) — re-logging in with a single-use secret_id would burn the only credential. When unset, re-auth is a no-op and the failure surfaces through the layers below.
 - **Out-of-band alert** — on each healthy⇄degraded transition scoped-mcp posts a Vault-independent alert to Matrix, configured from plain env (`SCOPED_MCP_ALERT_MATRIX_HOMESERVER`, `SCOPED_MCP_ALERT_MATRIX_TOKEN`, `SCOPED_MCP_ALERT_MATRIX_ROOM`) so it still fires when Vault is the broken dependency. A burst of `/mcp` `401`s (a misconfigured client bearer) also fires one rate-limited alert — the one signal a session-start `scoped_mcp_status` check can't catch, because a 401'd client never reaches any tool. If no alert channel is configured, a warning is logged once at startup.
+- **ntfy fallback** (v1.8.0, SMCP-27) — Matrix is the primary sink; if it's down or unconfigured, the same alert falls back to an ntfy topic via `SCOPED_MCP_ALERT_NTFY_URL` (+ optional `SCOPED_MCP_ALERT_NTFY_TOKEN`). This is a fallback, not fan-out — on the happy path (Matrix accepts) ntfy is never contacted, and the fire-once-per-transition dedup still yields one alert overall. Because ntfy is the one alert path that leaves the host, the token is withheld (never sent) when the configured URL isn't `https://`, so a misconfigured plaintext URL can't leak it.
 - **`/health` endpoint** — under `--transport http`, an unauthenticated `GET /health` on the existing port returns `200` when healthy and `503` when degraded (booleans/counts only, never token or lease values), so a dumb prober or load balancer can act on the status code alone.
 - **OTel metrics** — when `OTEL_EXPORTER_OTLP_ENDPOINT` is set (and the `[otel]` extra is installed), two observable gauges (`scoped_mcp.credentials.healthy`, `scoped_mcp.vault.consecutive_renewal_failures`) export to your collector for a durable, queryable alert rule. No-op if the endpoint or extra is absent.
 
