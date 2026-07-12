@@ -160,6 +160,7 @@ def test_credential_gauge_values_missing_keys_default_healthy() -> None:
 
 def test_init_credential_metrics_registers_and_observes() -> None:
     """With an in-memory reader, both gauges register and observe live values."""
+    pytest.importorskip("opentelemetry.sdk.metrics")  # [otel] extra
     from opentelemetry.sdk.metrics import MeterProvider
     from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
@@ -188,6 +189,7 @@ def test_init_credential_metrics_registers_and_observes() -> None:
 
 def test_init_credential_metrics_callback_survives_bad_health_fn() -> None:
     """A raising health function must not break metric collection."""
+    pytest.importorskip("opentelemetry.sdk.metrics")  # [otel] extra
     from opentelemetry.sdk.metrics import MeterProvider
     from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
