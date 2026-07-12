@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-07-12
+
 ### Added
 
 - **SMCP-27 — ntfy fallback sink for ops-alert** (`ops_alert.py`): the Vault-independent
