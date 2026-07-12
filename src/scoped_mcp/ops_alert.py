@@ -176,7 +176,13 @@ async def _send_ntfy(url: str, token: str, event: str, body: str) -> bool:
     safe_title = f"scoped-mcp: {event}".replace("\r", "").replace("\n", " ")[:250]
     headers = {"Title": safe_title, "Priority": "high", "Tags": "rotating_light"}
     if token:
-        headers["Authorization"] = f"Bearer {token}"
+        # ntfy is the one scoped-mcp path that leaves the host, so never transmit the topic
+        # token over a cleartext scheme (audit INFO-1). On a misconfigured http:// endpoint,
+        # drop the token and still attempt the (unauthenticated) send rather than leak it.
+        if url.lower().startswith("https://"):
+            headers["Authorization"] = f"Bearer {token}"
+        else:
+            _log.warning("ops_alert_ntfy_insecure_scheme", reason="token_withheld_over_non_https")
 
     try:
         async with httpx.AsyncClient(timeout=_ALERT_TIMEOUT_SECONDS) as client:

@@ -270,6 +270,21 @@ async def test_noop_when_neither_configured(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_ntfy_withholds_token_over_non_https(monkeypatch: pytest.MonkeyPatch) -> None:
+    # INFO-1: a misconfigured http:// endpoint must not carry the bearer token in cleartext.
+    # The alert is still attempted (best-effort), just unauthenticated.
+    _clear_matrix_env(monkeypatch)
+    monkeypatch.setenv("SCOPED_MCP_ALERT_NTFY_URL", "http://ntfy.insecure.example/forge")
+    monkeypatch.setenv("SCOPED_MCP_ALERT_NTFY_TOKEN", "ntfy-token")
+    rec = _install_recorder(monkeypatch, ntfy_ok=True)
+
+    ok = await send_ops_alert("vault_credentials_degraded", {})
+    assert ok is True
+    assert rec.calls == ["ntfy"]
+    assert "Authorization" not in rec.last_ntfy["headers"]
+
+
+@pytest.mark.asyncio
 async def test_ntfy_network_error_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
     # Matrix down AND ntfy down — both attempted, both swallowed, never raises.
     _set_matrix_env(monkeypatch)

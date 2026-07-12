@@ -16,7 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (Matrix accepts) ntfy is never contacted; the fire-once-per-transition dedup still yields
   one alert overall. Deploying ntfy on a host external to forge keeps the fallback alive
   even when forge itself is degraded. Like every ops-alert sink it never touches Vault and
-  never raises into the caller.
+  never raises into the caller. Because ntfy is the one scoped-mcp path that leaves the
+  host, the topic token is withheld (never sent) when the configured URL is not `https://`,
+  so an operator misconfiguration cannot leak it in cleartext (audit INFO-1).
 
 ### Fixed
 
