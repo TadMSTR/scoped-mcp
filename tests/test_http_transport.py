@@ -87,15 +87,37 @@ def test_http_app_rejects_unauthenticated_requests() -> None:
 
 
 @contextmanager
-def _fake_request(session_id: str | None = None, agent_id_claim: str | None = None):
-    """Patch the FastMCP per-request dependencies the resolver reads lazily."""
+def _fake_request(
+    session_id: str | None = None,
+    agent_id_claim: str | None = None,
+    peer: tuple[str, int] | None = None,
+):
+    """Patch the FastMCP per-request dependencies the resolver reads lazily.
+
+    ``peer`` supplies a fake HTTP request whose ``.client`` is (host, port) — used to
+    exercise the stateless-client connection fallback (F-03 / SMCP-16). When ``peer`` is
+    None, ``get_http_request`` is patched to raise, mimicking a stdio / no-request context.
+    """
     ctx = None if session_id is None else type("Ctx", (), {"session_id": session_id})()
     token = None
     if agent_id_claim is not None:
         token = type("Tok", (), {"claims": {"agent_id": agent_id_claim}})()
+
+    if peer is None:
+
+        def _no_request():
+            raise RuntimeError("no active HTTP request")
+
+        http_patch = patch("fastmcp.server.dependencies.get_http_request", side_effect=_no_request)
+    else:
+        client = type("Client", (), {"host": peer[0], "port": peer[1]})()
+        request = type("Req", (), {"client": client})()
+        http_patch = patch("fastmcp.server.dependencies.get_http_request", return_value=request)
+
     with (
         patch("fastmcp.server.dependencies.get_context", return_value=ctx),
         patch("fastmcp.server.dependencies.get_access_token", return_value=token),
+        http_patch,
     ):
         yield
 
@@ -134,6 +156,40 @@ def test_two_connections_get_distinct_session_ids() -> None:
     with _fake_request(session_id="conn-B"):
         b = resolve_request_identity("dev", "proc-sess")
     assert a.session_id != b.session_id  # distinct connections → distinct audit ids
+
+
+def test_stateless_client_uses_per_connection_id_not_process_default() -> None:
+    """F-03 / SMCP-16: a client with no MCP session id gets a connection-derived id,
+    not the shared process default that would merge distinct clients' trails."""
+    with _fake_request(session_id=None, peer=("127.0.0.1", 51000)):
+        ident = resolve_request_identity("dev", "proc-sess")
+    assert ident.session_id == _normalize_session_id("conn:127.0.0.1:51000")
+    assert ident.session_id != "proc-sess"
+
+
+def test_two_stateless_connections_get_distinct_session_ids() -> None:
+    """Two concurrent stateless connections (distinct TCP peers) must not share an id."""
+    with _fake_request(session_id=None, peer=("127.0.0.1", 51000)):
+        a = resolve_request_identity("dev", "proc-sess")
+    with _fake_request(session_id=None, peer=("127.0.0.1", 51001)):
+        b = resolve_request_identity("dev", "proc-sess")
+    assert a.session_id != b.session_id
+
+
+def test_same_stateless_connection_is_stable_across_calls() -> None:
+    """The same peer (kept-alive connection) yields the same audit id on every call."""
+    with _fake_request(session_id=None, peer=("127.0.0.1", 51000)):
+        a = resolve_request_identity("dev", "proc-sess")
+    with _fake_request(session_id=None, peer=("127.0.0.1", 51000)):
+        b = resolve_request_identity("dev", "proc-sess")
+    assert a.session_id == b.session_id
+
+
+def test_stateless_client_without_peer_falls_back_to_process_default() -> None:
+    """No session id and no resolvable peer → the process default (never raises)."""
+    with _fake_request(session_id=None, peer=None):
+        ident = resolve_request_identity("dev", "proc-sess")
+    assert ident.session_id == "proc-sess"
 
 
 def test_normalized_session_id_survives_audit_sanitizer() -> None:

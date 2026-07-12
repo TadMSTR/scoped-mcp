@@ -212,3 +212,78 @@ def test_grafana_rejects_non_list_allowlist(agent_ctx: AgentContext) -> None:
             },
             config={"allowed_datasources": "prom-agent"},  # type: ignore[dict-item]
         )
+
+
+# ── Additional CRUD coverage (respx) ─────────────────────────────────────────
+
+
+def _mock_dashboard(uid: str = "dash-1", folder_uid: str = "folder-abc"):
+    """Mock GET /api/dashboards/uid/<uid> in the agent's folder."""
+    respx.get(f"http://grafana.test/api/dashboards/uid/{uid}").mock(
+        return_value=Response(
+            200,
+            json={"meta": {"folderUid": folder_uid}, "dashboard": {"uid": uid, "panels": []}},
+        )
+    )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_dashboard_in_folder(grafana_module: GrafanaModule) -> None:
+    _mock_folder_list()
+    _mock_dashboard()
+    result = await grafana_module.get_dashboard("dash-1")
+    assert result["dashboard"]["uid"] == "dash-1"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_update_dashboard_preserves_and_overwrites(grafana_module: GrafanaModule) -> None:
+    _mock_folder_list()
+    _mock_dashboard()
+    route = respx.post("http://grafana.test/api/dashboards/db").mock(
+        return_value=Response(200, json={"uid": "dash-1", "status": "success"})
+    )
+    result = await grafana_module.update_dashboard("dash-1", [{"type": "table"}])
+    assert result["uid"] == "dash-1"
+    import json
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["overwrite"] is True
+    assert sent["dashboard"]["panels"] == [{"type": "table"}]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_delete_dashboard_in_folder(grafana_module: GrafanaModule) -> None:
+    _mock_folder_list()
+    _mock_dashboard()
+    respx.delete("http://grafana.test/api/dashboards/uid/dash-1").mock(
+        return_value=Response(200, json={"message": "deleted"})
+    )
+    assert await grafana_module.delete_dashboard("dash-1") is True
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_create_alert_rule_in_folder(grafana_module: GrafanaModule) -> None:
+    _mock_folder_list()
+    route = respx.post("http://grafana.test/api/v1/provisioning/alert-rules").mock(
+        return_value=Response(201, json={"uid": "alert-1"})
+    )
+    result = await grafana_module.create_alert_rule("high-cpu", {"data": [], "for": "10m"})
+    assert result["uid"] == "alert-1"
+    import json
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["title"] == "high-cpu"
+    assert sent["for"] == "10m"
+
+
+def test_validate_uid_and_datasource_name_reject_bad() -> None:
+    from scoped_mcp.modules.grafana import _validate_datasource_name, _validate_uid
+
+    with pytest.raises(ValueError, match="Invalid Grafana UID"):
+        _validate_uid("has spaces")
+    with pytest.raises(ValueError, match="Invalid datasource name"):
+        _validate_datasource_name("bad/name")

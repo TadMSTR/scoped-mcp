@@ -40,6 +40,31 @@ def _normalize_session_id(raw: str) -> str:
     return str(uuid.uuid5(_SESSION_ID_NAMESPACE, raw))
 
 
+def _connection_session_id(default_session_id: str) -> str:
+    """Per-connection audit id for a stateless HTTP client that negotiated no session id.
+
+    F-03 / SMCP-16: under the long-lived HTTP transport a client that presents no MCP
+    session id would otherwise fall back to the process-global ``SESSION_ID`` — so every
+    such client shares one audit ``session_id`` and their trails merge. Derive the id from
+    the TCP peer (client ``host:port``) of the in-flight request instead: distinct
+    concurrent connections get distinct ids, and a kept-alive connection stays stable
+    across calls. The peer address is run through the same ``uuid5`` mapping as a real
+    session id, so nothing connection-level leaks into a log. Falls back to the process
+    default when no peer address is resolvable (e.g. stdio, or a request with no client).
+    """
+    try:
+        from fastmcp.server.dependencies import get_http_request
+
+        client = getattr(get_http_request(), "client", None)
+        host = getattr(client, "host", None)
+        port = getattr(client, "port", None)
+        if host is not None and port is not None:
+            return _normalize_session_id(f"conn:{host}:{port}")
+    except Exception:
+        pass  # no HTTP request in context (stdio) — fall through to the process default
+    return default_session_id
+
+
 @dataclass(frozen=True)
 class AgentContext:
     """Immutable identity for the running agent.
@@ -124,6 +149,10 @@ def resolve_request_identity(default_agent_id: str, default_session_id: str) -> 
         sid = getattr(get_context(), "session_id", None)
         if sid:
             session_id = _normalize_session_id(str(sid))
+        else:
+            # Stateless HTTP client with no MCP session id — derive a per-connection id so
+            # distinct clients don't collapse onto the shared process default (F-03 / SMCP-16).
+            session_id = _connection_session_id(default_session_id)
     except Exception:
         pass  # no active FastMCP context (stdio / unit test) — keep default
 

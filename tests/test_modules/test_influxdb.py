@@ -472,3 +472,93 @@ def test_parse_flux_csv_basic() -> None:
 
 def test_parse_flux_csv_empty() -> None:
     assert _parse_flux_csv("") == []
+
+
+# ── HTTP happy paths (respx) ─────────────────────────────────────────────────
+
+_FLUX_CSV = ",result,table,_value\r\n,_result,0,cpu\r\n,_result,0,mem\r\n"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_query_posts_flux_and_parses_csv(influx_module: InfluxDBModule) -> None:
+    route = respx.post("http://influxdb.test/api/v2/query").mock(
+        return_value=Response(200, text=",result,table,_value\r\n,_result,0,42\r\n")
+    )
+    rows = await influx_module.query(
+        "metrics", [{"field": "_measurement", "op": "==", "value": "cpu"}]
+    )
+    assert route.called
+    assert rows[0]["_value"] == "42"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_list_measurements_returns_values(influx_module: InfluxDBModule) -> None:
+    respx.post("http://influxdb.test/api/v2/query").mock(return_value=Response(200, text=_FLUX_CSV))
+    measurements = await influx_module.list_measurements("metrics")
+    assert measurements == ["cpu", "mem"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_schema_returns_fields_and_tags(influx_module: InfluxDBModule) -> None:
+    respx.post("http://influxdb.test/api/v2/query").mock(return_value=Response(200, text=_FLUX_CSV))
+    schema = await influx_module.get_schema("metrics", "cpu")
+    assert schema["fields"] == ["cpu", "mem"]
+    assert schema["tags"] == ["cpu", "mem"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_create_bucket_prefixes_and_resolves_org(influx_module: InfluxDBModule) -> None:
+    respx.get("http://influxdb.test/api/v2/orgs").mock(
+        return_value=Response(200, json={"orgs": [{"id": "org-123"}]})
+    )
+    route = respx.post("http://influxdb.test/api/v2/buckets").mock(
+        return_value=Response(201, json={"id": "b1"})
+    )
+    ok = await influx_module.create_bucket("scratch", retention_days=7)
+    assert ok is True
+    # Bucket name is namespaced with the agent id, org id resolved via GET /orgs.
+    assert route.calls.last.request.content.decode().find("test-agent-1-scratch") != -1
+    assert "test-agent-1-scratch" in influx_module._runtime_buckets
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_create_bucket_raises_when_org_missing(influx_module: InfluxDBModule) -> None:
+    respx.get("http://influxdb.test/api/v2/orgs").mock(
+        return_value=Response(200, json={"orgs": []})
+    )
+    with pytest.raises(ValueError, match="not found in InfluxDB"):
+        await influx_module.create_bucket("scratch")
+
+
+# ── write_points input validation ────────────────────────────────────────────
+
+
+def _wp(influx_module: InfluxDBModule, points):
+    import anyio
+
+    return anyio.run(influx_module.write_points, "metrics", "cpu", points)
+
+
+def test_write_points_rejects_non_list(influx_module: InfluxDBModule) -> None:
+    with pytest.raises(ValueError, match="points must be a non-empty list"):
+        _wp(influx_module, {})
+
+
+def test_write_points_rejects_non_dict_point(influx_module: InfluxDBModule) -> None:
+    with pytest.raises(ValueError, match=r"points\[0\] must be a dict"):
+        _wp(influx_module, ["not-a-dict"])
+
+
+def test_write_points_rejects_non_dict_tags(influx_module: InfluxDBModule) -> None:
+    with pytest.raises(ValueError, match="tags must be a dict"):
+        _wp(influx_module, [{"tags": "nope", "fields": {"x": 1}}])
+
+
+def test_write_points_rejects_non_int_time(influx_module: InfluxDBModule) -> None:
+    with pytest.raises(ValueError, match="time must be an int"):
+        _wp(influx_module, [{"fields": {"x": 1}, "time": "soon"}])
