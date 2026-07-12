@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-07-12
+
+### Added
+
+- **SMCP-27 — ntfy fallback sink for ops-alert** (`ops_alert.py`): the Vault-independent
+  operational alerter now falls back to an ntfy topic when the primary Matrix sink is down
+  or unconfigured. Configured from plain env (`SCOPED_MCP_ALERT_NTFY_URL`, optional
+  `SCOPED_MCP_ALERT_NTFY_TOKEN`). This is a **fallback, not fan-out** — on the happy path
+  (Matrix accepts) ntfy is never contacted; the fire-once-per-transition dedup still yields
+  one alert overall. Deploying ntfy on a host external to forge keeps the fallback alive
+  even when forge itself is degraded. Like every ops-alert sink it never touches Vault and
+  never raises into the caller. Because ntfy is the one scoped-mcp path that leaves the
+  host, the topic token is withheld (never sent) when the configured URL is not `https://`,
+  so an operator misconfiguration cannot leak it in cleartext (audit INFO-1).
+
+### Fixed
+
+- **SMCP-16 / F-03 — stateless HTTP clients no longer share an audit trail**
+  (`identity.py`): under the long-lived HTTP transport a client that negotiated no MCP
+  session id fell back to the process-global `SESSION_ID`, so every such client collapsed
+  onto one audit `session_id` and their trails merged. The resolver now derives a stable
+  per-connection id from the TCP peer (`host:port`) — distinct concurrent connections get
+  distinct ids, a kept-alive connection stays stable across calls, and the address is run
+  through the same non-reversible `uuid5` mapping as a real session id so nothing
+  connection-level leaks into a log. Falls back to the process default only when no peer is
+  resolvable (stdio). Resolves the finding deferred from the v1.6.0 HTTP audit.
+
+### Changed
+
+- **Test coverage lifted to ~90%** and the coverage gate raised from `fail_under = 82` to
+  `88`. New unit tests cover `contrib/otel.py` (observable-gauge registration + SDK-provider
+  install path), `contrib/response_filter.py` (base64/url decode candidates), `modules/influxdb.py`
+  and `modules/grafana.py` (HTTP CRUD happy paths + write-points input validation), `audit.py`
+  (rotating file sinks + error-path agent-bus emit), and `server.py` (`_build_middleware`,
+  the manifest-`validate` CLI, and `main()` dispatch). CI now installs the `[otel]` extra so
+  the credential-metrics tests execute rather than skip. `server.py`'s `_run_serve` async
+  serve loop and signal handlers are intentionally left uncovered (they need a live-transport
+  integration harness for low value).
+
 ## [1.7.0] — 2026-07-12
 
 ### Added

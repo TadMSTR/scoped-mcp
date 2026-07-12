@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "scoped-mcp"
-version = "1.7.0"
+version = "1.8.0"
 description = "Per-agent scoped MCP tool proxy with credential isolation and audit logging"
 readme = "README.md"
 license = "MIT"
@@ -82,5 +82,8 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.coverage.report]
-fail_under = 82
+# Gate sits ~2 points under actual CI coverage (~90%) to avoid false reds from small
+# fluctuations. server.py's _run_serve async loop + signal handlers are intentionally left
+# uncovered (they need a live-transport integration harness for low value).
+fail_under = 88
 show_missing = true

@@ -350,3 +350,69 @@ async def test_agent_bus_expands_tilde_in_comms_dir(agent_ctx: AgentContext) -> 
     finally:
         configure_audit(agent_bus_emit=False, agent_bus_comms_dir=None)
         shutil.rmtree(target, ignore_errors=True)
+
+
+# ── configure_logging file sinks + error-path agent-bus emit ──────────────────
+
+
+def test_configure_logging_attaches_rotating_file_sinks(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """audit_log / ops_log paths attach a size-based RotatingFileHandler to each stream."""
+    import logging
+    import logging.handlers
+
+    import structlog
+
+    from scoped_mcp.audit import configure_logging
+
+    monkeypatch.setenv("SCOPED_MCP_LOG_MAX_BYTES", "2048")
+    monkeypatch.setenv("SCOPED_MCP_LOG_BACKUPS", "2")
+
+    # configure_logging reconfigures structlog and the root handler globally; snapshot and
+    # restore everything so this test can't perturb sibling tests' log capture.
+    saved_structlog = structlog.get_config()
+    root = logging.getLogger()
+    saved_root_handlers = list(root.handlers)
+    audit_logger = logging.getLogger("audit")
+    ops_logger = logging.getLogger("ops")
+    before = {id(h) for h in audit_logger.handlers + ops_logger.handlers}
+    try:
+        configure_logging(audit_log=str(tmp_path / "audit.log"), ops_log=str(tmp_path / "ops.log"))
+        assert any(
+            isinstance(h, logging.handlers.RotatingFileHandler) for h in audit_logger.handlers
+        )
+        assert any(isinstance(h, logging.handlers.RotatingFileHandler) for h in ops_logger.handlers)
+    finally:
+        structlog.configure(**saved_structlog)
+        root.handlers[:] = saved_root_handlers
+        for lg in (audit_logger, ops_logger):
+            for h in list(lg.handlers):
+                if id(h) not in before:
+                    lg.removeHandler(h)
+                    h.close()
+
+
+@pytest.mark.asyncio
+async def test_audited_emits_agent_bus_error_event(
+    agent_ctx: AgentContext, tmp_path: pathlib.Path
+) -> None:
+    """A failing tool still fires an agent-bus event, tagged outcome=error."""
+    import json
+
+    configure_audit(agent_bus_emit=True, agent_bus_comms_dir=str(tmp_path))
+    module = _MockModule(agent_ctx)
+    try:
+        with pytest.raises(RuntimeError):
+            await _make_tool(module, raise_exc=RuntimeError("boom"))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0.05)
+
+        log_files = list((tmp_path / "logs").glob("*-session.jsonl"))
+        assert log_files, "no session JSONL written"
+        events = [json.loads(line) for line in log_files[0].read_text().splitlines()]
+        err_events = [e for e in events if e["metadata"]["outcome"] == "error"]
+        assert err_events
+        assert err_events[0]["metadata"]["error"] == "RuntimeError"
+    finally:
+        configure_audit(agent_bus_emit=False, agent_bus_comms_dir=None)

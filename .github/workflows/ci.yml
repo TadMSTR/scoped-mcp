@@ -38,7 +38,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install ".[dev,all]"
+          pip install ".[dev,all,otel]"
           pip install aiosqlite respx aiosmtplib
 
       - name: Lint (ruff)

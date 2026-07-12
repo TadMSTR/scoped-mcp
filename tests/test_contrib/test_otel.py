@@ -212,3 +212,55 @@ def test_init_credential_metrics_callback_survives_bad_health_fn() -> None:
                 for point in metric.data.data_points:
                     seen[metric.name] = point.value
     assert seen["scoped_mcp.credentials.healthy"] == 0.0
+
+
+def _patch_offline_metric_export(monkeypatch, protocol: str) -> None:
+    """Neuter the OTLP exporter + periodic reader so the install branch builds no live
+    network export thread (which would spew connection-refused retries and leak a thread).
+
+    A ``PeriodicExportingMetricReader`` wired to a real OTLP exporter starts a background
+    export loop to localhost:4317/4318. Swap it for an in-memory reader and stub the
+    exporter so the branch's construction path is exercised without any socket.
+    """
+    from opentelemetry import metrics
+    from opentelemetry.sdk.metrics import export as sdk_export
+
+    monkeypatch.setattr(metrics, "set_meter_provider", lambda p: None)
+    monkeypatch.setattr(
+        sdk_export,
+        "PeriodicExportingMetricReader",
+        lambda *a, **k: sdk_export.InMemoryMetricReader(),
+    )
+    if protocol.startswith("http"):
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", protocol)
+        exp_mod = pytest.importorskip("opentelemetry.exporter.otlp.proto.http.metric_exporter")
+    else:
+        monkeypatch.delenv("OTEL_EXPORTER_OTLP_PROTOCOL", raising=False)
+        exp_mod = pytest.importorskip("opentelemetry.exporter.otlp.proto.grpc.metric_exporter")
+    monkeypatch.setattr(exp_mod, "OTLPMetricExporter", lambda *a, **k: object())
+
+
+def test_init_credential_metrics_installs_sdk_provider_grpc(monkeypatch) -> None:
+    """meter_provider=None + a non-SDK global provider triggers the install branch (grpc)."""
+    pytest.importorskip("opentelemetry.sdk.metrics")
+    _patch_offline_metric_export(monkeypatch, protocol="grpc")
+
+    from scoped_mcp.contrib import otel
+
+    ok = otel.init_credential_metrics(
+        lambda: {"token_healthy": True, "consecutive_failures": 0}, "agent-x", "dev"
+    )
+    assert ok is True
+
+
+def test_init_credential_metrics_installs_sdk_provider_http(monkeypatch) -> None:
+    """The http OTLP protocol selects the http metric exporter in the install branch."""
+    pytest.importorskip("opentelemetry.sdk.metrics")
+    _patch_offline_metric_export(monkeypatch, protocol="http/protobuf")
+
+    from scoped_mcp.contrib import otel
+
+    ok = otel.init_credential_metrics(
+        lambda: {"token_healthy": True, "consecutive_failures": 0}, "agent-x", "dev"
+    )
+    assert ok is True
