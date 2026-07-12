@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-07-12
+
 ### Added
 
 - **SMCP-26 — Vault credential resilience + silent-failure alerting**: turns a silent,
@@ -50,6 +52,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   derived from `importlib.metadata.version("scoped-mcp")` — the installed package's own
   metadata is the single source of truth, so this can't drift from `pyproject.toml`
   again. Falls back to `"0.0.0+unknown"` if run from an uninstalled source checkout.
+
+### Security
+
+- **Health file written atomically** (`registry.py`): the now-refreshable health file is
+  written to a sibling `.tmp` and `os.replace()`d into place, so the external prober that
+  polls it can never read half-serialized JSON (pre-audit baseline FW-01).
+- **401-burst tracking deque bounded** (`http_auth.py`): `_recent_401s` is capped
+  (`maxlen=256`, well above the burst threshold) so a sustained local flood of bad bearers
+  cannot inflate the sliding window; burst detection is unchanged (audit INFO-1).
 
 ## [1.6.1] — 2026-07-09
 
