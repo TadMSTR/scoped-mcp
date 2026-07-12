@@ -322,6 +322,17 @@ def test_burst_detector_prunes_sliding_window() -> None:
     assert len(v._recent_401s) == 1
 
 
+def test_burst_detector_deque_is_bounded() -> None:
+    """Audit INFO-1: a sustained flood cannot inflate the tracked-failure deque."""
+    v = BearerTokenVerifier(expected_token="secret", agent_id="research")
+    # Far more failures than the cap, all inside the window.
+    for i in range(v._BURST_MAX_TRACKED * 3):
+        v._register_failure_and_check(0.0)
+    assert len(v._recent_401s) <= v._BURST_MAX_TRACKED
+    # Detection still works — the count stays at/above the threshold.
+    assert len(v._recent_401s) >= v._BURST_THRESHOLD
+
+
 def test_burst_detector_refires_after_cooldown() -> None:
     """Once the cooldown elapses a fresh burst alerts again."""
     v = BearerTokenVerifier(expected_token="secret", agent_id="research")

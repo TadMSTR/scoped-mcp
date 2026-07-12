@@ -55,6 +55,10 @@ class BearerTokenVerifier(TokenVerifier):
     _BURST_WINDOW_SECONDS = 60.0
     _BURST_THRESHOLD = 5
     _BURST_COOLDOWN_SECONDS = 300.0
+    # Hard cap on tracked 401 timestamps (defense-in-depth, audit INFO-1): under a
+    # sustained loopback flood the window would otherwise hold ~(rate x window) entries.
+    # Any value well above _BURST_THRESHOLD preserves detection while bounding memory.
+    _BURST_MAX_TRACKED = 256
 
     def __init__(self, expected_token: str, agent_id: str, agent_type: str = "unknown") -> None:
         super().__init__()
@@ -66,7 +70,7 @@ class BearerTokenVerifier(TokenVerifier):
         self._expected_token = expected_token
         self._agent_id = agent_id
         self._agent_type = agent_type
-        self._recent_401s: deque[float] = deque()
+        self._recent_401s: deque[float] = deque(maxlen=self._BURST_MAX_TRACKED)
         self._last_alert_monotonic: float | None = None
         # Strong references to in-flight alert tasks so a detached best-effort send
         # cannot be garbage-collected before it runs.
