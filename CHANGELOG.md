@@ -7,13 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-07-12
+
+### Added
+
+- **SMCP-26 — Vault credential resilience + silent-failure alerting**: turns a silent,
+  days-long credential failure into something that self-recovers and fails loud on
+  independent channels. Four layers:
+  - **L1 self-heal re-auth** (`credentials_vault.py`): on a permission/403-class renewal
+    failure or a sustained failure streak, a full AppRole re-login mints a fresh token —
+    covering the hard `token_max_ttl` (24h) ceiling that `renew-self` alone can never
+    exceed. Gated on `SCOPED_MCP_VAULT_REAUTH=1` and safe only for a reusable secret_id
+    (`secret_id_num_uses=0`); a guard refuses to re-login otherwise. The secret_id is no
+    longer held as instance state — `_login()` re-reads it from the environment at call
+    time. Adds `credential_health()`.
+  - **L2 loud in-process** (`registry.py`): `scoped_mcp_status` gains a `credentials`
+    block and drags top-level `healthy` to false when the token is unhealthy; the health
+    file is now refreshable (rewritten on each health transition, with `written_at`); and
+    a Vault-independent Matrix ops-alert (`ops_alert.py`) fires once per healthy⇄degraded
+    transition, configured from plain env (`SCOPED_MCP_ALERT_MATRIX_*`) so it works when
+    Vault is the broken dependency. Sink is pluggable (ntfy fallback deferred to SMCP-27).
+  - **L2b 401-burst detection** (`http_auth.py`, SMCP-28 class): the bearer verifier
+    counts recent `401`s in a sliding window and fires one rate-limited ops-alert on a
+    burst — the misconfigured-client signal a session-start status check can't catch,
+    because a 401'd client never reaches any tool.
+  - **L3 `/health` route** (`registry.py`): under `--transport http`, an unauthenticated
+    `GET /health` returns `200`/`503` (booleans/counts only — never token or lease values)
+    so an external prober or load balancer can act on the status code alone.
+  - **L4 OTel metrics** (`contrib/otel.py`): observable gauges
+    `scoped_mcp.credentials.healthy` and `scoped_mcp.vault.consecutive_renewal_failures`
+    export to SigNoz when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, for a durable, queryable
+    alert rule. No-op when the endpoint or `[otel]` extra is absent.
+
 ### Fixed
+
+- **`examples/vault/vault-policy.hcl` documented only `read`** and said nothing about
+  renew-self. Added a commented `auth/token/renew-self` rule plus notes on when it's
+  needed (`token_no_default_policy = true`) and on the `token_max_ttl` ceiling vs.
+  `token_period` / app-side re-auth — so a downstream user following the example doesn't
+  hit a silent renewal failure.
 
 - **SMCP-25 — `__version__` drifted from `pyproject.toml`** (`__init__.py`): was a
   hardcoded string last bumped at `0.3.3` while the package moved on to `1.6.1`. Now
   derived from `importlib.metadata.version("scoped-mcp")` — the installed package's own
   metadata is the single source of truth, so this can't drift from `pyproject.toml`
   again. Falls back to `"0.0.0+unknown"` if run from an uninstalled source checkout.
+
+### Security
+
+- **Health file written atomically** (`registry.py`): the now-refreshable health file is
+  written to a sibling `.tmp` and `os.replace()`d into place, so the external prober that
+  polls it can never read half-serialized JSON (pre-audit baseline FW-01).
+- **401-burst tracking deque bounded** (`http_auth.py`): `_recent_401s` is capped
+  (`maxlen=256`, well above the burst threshold) so a sustained local flood of bad bearers
+  cannot inflate the sliding window; burst detection is unchanged (audit INFO-1).
 
 ## [1.6.1] — 2026-07-09
 

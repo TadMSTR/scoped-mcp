@@ -126,3 +126,89 @@ async def test_otel_redacts_exception_message_in_status(agent_ctx, mock_tracer):
     call_args = span.set_status.call_args[0][0]  # the Status object
     status_desc = call_args.description or ""
     assert "Bearer eyJ" not in status_desc
+
+
+# ── L4: credential-health metrics (SMCP-26) ───────────────────────────────────
+
+
+def test_credential_gauge_values_healthy() -> None:
+    from scoped_mcp.contrib.otel import _credential_gauge_values
+
+    healthy, failures = _credential_gauge_values({"token_healthy": True, "consecutive_failures": 0})
+    assert healthy == 1.0
+    assert failures == 0.0
+
+
+def test_credential_gauge_values_degraded() -> None:
+    from scoped_mcp.contrib.otel import _credential_gauge_values
+
+    healthy, failures = _credential_gauge_values(
+        {"token_healthy": False, "consecutive_failures": 5}
+    )
+    assert healthy == 0.0
+    assert failures == 5.0
+
+
+def test_credential_gauge_values_missing_keys_default_healthy() -> None:
+    from scoped_mcp.contrib.otel import _credential_gauge_values
+
+    # A partial snapshot must not raise; absent token_healthy defaults to healthy.
+    healthy, failures = _credential_gauge_values({})
+    assert healthy == 1.0
+    assert failures == 0.0
+
+
+def test_init_credential_metrics_registers_and_observes() -> None:
+    """With an in-memory reader, both gauges register and observe live values."""
+    pytest.importorskip("opentelemetry.sdk.metrics")  # [otel] extra
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    from scoped_mcp.contrib.otel import init_credential_metrics
+
+    # Inject an explicit provider — set_meter_provider is process-global and one-shot,
+    # so tests must not mutate it.
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+
+    state = {"token_healthy": False, "consecutive_failures": 3}
+    ok = init_credential_metrics(lambda: dict(state), "agent-x", "dev", meter_provider=provider)
+    assert ok is True
+
+    data = reader.get_metrics_data()
+    seen: dict[str, float] = {}
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for metric in sm.metrics:
+                for point in metric.data.data_points:
+                    seen[metric.name] = point.value
+
+    assert seen["scoped_mcp.credentials.healthy"] == 0.0
+    assert seen["scoped_mcp.vault.consecutive_renewal_failures"] == 3.0
+
+
+def test_init_credential_metrics_callback_survives_bad_health_fn() -> None:
+    """A raising health function must not break metric collection."""
+    pytest.importorskip("opentelemetry.sdk.metrics")  # [otel] extra
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    from scoped_mcp.contrib.otel import init_credential_metrics
+
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+
+    def _boom() -> dict:
+        raise RuntimeError("vault source exploded")
+
+    assert init_credential_metrics(_boom, "agent-x", "dev", meter_provider=provider) is True
+    # Collection must not raise even though the health fn does; the gauge falls back
+    # to a degraded reading rather than propagating the exception.
+    data = reader.get_metrics_data()
+    seen: dict[str, float] = {}
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for metric in sm.metrics:
+                for point in metric.data.data_points:
+                    seen[metric.name] = point.value
+    assert seen["scoped_mcp.credentials.healthy"] == 0.0

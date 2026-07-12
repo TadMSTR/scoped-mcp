@@ -46,7 +46,7 @@ def test_filter_empty_bundle_empty_keys() -> None:
 # hvac is an optional dependency — skip all tests if not installed
 pytest.importorskip("hvac")
 
-from scoped_mcp.credentials_vault import VaultCredentialSource
+from scoped_mcp.credentials_vault import _MAX_RENEWAL_FAILURES, VaultCredentialSource
 
 
 def test_init_raises_on_missing_role_id(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -131,8 +131,11 @@ def test_fetch_success_kv2(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert result == {"API_KEY": "abc123", "DB_PASS": "hunter2"}
     assert src._token_lease_duration == 7200
-    # secret_id must be discarded immediately after auth
-    assert src._secret_id == ""
+    # secret_id is never held as instance state — only the env var *name* is kept,
+    # so _login() can re-read it at renewal time while a traceback-with-locals
+    # capture reachable via self can never expose the value.
+    assert not hasattr(src, "_secret_id")
+    assert src._secret_id_env == "VAULT_SECRET_ID"
 
 
 def test_fetch_success_kv1(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -264,3 +267,177 @@ async def test_renewal_uses_real_hvac_token_renew_self(monkeypatch: pytest.Monke
     client.auth.token.renew_self.assert_called_once()
     assert src._consecutive_failures == 0
     assert src._token_lease_duration == 1800
+
+
+# ── L1 self-heal re-auth + credential health (SMCP-26) ────────────────────────
+
+
+def _make_reauth_source(monkeypatch: pytest.MonkeyPatch) -> VaultCredentialSource:
+    monkeypatch.setenv("SCOPED_MCP_VAULT_REAUTH", "1")
+    return _make_source(monkeypatch)
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [("1", True), ("true", True), ("YES", True), ("on", True), ("0", False), ("", False)],
+)
+def test_reauth_flag_parsing(monkeypatch: pytest.MonkeyPatch, value: str, expected: bool) -> None:
+    monkeypatch.setenv("SCOPED_MCP_VAULT_REAUTH", value)
+    src = _make_source(monkeypatch)
+    assert src._reauth_enabled is expected
+
+
+def test_credential_health_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    src = _make_source(monkeypatch)
+    health = src.credential_health()
+    assert set(health) == {
+        "source",
+        "token_healthy",
+        "consecutive_failures",
+        "last_renewal_ok_ts",
+        "last_reauth_ts",
+        "seconds_to_expiry_est",
+        "reauth_enabled",
+    }
+    assert health["source"] == "vault"
+    assert health["token_healthy"] is True
+    assert health["consecutive_failures"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reauth_on_forbidden_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 403-class renewal failure with re-auth enabled mints a fresh token via _login."""
+    import hvac
+    import hvac.exceptions
+
+    src = _make_reauth_source(monkeypatch)
+    assert src._reauth_enabled is True
+
+    # Real client whose renew_self raises Forbidden — do NOT patch asyncio.to_thread.
+    client = hvac.Client(url="https://vault.example.com")
+    client.auth.token.renew_self = MagicMock(
+        side_effect=hvac.exceptions.Forbidden("permission denied")
+    )
+    src._client = client
+
+    # _login() (run in a thread) authenticates against a fresh patched hvac.Client.
+    login_client = MagicMock()
+    login_client.auth.approle.login.return_value = {"auth": {"lease_duration": 1200}}
+
+    with patch("scoped_mcp.credentials_vault.hvac.Client", return_value=login_client):
+        await src._renew_once()
+
+    assert src._consecutive_failures == 0
+    assert src._token_healthy is True
+    assert src._last_reauth_ts is not None
+    assert src._token_lease_duration == 1200
+    assert src._client is login_client
+
+
+@pytest.mark.asyncio
+async def test_no_reauth_when_disabled_degrades_and_fires_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-auth disabled: repeated failures flip token_healthy false and fire one alert."""
+    import hvac
+
+    monkeypatch.delenv("SCOPED_MCP_VAULT_REAUTH", raising=False)
+    src = _make_source(monkeypatch)
+    assert src._reauth_enabled is False
+
+    client = hvac.Client(url="https://vault.example.com")
+    client.auth.token.renew_self = MagicMock(side_effect=RuntimeError("vault down"))
+    src._client = client
+
+    transitions: list[dict] = []
+
+    async def _cb(health: dict) -> None:
+        transitions.append(health)
+
+    src.set_health_change_callback(_cb)
+
+    for _ in range(_MAX_RENEWAL_FAILURES):
+        await src._renew_once()
+
+    assert src._consecutive_failures == _MAX_RENEWAL_FAILURES
+    assert src._token_healthy is False
+    # Exactly one transition (healthy → degraded), not one per failed cycle.
+    assert len(transitions) == 1
+    assert transitions[0]["token_healthy"] is False
+
+
+@pytest.mark.asyncio
+async def test_health_callback_fires_once_per_edge_including_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Degrade then recover — callback fires exactly once on each transition edge."""
+    import hvac
+
+    src = _make_source(monkeypatch)  # re-auth disabled
+    client = hvac.Client(url="https://vault.example.com")
+    src._client = client
+
+    edges: list[bool] = []
+
+    async def _cb(health: dict) -> None:
+        edges.append(health["token_healthy"])
+
+    src.set_health_change_callback(_cb)
+
+    # Degrade.
+    client.auth.token.renew_self = MagicMock(side_effect=RuntimeError("down"))
+    for _ in range(_MAX_RENEWAL_FAILURES):
+        await src._renew_once()
+    assert src._token_healthy is False
+
+    # Recover.
+    client.auth.token.renew_self = MagicMock(return_value={"auth": {"lease_duration": 1800}})
+    await src._renew_once()
+    assert src._token_healthy is True
+
+    assert edges == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_reauth_failure_keeps_degraded_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If the re-login itself fails, the failure state persists (L2 will alert)."""
+    import hvac
+
+    src = _make_reauth_source(monkeypatch)
+    client = hvac.Client(url="https://vault.example.com")
+    client.auth.token.renew_self = MagicMock(side_effect=RuntimeError("down"))
+    src._client = client
+
+    # _login raises (Vault unreachable) — re-auth cannot recover.
+    with patch(
+        "scoped_mcp.credentials_vault.hvac.Client",
+        side_effect=ConnectionRefusedError("no route"),
+    ):
+        for _ in range(_MAX_RENEWAL_FAILURES):
+            await src._renew_once()
+
+    assert src._token_healthy is False
+    assert src._consecutive_failures >= _MAX_RENEWAL_FAILURES
+
+
+@pytest.mark.asyncio
+async def test_health_callback_exception_never_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising health callback is swallowed — it can never crash the renewal loop."""
+    import hvac
+
+    src = _make_source(monkeypatch)
+    client = hvac.Client(url="https://vault.example.com")
+    client.auth.token.renew_self = MagicMock(side_effect=RuntimeError("down"))
+    src._client = client
+
+    async def _bad_cb(health: dict) -> None:
+        raise ValueError("sink is broken")
+
+    src.set_health_change_callback(_bad_cb)
+
+    for _ in range(_MAX_RENEWAL_FAILURES):
+        await src._renew_once()  # must not raise despite the bad callback
+
+    assert src._token_healthy is False

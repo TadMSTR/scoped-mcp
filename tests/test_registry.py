@@ -762,3 +762,143 @@ async def test_tool_names_are_single_prefixed(agent_ctx: AgentContext) -> None:
         assert name.startswith("my-module_"), f"expected single prefix in: {name!r}"
     # The built-in status tool must be present alongside module tools.
     assert "scoped_mcp_status" in tool_names
+
+
+# ── credential health surfacing (SMCP-26 / SMCP-20) ───────────────────────────
+
+
+class _FakeVaultSource:
+    """Minimal stand-in exposing credential_health() for status/health-file tests."""
+
+    def __init__(self, health: dict) -> None:
+        self._health = health
+
+    def credential_health(self) -> dict:
+        return self._health
+
+
+async def _call_status(server) -> dict:
+    from fastmcp import Client
+
+    async with Client(server) as client:
+        result = await client.call_tool("scoped_mcp_status", {})
+    return result.data
+
+
+@pytest.mark.asyncio
+async def test_status_includes_credentials_block_and_stays_healthy() -> None:
+    from fastmcp import FastMCP
+
+    from scoped_mcp.registry import _register_status_tool
+
+    server = FastMCP("scoped-mcp/test")
+    vs = _FakeVaultSource({"source": "vault", "token_healthy": True, "consecutive_failures": 0})
+    _register_status_tool(server, {"mod": {"status": "running"}}, None, vault_source=vs)
+
+    data = await _call_status(server)
+    assert data["healthy"] is True
+    assert data["credentials"]["token_healthy"] is True
+
+
+@pytest.mark.asyncio
+async def test_status_healthy_false_when_token_unhealthy() -> None:
+    from fastmcp import FastMCP
+
+    from scoped_mcp.registry import _register_status_tool
+
+    server = FastMCP("scoped-mcp/test")
+    vs = _FakeVaultSource({"source": "vault", "token_healthy": False, "consecutive_failures": 5})
+    # All modules running, but a dead token must drag top-level healthy to false.
+    _register_status_tool(server, {"mod": {"status": "running"}}, None, vault_source=vs)
+
+    data = await _call_status(server)
+    assert data["healthy"] is False
+    assert data["credentials"]["token_healthy"] is False
+
+
+@pytest.mark.asyncio
+async def test_status_omits_credentials_without_vault() -> None:
+    from fastmcp import FastMCP
+
+    from scoped_mcp.registry import _register_status_tool
+
+    server = FastMCP("scoped-mcp/test")
+    _register_status_tool(server, {"mod": {"status": "running"}}, None, vault_source=None)
+
+    data = await _call_status(server)
+    assert data["healthy"] is True
+    assert "credentials" not in data
+
+
+@pytest.mark.asyncio
+async def test_status_credentials_error_is_non_raising() -> None:
+    from fastmcp import FastMCP
+
+    from scoped_mcp.registry import _register_status_tool
+
+    class _BrokenVaultSource:
+        def credential_health(self) -> dict:
+            raise RuntimeError("boom")
+
+    server = FastMCP("scoped-mcp/test")
+    _register_status_tool(
+        server, {"mod": {"status": "running"}}, None, vault_source=_BrokenVaultSource()
+    )
+
+    # A broken source must not break the status tool.
+    data = await _call_status(server)
+    assert data["credentials"] == {"error": "RuntimeError"}
+
+
+# ── refreshable health file ───────────────────────────────────────────────────
+
+
+def test_write_health_file_includes_credentials_and_written_at(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import structlog
+
+    from scoped_mcp.registry import _write_health_file
+
+    path = tmp_path / "health.json"
+    monkeypatch.setenv("SCOPED_MCP_HEALTH_FILE", str(path))
+    ops = structlog.get_logger("ops")
+
+    cred_health = {"source": "vault", "token_healthy": False, "consecutive_failures": 4}
+    _write_health_file({"mod": {"status": "running"}}, ops, credential_health=cred_health)
+
+    data = json.loads(path.read_text())
+    assert data["credentials"]["token_healthy"] is False
+    # A dead token drags overall healthy to false even with all modules running.
+    assert data["healthy"] is False
+    assert "written_at" in data
+
+
+def test_write_health_file_without_credentials_stays_module_only(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import structlog
+
+    from scoped_mcp.registry import _write_health_file
+
+    path = tmp_path / "health.json"
+    monkeypatch.setenv("SCOPED_MCP_HEALTH_FILE", str(path))
+    ops = structlog.get_logger("ops")
+
+    _write_health_file({"mod": {"status": "running"}}, ops, credential_health=None)
+
+    data = json.loads(path.read_text())
+    assert data["healthy"] is True
+    assert "credentials" not in data
+    assert "written_at" in data
+
+
+def test_write_health_file_noop_without_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    import structlog
+
+    from scoped_mcp.registry import _write_health_file
+
+    monkeypatch.delenv("SCOPED_MCP_HEALTH_FILE", raising=False)
+    ops = structlog.get_logger("ops")
+    # No env var → no file written, no raise.
+    _write_health_file({"mod": {"status": "running"}}, ops, credential_health=None)
