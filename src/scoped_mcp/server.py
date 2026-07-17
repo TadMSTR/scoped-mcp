@@ -208,6 +208,7 @@ def _run_serve(args: argparse.Namespace) -> None:
             auth=auth,
             manifest_path=args.manifest,
             transport=transport,
+            state=state,
         )
 
         # SMCP-3: graceful shutdown on SIGTERM.

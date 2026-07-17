@@ -38,7 +38,25 @@ class StateBackend(Protocol):
 
     async def get(self, key: str) -> str | None: ...
 
+    async def get_delete(self, key: str) -> str | None:
+        """Atomically return a key's value and delete it (GETDEL semantics).
+
+        Used to consume single-use HITL tokens (the pending-approval claim and
+        the OTP) so that two concurrent approve calls cannot both succeed — the
+        loser gets ``None``. Returns ``None`` if the key was absent.
+        """
+        ...
+
     async def delete(self, key: str) -> None: ...
+
+    async def scan(self, match: str) -> list[tuple[str, str]]:
+        """Return ``(key, value)`` pairs for keys matching a glob pattern.
+
+        The pattern is relative to the agent namespace (the same key space as
+        ``get``/``set_with_ttl``); returned keys are likewise namespace-relative.
+        Used by the HITL endpoint to enumerate an agent's pending approvals.
+        """
+        ...
 
     async def publish(self, channel: str, message: str) -> None: ...
 
@@ -118,9 +136,33 @@ class InProcessBackend:
             return None
         return value
 
+    async def get_delete(self, key: str) -> str | None:
+        async with self._lock:
+            entry = self._store.pop(key, None)
+        if entry is None:
+            return None
+        value, expires_at = entry
+        if expires_at is not None and time.monotonic() > expires_at:
+            return None
+        return value
+
     async def delete(self, key: str) -> None:
         async with self._lock:
             self._store.pop(key, None)
+
+    async def scan(self, match: str) -> list[tuple[str, str]]:
+        import fnmatch
+
+        now = time.monotonic()
+        out: list[tuple[str, str]] = []
+        async with self._lock:
+            items = list(self._store.items())
+        for key, (value, expires_at) in items:
+            if expires_at is not None and now > expires_at:
+                continue
+            if fnmatch.fnmatch(key, match):
+                out.append((key, value))
+        return out
 
     async def publish(self, channel: str, message: str) -> None:
         async with self._lock:

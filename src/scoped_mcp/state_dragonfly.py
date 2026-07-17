@@ -86,8 +86,23 @@ class DragonflyBackend:
     async def get(self, key: str) -> str | None:
         return await self._client.get(self._key(key))
 
+    async def get_delete(self, key: str) -> str | None:
+        # GETDEL is atomic (Redis 6.2+ / Dragonfly) — read and remove in one op so
+        # concurrent HITL approvals cannot both consume the same single-use token.
+        return await self._client.getdel(self._key(key))
+
     async def delete(self, key: str) -> None:
         await self._client.delete(self._key(key))
+
+    async def scan(self, match: str) -> list[tuple[str, str]]:
+        prefix_len = len(self._prefix)
+        out: list[tuple[str, str]] = []
+        async for full_key in self._client.scan_iter(match=self._key(match)):
+            value = await self._client.get(full_key)
+            if value is None:  # raced deletion / TTL expiry between scan and get
+                continue
+            out.append((full_key[prefix_len:], value))
+        return out
 
     async def publish(self, channel: str, message: str) -> None:
         await self._client.publish(self._key(channel), message)

@@ -46,6 +46,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+import secrets
 import time
 import uuid
 from collections.abc import Callable
@@ -116,6 +117,27 @@ def _canonical_args_hash(kwargs: dict[str, Any]) -> str:
 def _preapproval_key(tool_name: str, args_hash: str) -> str:
     """State key for a one-time pre-approval token bound to (tool, args)."""
     return f"hitl:preapproved:{tool_name}:{args_hash}"
+
+
+# Entropy for the one-time approval token (OTP). token_urlsafe(32) is 256 bits,
+# well above the 128-bit floor in the plan, and URL-safe so a courier can paste
+# it into CloudCLI without escaping (Phase 2).
+_OTP_BYTES = 32
+
+
+def _otp_key(approval_id: str) -> str:
+    """State key for the one-time approval token bound to an approval_id.
+
+    The plaintext OTP lives ONLY here (Dragonfly, agent-scoped, short TTL). It is
+    never placed in the operator notification, because the requesting agent can
+    read its own notify room — the single most important invariant of the design.
+    Only its hash is persisted to the Postgres audit row.
+    """
+    return f"hitl:otp:{approval_id}"
+
+
+def _generate_otp() -> str:
+    return secrets.token_urlsafe(_OTP_BYTES)
 
 
 class HitlMiddleware:
@@ -211,8 +233,16 @@ class HitlMiddleware:
             }
         )
 
+        # Mint the one-time approval token (OTP). It is written to the SAME
+        # backend, inside the same fail-closed try, so a backend outage denies the
+        # call rather than leaving an approvable request with no token. The OTP is
+        # stored server-side only; it is NEVER sent to the notification channel.
+        otp = _generate_otp()
+        otp_key = _otp_key(approval_id)
+
         try:
             await self._state.set_with_ttl(approval_key, payload, self._timeout)
+            await self._state.set_with_ttl(otp_key, otp, self._timeout)
         except Exception as e:
             _log.error(
                 "hitl_state_write_failed",
@@ -222,6 +252,25 @@ class HitlMiddleware:
             # Don't chain via ``from e`` — the underlying exception type is an
             # operational fingerprint we should not surface to the agent.
             raise HitlRejectedError("approval rejected: state backend unavailable") from None
+
+        # Best-effort audit row (fail-open): only the OTP *hash* is persisted, so
+        # the audit table can never be used to replay an approval. A DB outage must
+        # not turn a correct reject into an error — the security decision is already
+        # enforced by the Dragonfly OTP above.
+        try:
+            from .registry_db import get_registry, hash_otp
+
+            registry = await get_registry()
+            await registry.insert_hitl_approval(
+                approval_id=approval_id,
+                agent_id=self._agent_id,
+                tool_name=tool_name,
+                state="pending",
+                token_hash=hash_otp(otp),
+                ttl_seconds=self._timeout,
+            )
+        except Exception as e:  # fail-open — audit must never block the reject
+            _log.warning("hitl_audit_write_failed", approval_id=approval_id, error=type(e).__name__)
 
         _log.warning(
             "hitl_approval_pending",
