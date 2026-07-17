@@ -97,6 +97,10 @@ async def approve(
     if otp is not None:
         # Phase 2 courier form: consume the OTP (single-use) and constant-time
         # compare. Any mismatch/absence denies — fail-closed.
+        # SECURITY[deferred]: get_delete consumes the OTP before the compare, so a
+        # wrong guess burns the valid token (self-grief, not a bypass). Dead code
+        # until Phase 2 (Phase 1 bot never sends otp). Fix before Phase 2 ships:
+        # peek-then-claim or restore-on-mismatch. Target: SMCP-35. Audit: 2026-07-17/hitl-approval-flow-2026-07.
         stored_otp = await state.get_delete(_otp_key(approval_id))
         if stored_otp is None or not hmac.compare_digest(otp, stored_otp):
             await _resolve_audit(approval_id, "denied")
