@@ -481,6 +481,7 @@ def build_server(
     auth: Any = None,
     manifest_path: str | None = None,
     transport: str = "stdio",
+    state: Any = None,
 ) -> FastMCP:
     """Discover modules, filter to manifest, register tools, return a ready FastMCP server.
 
@@ -645,6 +646,15 @@ def build_server(
     # reach it. Under stdio there is no HTTP server, so registration would be dead.
     if transport == "http":
         _register_health_route(server, module_health, vault_source)
+
+        # HITL approve endpoint (SMCP-14) — only meaningful when this agent gates
+        # tools AND we have a shared state backend to hold the pending record/OTP.
+        # The routes self-authenticate with SCOPED_MCP_HITL_TOKEN (custom routes
+        # bypass the MCP bearer verifier).
+        if manifest.hitl is not None and manifest.hitl.approval_required and state is not None:
+            from .hitl_http import register_hitl_routes
+
+            register_hitl_routes(server, state, agent_ctx)
 
     # L4: OTel credential-health metrics for SigNoz (opt-in). No-op unless a Vault
     # source is present and an OTLP endpoint is configured; the otel extra being

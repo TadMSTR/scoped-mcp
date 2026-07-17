@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **SMCP-14 — in-session HITL approval endpoint + OTP** (`hitl_http.py`,
+  `hitl_endpoint.py`, `hitl.py`, `state.py`, `state_dragonfly.py`): a scoped-mcp
+  HTTP approve path so an operator can approve a gated tool call by replying in
+  Matrix (via `matrix-hitl-bot`) instead of self-approving on a shell. New
+  loopback routes `POST /hitl/approve`, `POST /hitl/deny`, `GET /hitl/pending`,
+  registered only under the HTTP transport when the agent gates tools.
+  - The routes self-authenticate with a **dedicated** bearer,
+    `SCOPED_MCP_HITL_TOKEN` (distinct from the MCP tool bearer) — FastMCP custom
+    routes bypass the MCP `BearerTokenVerifier`, so the check is enforced inside
+    each handler. Only the trusted bot/courier holds it; the requesting agent
+    never does.
+  - On gate reject the middleware now mints a high-entropy one-time token (OTP,
+    256-bit) stored **only** in Dragonfly (`hitl:otp:{approval_id}`, TTL =
+    approval window), never in the operator notification — the requesting agent
+    can read its own notify room, so no secret is ever posted there.
+  - One-time semantics via new atomic `StateBackend.get_delete` (GETDEL); a new
+    `StateBackend.scan` backs `/hitl/pending`. The OTP is bound to
+    `{approval_id, tool_name}`; the pre-approval token stays bound to
+    `{tool, args_hash}` as before.
+  - **Fail-closed** on the state backend (rule M1): a Dragonfly error denies
+    (503), never approves. The Postgres audit write is fail-open.
+- **Agent session registry** (`registry_db.py`,
+  `migrations/0001_agent_session_registry.sql`, new `[postgres]` extra): a
+  fail-open asyncpg DAL over a v1 session registry on agent-postgres. First
+  consumer is the HITL audit trail (`hitl_approvals`, storing only the OTP
+  **hash**). Disabled unless `AGENT_REGISTRY_DSN` is set; every write is
+  best-effort and can never block a tool call. P2/P3 tables are designed-in for
+  later consumers.
+
 ## [1.8.0] — 2026-07-12
 
 ### Added

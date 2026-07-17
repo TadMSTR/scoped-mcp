@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import hashlib
 
-import pytest
-
 from scoped_mcp import registry_db
 from scoped_mcp.registry_db import RegistryDB, hash_otp
 
