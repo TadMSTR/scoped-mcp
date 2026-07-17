@@ -66,7 +66,8 @@ def _check_bearer(request: Any) -> tuple[bool, int]:
         return False, 401
     # SECURITY[accepted]: the 401 here is a stale/unused status on the success path —
     # the caller (_authed) discards the second tuple element when ok=True, so it never
-    # reaches a response. Cosmetic only, no auth impact. Audit: 2026-07-17/hitl-approval-flow-2026-07.
+    # reaches a response. Cosmetic only, no auth impact.
+    # Audit: 2026-07-17/hitl-approval-flow-2026-07.
     return True, 401
 
 
