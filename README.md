@@ -668,6 +668,39 @@ guarantees. All are off by default; enable per-agent in the manifest:
   Requires `state_backend.type: dragonfly`. Install with
   `pip install scoped-mcp[dragonfly]`.
 
+  **In-session HTTP approval** (v1.9.0, SMCP-14 Phase A/B) — a second approve
+  path that doesn't require a shell on the host. Under `--transport http`,
+  gated agents also register three loopback routes: `POST /hitl/approve`,
+  `POST /hitl/deny`, `GET /hitl/pending`. The intended caller is
+  [`matrix-hitl-bot`](https://gitea.tadmstr.me/host-forge/matrix-hitl-bot) —
+  the operator replies approve/deny to the agent's notify room in Matrix, and
+  the bot calls the endpoint on their behalf; the requesting agent is never in
+  that loop. These routes are unauthenticated by FastMCP's `BearerTokenVerifier`
+  (custom routes bypass it), so each handler checks its own bearer against a
+  **dedicated** secret, `SCOPED_MCP_HITL_TOKEN` — distinct from the MCP tool
+  bearer (`SCOPED_MCP_BEARER_TOKEN`) and known only to the bot/courier, never
+  the agent. A missing token env var still registers the routes (so callers get
+  a clean `503`, not a `404`) but fails closed until the operator sets it.
+  On gate-reject the middleware also mints a 256-bit one-time OTP
+  (`hitl:otp:{approval_id}`, Dragonfly-only, never posted to the notify room)
+  for a deferred Phase 2 courier form that presents `{approval_id, otp}`
+  instead of the bot's trusted `{approval_id}`. Approve/deny claim the pending
+  record atomically (`StateBackend.get_delete`), so a second call or a race
+  resolves to `already_decided`; a Dragonfly error denies (`503`) rather than
+  approving — same fail-closed rule as the CLI path above.
+
+  **Agent session registry** (v1.9.0, optional `[postgres]` extra) — a
+  fail-open `asyncpg` DAL (`registry_db.py`) over a session registry on
+  `agent-postgres`, configured via `AGENT_REGISTRY_DSN`
+  (e.g. `postgresql://registry:***@127.0.0.1:5433/agent_registry`). Disabled
+  by default; unset ⇒ every registry call is a no-op. The first consumer is
+  the HITL audit trail (`hitl_approvals`) — it stores only the OTP **hash**,
+  never the plaintext. This is deliberately the opposite failure mode from the
+  Dragonfly-backed gate above: the registry is a paper trail, so a down
+  database must never block an approval decision. Install with
+  `pip install scoped-mcp[postgres]`; apply
+  `migrations/0001_agent_session_registry.sql` before setting the DSN.
+
 - **Response filtering** (v1.0.2) — opt-in post-execution content scanning.
   `block`, `warn`, or `redact` modes applied per-field via `ResponseFilterRule`
   entries in the manifest's `audit:` section. Redaction applies to string leaves
@@ -709,7 +742,10 @@ pip install "scoped-mcp[dragonfly]"
 # With HashiCorp Vault credential source
 pip install "scoped-mcp[vault]"
 
-# HTTP + SMTP + SQLite bundle (does not include otel, dragonfly, or vault)
+# With the agent session registry (HITL audit trail on agent-postgres)
+pip install "scoped-mcp[postgres]"
+
+# HTTP + SMTP + SQLite bundle (does not include otel, dragonfly, postgres, or vault)
 pip install "scoped-mcp[all]"
 ```
 
