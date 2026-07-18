@@ -22,7 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in-session HTTP approve path and the operator CLI approve path write it), so
   the middleware can resolve the audit row on consumption. Fails open on a
   malformed or pre-upgrade plain-string token — the call still proceeds, only
-  the audit resolve is skipped.
+  the audit resolve is skipped. `resolve_hitl_approval` gained an optional
+  `expected_state` guard (`AND state = ...`, logged instead of silently
+  applied on a mismatch) so the consumed-resolve can never clobber a row that
+  raced to some other terminal state first (pre-merge audit finding).
 
 ### Added
 
@@ -39,7 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   persisted in the health file itself), so an *unplanned* outage is still
   caught, but a restart while the module stays offline does not re-alert.
   Non-optional module failures are unaffected — same degrade-to-503 behavior
-  as before.
+  as before. Health-file reads now tolerate syntactically-valid-but-non-dict
+  JSON (fall back to an empty set instead of raising), so a stale/foreign
+  file at the configured path can no longer crash module lifespan startup
+  for the whole process (pre-merge audit finding).
 
 ## [1.9.0] — 2026-07-17
 
