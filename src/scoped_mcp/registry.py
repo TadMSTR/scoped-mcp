@@ -139,18 +139,22 @@ def _read_previous_offline_optional(path: str | None) -> set[str]:
     (SMCP-31) without a separate state store — the health file already persists
     across restarts for the external prober, so it doubles as the "last known
     state" this comparison needs. Returns an empty set if the file is absent,
-    unreadable, or the env var isn't configured — the caller then treats every
-    currently-offline optional module as newly-offline (a safe, alert-heavy
-    default, never a silent one).
+    unreadable, the env var isn't configured, or the file's content is
+    syntactically-valid but not the expected dict shape (e.g. a stale/foreign
+    file at the configured path) — the caller then treats every currently-offline
+    optional module as newly-offline (a safe, alert-heavy default, never a
+    silent one). Must never raise: this runs on every lifespan startup, and an
+    uncaught exception here would crash the whole process's module startup —
+    exactly the fault-isolation failure SMCP-31 exists to prevent.
     """
     if not path:
         return set()
     try:
         with open(path) as f:
             data = json.load(f)
-    except (OSError, ValueError):
+        return set(data.get("offline_optional_modules", []))
+    except (OSError, ValueError, AttributeError, TypeError):
         return set()
-    return set(data.get("offline_optional_modules", []))
 
 
 async def _alert_optional_module_transitions(

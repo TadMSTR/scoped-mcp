@@ -230,7 +230,9 @@ class HitlMiddleware:
                     from .registry_db import get_registry
 
                     registry = await get_registry()
-                    await registry.resolve_hitl_approval(approval_id, "consumed")
+                    await registry.resolve_hitl_approval(
+                        approval_id, "consumed", expected_state="approved"
+                    )
                 except Exception as e:  # fail-open — audit must never block the call
                     _log.warning(
                         "hitl_consumed_resolve_failed",

@@ -169,11 +169,13 @@ async def test_consumed_preapproval_resolves_registry_to_consumed(monkeypatch) -
     mw = _make_middleware(state, approval_required=["some_tool"], agent_id="a1")
 
     approval_id = "a1.aabbccddeeff"
-    calls: list[tuple[str, str]] = []
+    calls: list[tuple[str, str, str | None]] = []
 
     class _FakeRegistry:
-        async def resolve_hitl_approval(self, aid: str, new_state: str) -> None:
-            calls.append((aid, new_state))
+        async def resolve_hitl_approval(
+            self, aid: str, new_state: str, expected_state: str | None = None
+        ) -> None:
+            calls.append((aid, new_state, expected_state))
 
     async def _fake_get_registry():
         return _FakeRegistry()
@@ -189,7 +191,7 @@ async def test_consumed_preapproval_resolves_registry_to_consumed(monkeypatch) -
 
     result = await mw(agent_ctx=None, tool_name="some_tool", kwargs={}, call_next=_passthrough)
     assert result == "EXECUTED"
-    assert calls == [(approval_id, "consumed")]
+    assert calls == [(approval_id, "consumed", "approved")]
 
 
 @pytest.mark.asyncio
@@ -202,11 +204,13 @@ async def test_legacy_plain_string_preapproval_token_still_consumes(monkeypatch)
     state = InProcessBackend()
     mw = _make_middleware(state, approval_required=["some_tool"], agent_id="a1")
 
-    calls: list[tuple[str, str]] = []
+    calls: list[tuple[str, str, str | None]] = []
 
     class _FakeRegistry:
-        async def resolve_hitl_approval(self, aid: str, new_state: str) -> None:
-            calls.append((aid, new_state))
+        async def resolve_hitl_approval(
+            self, aid: str, new_state: str, expected_state: str | None = None
+        ) -> None:
+            calls.append((aid, new_state, expected_state))
 
     async def _fake_get_registry():
         return _FakeRegistry()

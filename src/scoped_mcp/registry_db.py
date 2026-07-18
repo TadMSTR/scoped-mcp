@@ -156,12 +156,44 @@ class RegistryDB:
         except Exception as e:  # fail-open
             _log.warning("registry_insert_approval_failed", error=type(e).__name__)
 
-    async def resolve_hitl_approval(self, approval_id: str, state: str) -> None:
-        """Mark an approval resolved (approved | denied | consumed | expired)."""
+    async def resolve_hitl_approval(
+        self, approval_id: str, state: str, expected_state: str | None = None
+    ) -> None:
+        """Mark an approval resolved (approved | denied | consumed | expired).
+
+        ``expected_state``, when given, adds a ``WHERE state = expected_state`` guard
+        so this transition only applies from that specific prior state — a caller that
+        transitions from a known state (e.g. hitl.py's consume-time approved->consumed)
+        should always pass it, so a race against some other resolution of the same row
+        becomes a logged no-op instead of silently clobbering a terminal state.
+        Left unguarded (None, the default) for callers that legitimately resolve from
+        the initial "pending" state without knowing it in advance (hitl_endpoint.py's
+        approve/deny paths) — passing "pending" there would be redundant with the
+        Dragonfly get_delete claim that already makes that transition exactly-once.
+        """
         if self._pool is None:
             return
         try:
             async with self._pool.acquire() as conn:
+                if expected_state is not None:
+                    result = await conn.execute(
+                        """
+                        UPDATE hitl_approvals
+                           SET state = $2, resolved_at = now()
+                         WHERE approval_id = $1 AND state = $3
+                        """,
+                        approval_id,
+                        state,
+                        expected_state,
+                    )
+                    if result == "UPDATE 0":
+                        _log.warning(
+                            "registry_resolve_approval_state_mismatch",
+                            approval_id=approval_id,
+                            target_state=state,
+                            expected_state=expected_state,
+                        )
+                    return
                 await conn.execute(
                     """
                     UPDATE hitl_approvals

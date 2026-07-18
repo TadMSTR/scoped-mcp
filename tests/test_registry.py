@@ -949,6 +949,20 @@ def test_read_previous_offline_optional_unreadable_json_returns_empty(tmp_path) 
     assert _read_previous_offline_optional(str(path)) == set()
 
 
+@pytest.mark.parametrize("content", [json.dumps(None), json.dumps([]), json.dumps(42), '"x"'])
+def test_read_previous_offline_optional_valid_non_dict_json_returns_empty(
+    tmp_path, content
+) -> None:
+    """Audit MEDIUM (scoped-mcp-fixes-batch-2026-07): syntactically-valid but
+    non-dict JSON (a stale/foreign file at the configured path) must degrade to
+    an empty set, not raise — an uncaught AttributeError/TypeError here would
+    crash the whole module lifespan startup for every module on the agent, the
+    exact fault-isolation failure SMCP-31 exists to prevent."""
+    path = tmp_path / "health.json"
+    path.write_text(content)
+    assert _read_previous_offline_optional(str(path)) == set()
+
+
 def test_read_previous_offline_optional_reads_prior_state(tmp_path) -> None:
     path = tmp_path / "health.json"
     path.write_text(json.dumps({"offline_optional_modules": ["claudebox-ops"]}))
