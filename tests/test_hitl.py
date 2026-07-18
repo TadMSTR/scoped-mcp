@@ -160,6 +160,96 @@ async def test_preapproval_token_is_one_time_use() -> None:
 
 
 @pytest.mark.asyncio
+async def test_consumed_preapproval_resolves_registry_to_consumed(monkeypatch) -> None:
+    """SMCP-39: consuming a JSON-format pre-approval token (as written by
+    hitl_endpoint.approve / hitl_cli approve) resolves the audit row to
+    "consumed" so a later reconcile pass doesn't see a stale "approved" row
+    and spuriously re-nudge an already-resolved session."""
+    state = InProcessBackend()
+    mw = _make_middleware(state, approval_required=["some_tool"], agent_id="a1")
+
+    approval_id = "a1.aabbccddeeff"
+    calls: list[tuple[str, str, str | None]] = []
+
+    class _FakeRegistry:
+        async def resolve_hitl_approval(
+            self, aid: str, new_state: str, expected_state: str | None = None
+        ) -> None:
+            calls.append((aid, new_state, expected_state))
+
+    async def _fake_get_registry():
+        return _FakeRegistry()
+
+    monkeypatch.setattr("scoped_mcp.registry_db.get_registry", _fake_get_registry)
+
+    pre_key = _preapproval_key("some_tool", _canonical_args_hash({}))
+    await state.set_with_ttl(
+        pre_key,
+        json.dumps({"status": "approved", "approval_id": approval_id}),
+        PREAPPROVAL_TTL_SECONDS,
+    )
+
+    result = await mw(agent_ctx=None, tool_name="some_tool", kwargs={}, call_next=_passthrough)
+    assert result == "EXECUTED"
+    assert calls == [(approval_id, "consumed", "approved")]
+
+
+@pytest.mark.asyncio
+async def test_legacy_plain_string_preapproval_token_still_consumes(monkeypatch) -> None:
+    """Backward-compat: a pre-approval token written in the pre-SMCP-39 plain
+    "approved" format (still live for up to PREAPPROVAL_TTL_SECONDS after a
+    rolling restart onto the new version) must still be consumed and forward
+    the call — just without resolving the audit row (no approval_id to
+    resolve from a plain string)."""
+    state = InProcessBackend()
+    mw = _make_middleware(state, approval_required=["some_tool"], agent_id="a1")
+
+    calls: list[tuple[str, str, str | None]] = []
+
+    class _FakeRegistry:
+        async def resolve_hitl_approval(
+            self, aid: str, new_state: str, expected_state: str | None = None
+        ) -> None:
+            calls.append((aid, new_state, expected_state))
+
+    async def _fake_get_registry():
+        return _FakeRegistry()
+
+    monkeypatch.setattr("scoped_mcp.registry_db.get_registry", _fake_get_registry)
+
+    pre_key = _preapproval_key("some_tool", _canonical_args_hash({}))
+    await state.set_with_ttl(pre_key, "approved", PREAPPROVAL_TTL_SECONDS)
+
+    result = await mw(agent_ctx=None, tool_name="some_tool", kwargs={}, call_next=_passthrough)
+    assert result == "EXECUTED"
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_consumed_resolve_failure_does_not_block_call(monkeypatch) -> None:
+    """A broken registry (e.g. DB down) must not prevent the call from
+    proceeding — the consumed-state resolve is fail-open, matching
+    registry_db's own fail-open contract for the rest of the audit trail."""
+    state = InProcessBackend()
+    mw = _make_middleware(state, approval_required=["some_tool"], agent_id="a1")
+
+    async def _broken_get_registry():
+        raise RuntimeError("db unreachable")
+
+    monkeypatch.setattr("scoped_mcp.registry_db.get_registry", _broken_get_registry)
+
+    pre_key = _preapproval_key("some_tool", _canonical_args_hash({}))
+    await state.set_with_ttl(
+        pre_key,
+        json.dumps({"status": "approved", "approval_id": "a1.deadbeef0001"}),
+        PREAPPROVAL_TTL_SECONDS,
+    )
+
+    result = await mw(agent_ctx=None, tool_name="some_tool", kwargs={}, call_next=_passthrough)
+    assert result == "EXECUTED"
+
+
+@pytest.mark.asyncio
 async def test_reject_does_not_write_preapproval() -> None:
     """If the operator rejects (no pre-approval token written), retry is also rejected."""
     state = InProcessBackend()

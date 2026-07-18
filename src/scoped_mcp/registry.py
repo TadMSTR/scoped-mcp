@@ -112,8 +112,84 @@ def _resolve_module_credentials(
     )
 
 
+def _split_failed_by_optional(module_health: dict, optional_modules: set[str]) -> tuple[dict, dict]:
+    """Split non-running module_health entries into (required_failed, optional_failed).
+
+    Modules flagged ``optional: true`` in the manifest (SMCP-31) — e.g.
+    claudebox-ops when claudebox is intentionally powered off — must not count
+    toward failed_count/healthy, but stay visible separately so an *unplanned*
+    outage of an optional dependency is still discoverable.
+    """
+    required_failed: dict = {}
+    optional_failed: dict = {}
+    for name, health in module_health.items():
+        if health.get("status") == "running":
+            continue
+        if name in optional_modules:
+            optional_failed[name] = health
+        else:
+            required_failed[name] = health
+    return required_failed, optional_failed
+
+
+def _read_previous_offline_optional(path: str | None) -> set[str]:
+    """Return the ``offline_optional_modules`` set from a prior health-file write.
+
+    Used to detect healthy<->offline transitions across a process restart
+    (SMCP-31) without a separate state store — the health file already persists
+    across restarts for the external prober, so it doubles as the "last known
+    state" this comparison needs. Returns an empty set if the file is absent,
+    unreadable, the env var isn't configured, or the file's content is
+    syntactically-valid but not the expected dict shape (e.g. a stale/foreign
+    file at the configured path) — the caller then treats every currently-offline
+    optional module as newly-offline (a safe, alert-heavy default, never a
+    silent one). Must never raise: this runs on every lifespan startup, and an
+    uncaught exception here would crash the whole process's module startup —
+    exactly the fault-isolation failure SMCP-31 exists to prevent.
+    """
+    if not path:
+        return set()
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return set(data.get("offline_optional_modules", []))
+    except (OSError, ValueError, AttributeError, TypeError):
+        return set()
+
+
+async def _alert_optional_module_transitions(
+    previous_offline: set[str],
+    current_offline: set[str],
+    agent_id: str,
+    agent_type: str,
+) -> None:
+    """Fire one low-severity ops alert per healthy<->offline transition (SMCP-31).
+
+    Reuses the existing SMCP-26 Matrix->ntfy alert path. No alert fires while an
+    optional module's offline/healthy state is unchanged from the previous
+    process run — only on a genuine transition, so an already-offline claudebox
+    does not re-alert on every PM2 restart while it stays down. Recovery
+    (offline -> healthy) fires too, so the return to normal is visible.
+    """
+    from .ops_alert import send_ops_alert
+
+    for name in sorted(current_offline - previous_offline):
+        await send_ops_alert(
+            "optional_module_offline",
+            {"agent_id": agent_id, "agent_type": agent_type, "module": name},
+        )
+    for name in sorted(previous_offline - current_offline):
+        await send_ops_alert(
+            "optional_module_recovered",
+            {"agent_id": agent_id, "agent_type": agent_type, "module": name},
+        )
+
+
 def _write_health_file(
-    module_health: dict, ops: object, credential_health: dict | None = None
+    module_health: dict,
+    ops: object,
+    credential_health: dict | None = None,
+    optional_modules: set[str] | None = None,
 ) -> None:
     """Write health JSON to SCOPED_MCP_HEALTH_FILE if the env var is set.
 
@@ -123,19 +199,27 @@ def _write_health_file(
     stale. When a Vault credential source is present its ``credential_health()``
     snapshot is folded in, and the top-level ``healthy`` reflects both module and
     token health.
+
+    ``optional_modules`` (SMCP-31): module names whose failure must not count
+    toward ``failed_count``/``healthy`` — tracked separately under
+    ``offline_optional_modules`` instead.
     """
     path = os.environ.get("SCOPED_MCP_HEALTH_FILE")
     if not path:
         return
-    failed = {k: v for k, v in module_health.items() if v.get("status") != "running"}
+    required_failed, optional_failed = _split_failed_by_optional(
+        module_health, optional_modules or set()
+    )
     token_healthy = credential_health is None or credential_health.get("token_healthy", True)
     data = {
         "modules": module_health,
-        "failed_count": len(failed),
+        "failed_count": len(required_failed),
         "total_count": len(module_health),
-        "healthy": len(failed) == 0 and token_healthy,
+        "healthy": len(required_failed) == 0 and token_healthy,
         "written_at": datetime.now(UTC).isoformat(),
     }
+    if optional_failed:
+        data["offline_optional_modules"] = sorted(optional_failed)
     if credential_health is not None:
         data["credentials"] = credential_health
     try:
@@ -149,7 +233,8 @@ def _write_health_file(
         ops.info(
             "health_file_written",
             path=path,
-            failed=len(failed),
+            failed=len(required_failed),
+            offline_optional=len(optional_failed),
             total=len(module_health),
             token_healthy=token_healthy,
         )
@@ -162,6 +247,7 @@ def _make_module_lifespan(
     vault_source: object = None,
     module_health: dict | None = None,
     agent_ctx: AgentContext | None = None,
+    optional_modules: set[str] | None = None,
 ) -> object:
     """Build a FastMCP-compatible lifespan that calls startup/shutdown on all modules.
 
@@ -177,9 +263,13 @@ def _make_module_lifespan(
     module_health: mutable dict keyed by manifest_name. Caller pre-populates entries for
         discovery/init failures; this function updates entries for startup results.
     agent_ctx: optional identity, included in ops-alert payloads.
+    optional_modules: manifest module names flagged ``optional: true`` (SMCP-31) — their
+        failure is excluded from failed_count/healthy everywhere this lifespan touches the
+        health file, and drives the healthy<->offline transition alert below.
     """
     if module_health is None:
         module_health = {}
+    optional_modules = optional_modules or set()
 
     agent_id = agent_ctx.agent_id if agent_ctx is not None else "unknown"
     agent_type = agent_ctx.agent_type if agent_ctx is not None else "unknown"
@@ -192,7 +282,9 @@ def _make_module_lifespan(
         transition can rewrite the file and notify #alerts even while Vault is down.
         """
         ops = get_ops_logger()
-        _write_health_file(module_health, ops, credential_health=health)
+        _write_health_file(
+            module_health, ops, credential_health=health, optional_modules=optional_modules
+        )
         from .ops_alert import send_ops_alert
 
         token_healthy = health.get("token_healthy", True)
@@ -257,7 +349,32 @@ def _make_module_lifespan(
             startup_cred_health = (
                 vault_source.credential_health() if vault_source is not None else None
             )
-            _write_health_file(module_health, ops, credential_health=startup_cred_health)
+
+            # SMCP-31: detect optional-module healthy<->offline transitions before
+            # overwriting the health file, so the comparison is against the previous
+            # process's last-known state (persisted in the health file itself — no
+            # separate state store needed). This is the single point where both
+            # init-time (failed_import/failed_init) and startup-time (failed_startup)
+            # failures are both known, so it covers an optional module failing at
+            # either phase.
+            if optional_modules:
+                health_file_path = os.environ.get("SCOPED_MCP_HEALTH_FILE")
+                previous_offline = _read_previous_offline_optional(health_file_path)
+                _, optional_failed = _split_failed_by_optional(module_health, optional_modules)
+                current_offline = set(optional_failed)
+                try:
+                    await _alert_optional_module_transitions(
+                        previous_offline, current_offline, agent_id, agent_type
+                    )
+                except Exception as exc:  # best-effort — must never block startup
+                    ops.warning("optional_module_alert_failed", error=type(exc).__name__)
+
+            _write_health_file(
+                module_health,
+                ops,
+                credential_health=startup_cred_health,
+                optional_modules=optional_modules,
+            )
             yield {}
         finally:
             for manifest_name, mod in reversed(started):
@@ -341,6 +458,7 @@ def _register_status_tool(
     module_health: dict,
     manifest_snapshot: dict[str, Any] | None = None,
     vault_source: object = None,
+    optional_modules: set[str] | None = None,
 ) -> None:
     """Register scoped_mcp_status as a built-in tool on the parent server.
 
@@ -356,8 +474,12 @@ def _register_status_tool(
     Vault token is unhealthy — so a process stuck in a permanent renewal-failure loop
     can no longer report ``healthy: true``. stdio / env-credential agents pass None and
     the block is omitted entirely.
+
+    optional_modules (SMCP-31): module names flagged ``optional: true`` — their failure
+    is excluded from failed_count/healthy and surfaced instead as offline_optional_modules.
     """
     manifest_snapshot = manifest_snapshot or {}
+    optional_modules = optional_modules or set()
 
     async def scoped_mcp_status() -> dict:
         """Return the health status of all manifest-declared modules.
@@ -368,20 +490,27 @@ def _register_status_tool(
           failed_init    — module class could not be instantiated (bad config, missing credential)
           failed_startup — module startup() raised (service unreachable, bad state, etc.)
 
+        A module flagged ``optional: true`` in the manifest does not count toward
+        failed_count/healthy when failed — see offline_optional_modules instead.
+
         manifest_stale (bool, present only if true) signals the manifest file has
         changed since this process started — under the HTTP transport, that requires
         a PM2 restart to take effect (see manifest_stale_hint for the exact command).
 
         Call this at session start to check for degraded modules before running tasks.
         """
-        failed = {k: v for k, v in module_health.items() if v.get("status") != "running"}
-        healthy = len(failed) == 0
+        required_failed, optional_failed = _split_failed_by_optional(
+            module_health, optional_modules
+        )
+        healthy = len(required_failed) == 0
         result = {
             "modules": module_health,
-            "failed_count": len(failed),
+            "failed_count": len(required_failed),
             "total_count": len(module_health),
             "healthy": healthy,
         }
+        if optional_failed:
+            result["offline_optional_modules"] = sorted(optional_failed)
         # Credential health (Vault agents only). Never raises — a missing/None
         # vault_source omits the block so stdio/env-cred agents are unaffected.
         if vault_source is not None:
@@ -397,7 +526,12 @@ def _register_status_tool(
     server.tool(name="scoped_mcp_status")(scoped_mcp_status)
 
 
-def _register_health_route(server: FastMCP, module_health: dict, vault_source: object) -> None:
+def _register_health_route(
+    server: FastMCP,
+    module_health: dict,
+    vault_source: object,
+    optional_modules: set[str] | None = None,
+) -> None:
     """Register an unauthenticated GET /health route (http transport only).
 
     FastMCP custom routes are unauthenticated by design and share the existing HTTP
@@ -407,19 +541,29 @@ def _register_health_route(server: FastMCP, module_health: dict, vault_source: o
     SECURITY: the body exposes only booleans, counts, and derived timestamps — never
     the client token, a lease id, or any secret. credential_health() is constructed to
     the same contract; module details are reduced to failed/total counts here.
+
+    optional_modules (SMCP-31): module names flagged ``optional: true`` — their failure
+    is excluded from failed_count/healthy (200, not 503) and surfaced instead as
+    offline_optional_modules.
     """
     from starlette.requests import Request
     from starlette.responses import JSONResponse
 
+    optional_modules = optional_modules or set()
+
     @server.custom_route("/health", methods=["GET"])
     async def health(request: Request) -> JSONResponse:
-        failed = {k: v for k, v in module_health.items() if v.get("status") != "running"}
-        healthy = len(failed) == 0
+        required_failed, optional_failed = _split_failed_by_optional(
+            module_health, optional_modules
+        )
+        healthy = len(required_failed) == 0
         payload: dict[str, Any] = {
             "status": "healthy",
-            "modules": {"failed_count": len(failed), "total_count": len(module_health)},
+            "modules": {"failed_count": len(required_failed), "total_count": len(module_health)},
             "written_at": datetime.now(UTC).isoformat(),
         }
+        if optional_failed:
+            payload["offline_optional_modules"] = sorted(optional_failed)
         if vault_source is not None:
             try:
                 cred_health = vault_source.credential_health()
@@ -516,6 +660,10 @@ def build_server(
     ops = get_ops_logger()
     ops.info("registry_start", agent_id=agent_ctx.agent_id, agent_type=agent_ctx.agent_type)
 
+    # SMCP-31: modules flagged optional: true — their failure never counts toward
+    # failed_count/healthy, see _split_failed_by_optional.
+    optional_modules = {name for name, cfg in manifest.modules.items() if cfg.optional}
+
     manifest_snapshot: dict[str, Any] = {}
     if manifest_path is not None:
         try:
@@ -610,6 +758,7 @@ def build_server(
             vault_source=vault_source,
             module_health=module_health,
             agent_ctx=agent_ctx,
+            optional_modules=optional_modules,
         ),
         auth=auth,
     )
@@ -639,13 +788,21 @@ def build_server(
         server.mount(child, prefix=module_name)
 
     # Always-present status tool — no module namespace prefix.
-    _register_status_tool(server, module_health, manifest_snapshot, vault_source=vault_source)
+    _register_status_tool(
+        server,
+        module_health,
+        manifest_snapshot,
+        vault_source=vault_source,
+        optional_modules=optional_modules,
+    )
     registered_tool_names.append("scoped_mcp_status")
 
     # Unauthenticated /health route — only under http, where an external prober can
     # reach it. Under stdio there is no HTTP server, so registration would be dead.
     if transport == "http":
-        _register_health_route(server, module_health, vault_source)
+        _register_health_route(
+            server, module_health, vault_source, optional_modules=optional_modules
+        )
 
         # HITL approve endpoint (SMCP-14) — only meaningful when this agent gates
         # tools AND we have a shared state backend to hold the pending record/OTP.

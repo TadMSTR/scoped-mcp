@@ -163,6 +163,32 @@ def test_module_config_type_defaults_none():
     assert manifest.modules["matrix"].type is None
 
 
+def test_module_config_optional_field_true():
+    """optional: true (SMCP-31) is accepted and stored on ModuleConfig."""
+    raw = {
+        "agent_type": "test",
+        "modules": {
+            "claudebox-ops": {
+                "type": "mcp_proxy",
+                "config": {"url": "http://192.168.1.11:8485/mcp"},
+                "optional": True,
+            }
+        },
+    }
+    manifest = Manifest.model_validate(raw)
+    assert manifest.modules["claudebox-ops"].optional is True
+
+
+def test_module_config_optional_defaults_false():
+    """optional: field defaults to False when absent — existing manifests are unaffected."""
+    raw = {
+        "agent_type": "test",
+        "modules": {"matrix": {"config": {"allowed_rooms": ["!abc:test"]}}},
+    }
+    manifest = Manifest.model_validate(raw)
+    assert manifest.modules["matrix"].optional is False
+
+
 # ── agent_type pattern validation ─────────────────────────────────────────────
 
 

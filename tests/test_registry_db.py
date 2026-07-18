@@ -71,3 +71,83 @@ async def test_get_registry_disabled_without_dsn(monkeypatch):
     monkeypatch.setattr(registry_db, "_init_lock", None)
     reg = await registry_db.get_registry()
     assert reg.enabled is False
+
+
+# ── resolve_hitl_approval expected_state guard (audit LOW, scoped-mcp-fixes-batch-2026-07) ──
+
+
+class _FakeConn:
+    """Records executed queries; returns a configurable asyncpg-style status string."""
+
+    def __init__(self, status: str = "UPDATE 1") -> None:
+        self.status = status
+        self.calls: list[tuple[str, ...]] = []
+
+    async def execute(self, query: str, *args: str) -> str:
+        self.calls.append((query, *args))
+        return self.status
+
+
+class _FakeAcquireCtx:
+    def __init__(self, conn: _FakeConn) -> None:
+        self._conn = conn
+
+    async def __aenter__(self) -> _FakeConn:
+        return self._conn
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+
+class _FakePool:
+    def __init__(self, conn: _FakeConn) -> None:
+        self._conn = conn
+
+    def acquire(self) -> _FakeAcquireCtx:
+        return _FakeAcquireCtx(self._conn)
+
+
+async def test_resolve_without_expected_state_is_unguarded():
+    """Default (no expected_state) behavior is unchanged — the pending->approved/
+    denied/expired transitions used by hitl_endpoint.py must not gain a guard clause,
+    since the row's current state there is "pending", not the target state."""
+    conn = _FakeConn(status="UPDATE 1")
+    reg = RegistryDB(pool=_FakePool(conn))
+
+    await reg.resolve_hitl_approval("developer.abc", "approved")
+
+    assert len(conn.calls) == 1
+    query, *params = conn.calls[0]
+    assert "AND state" not in query
+    assert params == ["developer.abc", "approved"]
+
+
+async def test_resolve_with_matching_expected_state_applies_guarded_update():
+    conn = _FakeConn(status="UPDATE 1")
+    reg = RegistryDB(pool=_FakePool(conn))
+
+    await reg.resolve_hitl_approval("developer.abc", "consumed", expected_state="approved")
+
+    assert len(conn.calls) == 1
+    query, *params = conn.calls[0]
+    assert "AND state = $3" in query
+    assert params == ["developer.abc", "consumed", "approved"]
+
+
+async def test_resolve_with_mismatched_expected_state_logs_and_does_not_raise():
+    """Audit LOW: a race where the row already moved to some other terminal state
+    (e.g. expired/denied) must not be silently clobbered — zero rows affected is
+    logged, not raised (fail-open contract preserved)."""
+    conn = _FakeConn(status="UPDATE 0")  # simulates no row matched the WHERE clause
+    reg = RegistryDB(pool=_FakePool(conn))
+
+    # Must not raise.
+    await reg.resolve_hitl_approval("developer.abc", "consumed", expected_state="approved")
+
+    assert len(conn.calls) == 1
+
+
+async def test_resolve_expected_state_guard_swallows_db_errors():
+    """The guarded path must remain fail-open, same as the unguarded path."""
+    reg = RegistryDB(pool=_RaisingPool())
+    await reg.resolve_hitl_approval("developer.abc", "consumed", expected_state="approved")

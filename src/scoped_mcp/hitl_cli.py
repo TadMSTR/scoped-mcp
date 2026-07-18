@@ -151,14 +151,19 @@ async def _decide(redis_url: str, approval_id: str, decision: str, _client=None)
                 tool_name = ""
                 args_hash = ""
 
+            # The approval_id rides along in the token value (not just "approved")
+            # so the middleware can resolve the audit row to "consumed" once the
+            # token is actually used (SMCP-39).
+            token_value = json.dumps({"status": "approved", "approval_id": approval_id})
+
             if tool_name and args_hash:
                 pre_key = _preapproval_key_for(agent_id, tool_name, args_hash)
-                await client.set(pre_key, "approved", ex=PREAPPROVAL_TTL_SECONDS)
+                await client.set(pre_key, token_value, ex=PREAPPROVAL_TTL_SECONDS)
             elif tool_name:
                 # Legacy payload without args_hash (pre-H-01 fix): fall back to
                 # tool-name-only key so old pending approvals still work after upgrade.
                 pre_key = f"scoped-mcp:{agent_id}:hitl:preapproved:{tool_name}"
-                await client.set(pre_key, "approved", ex=PREAPPROVAL_TTL_SECONDS)
+                await client.set(pre_key, token_value, ex=PREAPPROVAL_TTL_SECONDS)
                 print(
                     "warning: stored payload has no args_hash — writing tool-name-only "
                     "pre-approval token (upgrade scoped-mcp to get argument binding)",

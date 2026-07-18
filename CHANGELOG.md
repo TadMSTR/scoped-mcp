@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-07-18
+
+### Fixed
+
+- **SMCP-39 — HITL consumed-state transition** (`hitl.py`, `hitl_endpoint.py`,
+  `hitl_cli.py`): the middleware now resolves a HITL audit row to `consumed`
+  when the one-time pre-approval token is actually used, instead of leaving
+  `hitl_approvals.state` stuck at `approved` forever. Previously, if a thread
+  resumed via the normal reply path inside the ~10s window before the
+  matrix-dispatcher's reconcile pass fired, the next pass still saw
+  `state='approved'` and issued a spurious retry-nudge into an already-resolved
+  session. The pre-approval token now carries the `approval_id` (both the
+  in-session HTTP approve path and the operator CLI approve path write it), so
+  the middleware can resolve the audit row on consumption. Fails open on a
+  malformed or pre-upgrade plain-string token — the call still proceeds, only
+  the audit resolve is skipped. `resolve_hitl_approval` gained an optional
+  `expected_state` guard (`AND state = ...`, logged instead of silently
+  applied on a mismatch) so the consumed-resolve can never clobber a row that
+  raced to some other terminal state first (pre-merge audit finding).
+
+### Added
+
+- **SMCP-31 — allowed-offline manifest modules** (`manifest.py`, `registry.py`):
+  a per-module `optional: true` manifest flag whose `failed_import` /
+  `failed_init` / `failed_startup` no longer counts toward `failed_count` /
+  `healthy` in `scoped_mcp_status`, the health file, or the `/health` route.
+  Failures are tracked separately under `offline_optional_modules` so they
+  stay visible without flipping the whole process to degraded/503 — built for
+  `claudebox-ops`, which is expected to be down whenever claudebox is
+  intentionally powered off. A healthy&harr;offline transition of an optional
+  module fires exactly one low-severity ops alert via the existing SMCP-26
+  Matrix&rarr;ntfy path (comparing against the previous process's state,
+  persisted in the health file itself), so an *unplanned* outage is still
+  caught, but a restart while the module stays offline does not re-alert.
+  Non-optional module failures are unaffected — same degrade-to-503 behavior
+  as before. Health-file reads now tolerate syntactically-valid-but-non-dict
+  JSON (fall back to an empty set instead of raising), so a stale/foreign
+  file at the configured path can no longer crash module lifespan startup
+  for the whole process (pre-merge audit finding).
+
 ## [1.9.0] — 2026-07-17
 
 ### Added

@@ -85,10 +85,13 @@ def test_approve_happy_path_and_pending_listing(monkeypatch):
         assert r.status_code == 200
         assert r.json()["status"] == "approved"
 
-        # pre-approval token is now present for the middleware to consume
+        # pre-approval token is now present for the middleware to consume, and
+        # carries the approval_id (SMCP-39) so the middleware can resolve the
+        # audit row to "consumed" once the token is actually used.
         import anyio
 
-        assert anyio.run(state.get, _preapproval_key(TOOL, ARGS_HASH)) == "approved"
+        token = json.loads(anyio.run(state.get, _preapproval_key(TOOL, ARGS_HASH)))
+        assert token == {"status": "approved", "approval_id": APPROVAL_ID}
 
         # second approve is one-time → 404
         r = client.post("/hitl/approve", json={"approval_id": APPROVAL_ID}, headers=auth)
