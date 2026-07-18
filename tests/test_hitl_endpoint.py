@@ -42,8 +42,11 @@ async def test_approve_bot_form_writes_preapproval_and_clears_state():
 
     assert result["status"] == "approved"
     assert result["tool"] == TOOL
-    # pre-approval token the middleware consumes on retry is present...
-    assert await state.get(_preapproval_key(TOOL, ARGS_HASH)) == "approved"
+    # pre-approval token the middleware consumes on retry is present, and
+    # carries the approval_id so the middleware can resolve the audit row to
+    # "consumed" once the token is actually used (SMCP-39).
+    token = json.loads(await state.get(_preapproval_key(TOOL, ARGS_HASH)))
+    assert token == {"status": "approved", "approval_id": APPROVAL_ID}
     # ...and the pending record + OTP are gone (one-time).
     assert await state.get(f"hitl:{APPROVAL_ID}") is None
     assert await state.get(_otp_key(APPROVAL_ID)) is None
@@ -79,7 +82,8 @@ async def test_courier_correct_otp_approves():
     await _seed(state, otp="the-real-otp")
     result = await hitl_endpoint.approve(state, AGENT, APPROVAL_ID, otp="the-real-otp")
     assert result["status"] == "approved"
-    assert await state.get(_preapproval_key(TOOL, ARGS_HASH)) == "approved"
+    token = json.loads(await state.get(_preapproval_key(TOOL, ARGS_HASH)))
+    assert token == {"status": "approved", "approval_id": APPROVAL_ID}
 
 
 async def test_courier_wrong_otp_denied_and_pending_preserved():

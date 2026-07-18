@@ -43,6 +43,7 @@ Security invariants:
 
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import hashlib
 import json
@@ -213,6 +214,30 @@ class HitlMiddleware:
                 agent_id=self._agent_id,
                 tool=tool_name,
             )
+
+            # Best-effort: mark the audit row "consumed" now that the one-time
+            # token has actually been used, so a later reconcile pass doesn't
+            # see a stale "approved" row and re-nudge an already-resolved
+            # session (SMCP-39). Fail-open on a missing/malformed approval_id
+            # (e.g. a pre-JSON-format legacy token still live from before an
+            # upgrade) — that must never block the call from proceeding, only
+            # skip the audit update.
+            approval_id: str | None = None
+            with contextlib.suppress(json.JSONDecodeError, AttributeError, TypeError):
+                approval_id = json.loads(preapproved).get("approval_id")
+            if approval_id:
+                try:
+                    from .registry_db import get_registry
+
+                    registry = await get_registry()
+                    await registry.resolve_hitl_approval(approval_id, "consumed")
+                except Exception as e:  # fail-open — audit must never block the call
+                    _log.warning(
+                        "hitl_consumed_resolve_failed",
+                        approval_id=approval_id,
+                        error=type(e).__name__,
+                    )
+
             return await call_next()
 
         # No pre-approval found — register the request and reject immediately.

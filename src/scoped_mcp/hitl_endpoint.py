@@ -128,8 +128,14 @@ async def approve(
         return {"status": "not_found"}
 
     # Write the one-time pre-approval token the middleware consumes on retry.
+    # The approval_id rides along in the token value (not just "approved") so
+    # the middleware can resolve the audit row to "consumed" once the token is
+    # actually used (SMCP-39) — otherwise hitl_approvals.state sticks at
+    # "approved" forever and a later reconcile pass re-nudges a resolved session.
     await state.set_with_ttl(
-        _preapproval_key(tool_name, args_hash), "approved", PREAPPROVAL_TTL_SECONDS
+        _preapproval_key(tool_name, args_hash),
+        json.dumps({"status": "approved", "approval_id": approval_id}),
+        PREAPPROVAL_TTL_SECONDS,
     )
     await _resolve_audit(approval_id, "approved")
     _log.warning(

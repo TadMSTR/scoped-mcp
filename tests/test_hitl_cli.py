@@ -147,7 +147,8 @@ async def test_decide_approve_writes_preapproval_and_deletes_pending(redis_clien
         rc = await _decide(_REDIS_URL, approval_id, "approve", _client=redis_client)
         assert rc == 0
         assert await redis_client.get(pending_key) is None
-        assert await redis_client.get(pre_key) == "approved"
+        token = json.loads(await redis_client.get(pre_key))
+        assert token == {"status": "approved", "approval_id": approval_id}
     finally:
         await redis_client.delete(pending_key)
         await redis_client.delete(pre_key)

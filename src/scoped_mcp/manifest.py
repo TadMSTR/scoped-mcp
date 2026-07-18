@@ -329,6 +329,13 @@ class ModuleConfig(BaseModel):
     # Example: type: mcp_proxy with key: task-queue and key: agent-bus
     type: str | None = None
     config: dict[str, Any] = {}
+    # SMCP-31: an intentionally-offline-capable dependency (e.g. claudebox-ops
+    # pointing at a host that is sometimes powered off on purpose). A
+    # failed_import/failed_init/failed_startup on an optional module does not
+    # count toward failed_count/healthy — it is tracked separately under
+    # offline_optional_modules so it stays visible without flipping the whole
+    # process to degraded/503.
+    optional: bool = False
 
     @field_validator("mode", mode="before")
     @classmethod

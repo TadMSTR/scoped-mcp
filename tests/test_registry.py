@@ -902,3 +902,362 @@ def test_write_health_file_noop_without_env(monkeypatch: pytest.MonkeyPatch) -> 
     ops = structlog.get_logger("ops")
     # No env var → no file written, no raise.
     _write_health_file({"mod": {"status": "running"}}, ops, credential_health=None)
+
+
+# ── SMCP-31: allowed-offline optional modules ─────────────────────────────────
+
+
+from scoped_mcp.registry import (
+    _alert_optional_module_transitions,
+    _read_previous_offline_optional,
+    _register_health_route,
+    _register_status_tool,
+    _split_failed_by_optional,
+    _write_health_file,
+)
+
+
+def test_split_failed_by_optional_buckets_correctly() -> None:
+    health = {
+        "good": {"status": "running"},
+        "required-bad": {"status": "failed_startup"},
+        "claudebox-ops": {"status": "failed_init"},
+    }
+    required_failed, optional_failed = _split_failed_by_optional(health, {"claudebox-ops"})
+    assert required_failed == {"required-bad": {"status": "failed_startup"}}
+    assert optional_failed == {"claudebox-ops": {"status": "failed_init"}}
+
+
+def test_split_failed_by_optional_empty_optional_set_is_unaffected() -> None:
+    health = {"mod": {"status": "failed_init"}}
+    required_failed, optional_failed = _split_failed_by_optional(health, set())
+    assert required_failed == health
+    assert optional_failed == {}
+
+
+def test_read_previous_offline_optional_missing_env_returns_empty() -> None:
+    assert _read_previous_offline_optional(None) == set()
+
+
+def test_read_previous_offline_optional_missing_file_returns_empty(tmp_path) -> None:
+    assert _read_previous_offline_optional(str(tmp_path / "nope.json")) == set()
+
+
+def test_read_previous_offline_optional_unreadable_json_returns_empty(tmp_path) -> None:
+    path = tmp_path / "health.json"
+    path.write_text("not json")
+    assert _read_previous_offline_optional(str(path)) == set()
+
+
+def test_read_previous_offline_optional_reads_prior_state(tmp_path) -> None:
+    path = tmp_path / "health.json"
+    path.write_text(json.dumps({"offline_optional_modules": ["claudebox-ops"]}))
+    assert _read_previous_offline_optional(str(path)) == {"claudebox-ops"}
+
+
+@pytest.mark.asyncio
+async def test_alert_fires_once_on_newly_offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[tuple[str, dict]] = []
+
+    async def _fake_send(event: str, detail: dict) -> bool:
+        sent.append((event, detail))
+        return True
+
+    import scoped_mcp.ops_alert as ops_alert
+
+    monkeypatch.setattr(ops_alert, "send_ops_alert", _fake_send)
+
+    await _alert_optional_module_transitions(set(), {"claudebox-ops"}, "sysadmin", "sysadmin")
+    assert len(sent) == 1
+    assert sent[0][0] == "optional_module_offline"
+    assert sent[0][1]["module"] == "claudebox-ops"
+
+
+@pytest.mark.asyncio
+async def test_alert_fires_on_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[tuple[str, dict]] = []
+
+    async def _fake_send(event: str, detail: dict) -> bool:
+        sent.append((event, detail))
+        return True
+
+    import scoped_mcp.ops_alert as ops_alert
+
+    monkeypatch.setattr(ops_alert, "send_ops_alert", _fake_send)
+
+    await _alert_optional_module_transitions({"claudebox-ops"}, set(), "sysadmin", "sysadmin")
+    assert len(sent) == 1
+    assert sent[0][0] == "optional_module_recovered"
+
+
+@pytest.mark.asyncio
+async def test_alert_silent_when_offline_state_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No re-alert while an optional module stays offline across a restart — the whole
+    point of SMCP-31's transition-only alerting (avoids spamming #alerts every PM2 restart
+    while claudebox stays intentionally off)."""
+    sent: list[tuple[str, dict]] = []
+
+    async def _fake_send(event: str, detail: dict) -> bool:
+        sent.append((event, detail))
+        return True
+
+    import scoped_mcp.ops_alert as ops_alert
+
+    monkeypatch.setattr(ops_alert, "send_ops_alert", _fake_send)
+
+    await _alert_optional_module_transitions(
+        {"claudebox-ops"}, {"claudebox-ops"}, "sysadmin", "sysadmin"
+    )
+    assert sent == []
+
+
+def test_write_health_file_excludes_optional_from_failed_count(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import structlog
+
+    path = tmp_path / "health.json"
+    monkeypatch.setenv("SCOPED_MCP_HEALTH_FILE", str(path))
+    ops = structlog.get_logger("ops")
+
+    health = {
+        "good": {"status": "running"},
+        "claudebox-ops": {"status": "failed_init", "error": "ConnectionRefusedError"},
+    }
+    _write_health_file(health, ops, optional_modules={"claudebox-ops"})
+
+    data = json.loads(path.read_text())
+    assert data["failed_count"] == 0
+    assert data["healthy"] is True
+    assert data["offline_optional_modules"] == ["claudebox-ops"]
+    # Raw per-module status is untouched — only the aggregate counts are re-bucketed.
+    assert data["modules"]["claudebox-ops"]["status"] == "failed_init"
+
+
+def test_write_health_file_required_failure_still_degrades_with_optional_present(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a non-optional module failing alongside an offline optional one must
+    still drive healthy to false — SMCP-5 fault isolation for required modules is unchanged."""
+    import structlog
+
+    path = tmp_path / "health.json"
+    monkeypatch.setenv("SCOPED_MCP_HEALTH_FILE", str(path))
+    ops = structlog.get_logger("ops")
+
+    health = {
+        "required-bad": {"status": "failed_startup"},
+        "claudebox-ops": {"status": "failed_init"},
+    }
+    _write_health_file(health, ops, optional_modules={"claudebox-ops"})
+
+    data = json.loads(path.read_text())
+    assert data["failed_count"] == 1
+    assert data["healthy"] is False
+    assert data["offline_optional_modules"] == ["claudebox-ops"]
+
+
+@pytest.mark.asyncio
+async def test_status_tool_healthy_with_optional_module_offline() -> None:
+    from fastmcp import FastMCP
+
+    server = FastMCP("scoped-mcp/test")
+    health = {"good": {"status": "running"}, "claudebox-ops": {"status": "failed_init"}}
+    _register_status_tool(server, health, None, optional_modules={"claudebox-ops"})
+
+    data = await _call_status(server)
+    assert data["healthy"] is True
+    assert data["failed_count"] == 0
+    assert data["offline_optional_modules"] == ["claudebox-ops"]
+
+
+@pytest.mark.asyncio
+async def test_status_tool_degraded_when_required_module_fails_despite_optional() -> None:
+    from fastmcp import FastMCP
+
+    server = FastMCP("scoped-mcp/test")
+    health = {
+        "required-bad": {"status": "failed_startup"},
+        "claudebox-ops": {"status": "failed_init"},
+    }
+    _register_status_tool(server, health, None, optional_modules={"claudebox-ops"})
+
+    data = await _call_status(server)
+    assert data["healthy"] is False
+    assert data["failed_count"] == 1
+    assert data["offline_optional_modules"] == ["claudebox-ops"]
+
+
+def test_health_route_200_when_only_optional_module_failed() -> None:
+    from fastmcp import FastMCP
+    from starlette.testclient import TestClient
+
+    server = FastMCP("scoped-mcp/test")
+    health = {"claudebox-ops": {"status": "failed_init"}}
+    _register_health_route(server, health, None, optional_modules={"claudebox-ops"})
+
+    with TestClient(server.http_app()) as client:
+        resp = client.get("/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "healthy"
+    assert body["modules"]["failed_count"] == 0
+    assert body["offline_optional_modules"] == ["claudebox-ops"]
+
+
+def test_health_route_503_when_required_module_fails_despite_optional() -> None:
+    from fastmcp import FastMCP
+    from starlette.testclient import TestClient
+
+    server = FastMCP("scoped-mcp/test")
+    health = {
+        "required-bad": {"status": "failed_startup"},
+        "claudebox-ops": {"status": "failed_init"},
+    }
+    _register_health_route(server, health, None, optional_modules={"claudebox-ops"})
+
+    with TestClient(server.http_app()) as client:
+        resp = client.get("/health")
+    assert resp.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_build_server_optional_module_init_failure_stays_healthy(
+    agent_ctx: AgentContext,
+) -> None:
+    """End-to-end: a manifest-flagged optional module that fails __init__ (mirrors
+    claudebox-ops when claudebox is intentionally powered off) does not flip
+    scoped_mcp_status to unhealthy."""
+    bad_cls = MagicMock()
+    bad_cls.required_credentials = []
+    bad_cls.optional_credentials = []
+    bad_cls.side_effect = ConnectionRefusedError("claudebox offline")
+
+    manifest = Manifest.model_validate(
+        {
+            "agent_type": "test",
+            "modules": {
+                "claudebox-ops": {"type": "bad", "config": {}, "optional": True},
+            },
+        }
+    )
+
+    with patch(
+        "scoped_mcp.registry._discover_module_classes",
+        return_value=({"bad": bad_cls}, {}),
+    ):
+        server = build_server(agent_ctx, manifest)
+
+    data = await _call_status(server)
+    assert data["healthy"] is True
+    assert data["failed_count"] == 0
+    assert data["offline_optional_modules"] == ["claudebox-ops"]
+
+
+@pytest.mark.asyncio
+async def test_build_server_non_optional_init_failure_still_degrades(
+    agent_ctx: AgentContext,
+) -> None:
+    """Regression: a required (non-optional) module failing __init__ still degrades
+    healthy — SMCP-31 must not weaken fault isolation for modules that aren't flagged."""
+    bad_cls = MagicMock()
+    bad_cls.required_credentials = []
+    bad_cls.optional_credentials = []
+    bad_cls.side_effect = ValueError("bad config")
+
+    manifest = Manifest.model_validate(
+        {
+            "agent_type": "test",
+            "modules": {"bad-module": {"type": "bad", "config": {}}},
+        }
+    )
+
+    with patch(
+        "scoped_mcp.registry._discover_module_classes",
+        return_value=({"bad": bad_cls}, {}),
+    ):
+        server = build_server(agent_ctx, manifest)
+
+    data = await _call_status(server)
+    assert data["healthy"] is False
+    assert data["failed_count"] == 1
+    assert "offline_optional_modules" not in data
+
+
+@pytest.mark.asyncio
+async def test_lifespan_alerts_once_then_stays_silent_across_restart(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart while an optional module stays offline must not re-alert — the health
+    file (already persisted across restarts for the external prober) doubles as the
+    "last known state" the transition check compares against."""
+    from scoped_mcp.registry import _make_module_lifespan
+
+    health_path = tmp_path / "health.json"
+    monkeypatch.setenv("SCOPED_MCP_HEALTH_FILE", str(health_path))
+
+    sent: list[str] = []
+
+    async def _fake_send(event: str, detail: dict) -> bool:
+        sent.append(event)
+        return True
+
+    import scoped_mcp.ops_alert as ops_alert
+
+    monkeypatch.setattr(ops_alert, "send_ops_alert", _fake_send)
+
+    # First "process": claudebox-ops already failed at init (pre-populated, as
+    # build_server would do before the lifespan runs).
+    health = {"claudebox-ops": {"status": "failed_init", "error": "ConnectionRefusedError"}}
+    lifespan = _make_module_lifespan([], module_health=health, optional_modules={"claudebox-ops"})
+    async with lifespan(server=None):
+        pass
+    assert sent == ["optional_module_offline"]
+
+    # Second "process" (simulated restart): claudebox is still off, same failure.
+    health2 = {"claudebox-ops": {"status": "failed_init", "error": "ConnectionRefusedError"}}
+    lifespan2 = _make_module_lifespan([], module_health=health2, optional_modules={"claudebox-ops"})
+    async with lifespan2(server=None):
+        pass
+    # No second alert — offline state is unchanged from the previous run.
+    assert sent == ["optional_module_offline"]
+
+
+@pytest.mark.asyncio
+async def test_lifespan_alerts_on_recovery_across_restart(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart after claudebox comes back fires exactly one recovery alert."""
+    from scoped_mcp.registry import _make_module_lifespan
+
+    health_path = tmp_path / "health.json"
+    monkeypatch.setenv("SCOPED_MCP_HEALTH_FILE", str(health_path))
+
+    sent: list[str] = []
+
+    async def _fake_send(event: str, detail: dict) -> bool:
+        sent.append(event)
+        return True
+
+    import scoped_mcp.ops_alert as ops_alert
+
+    monkeypatch.setattr(ops_alert, "send_ops_alert", _fake_send)
+
+    # First "process": offline.
+    health = {"claudebox-ops": {"status": "failed_init", "error": "ConnectionRefusedError"}}
+    lifespan = _make_module_lifespan([], module_health=health, optional_modules={"claudebox-ops"})
+    async with lifespan(server=None):
+        pass
+    assert sent == ["optional_module_offline"]
+
+    # Second "process" (restart after claudebox comes back): module now running.
+    mock_good = MagicMock()
+    mock_good.startup = AsyncMock()
+    mock_good.shutdown = AsyncMock()
+    health2 = {"claudebox-ops": {"status": "instantiated"}}
+    lifespan2 = _make_module_lifespan(
+        [("claudebox-ops", mock_good)], module_health=health2, optional_modules={"claudebox-ops"}
+    )
+    async with lifespan2(server=None):
+        pass
+    assert sent == ["optional_module_offline", "optional_module_recovered"]
