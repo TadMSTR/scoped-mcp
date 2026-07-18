@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hmac
 import os
+import re
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -46,6 +47,16 @@ _STATUS_CODES = {
     "already_decided": 409,
     "invalid_otp": 403,
 }
+
+# SMCP-37: deployed AGENT_ID carries a forward-compat clone-pool suffix
+# (e.g. "sysadmin-01") that matrix-hitl-bot's config doesn't know about.
+# Strip it before comparing so config can use the stable bare name.
+_CLONE_SUFFIX_RE = re.compile(r"-\d+$")
+
+
+def _normalize_agent_id(agent_id: str) -> str:
+    """Strip a trailing clone-pool numeric suffix (e.g. "-01") for alias comparison."""
+    return _CLONE_SUFFIX_RE.sub("", agent_id)
 
 
 def _check_bearer(request: Any) -> tuple[bool, int]:
@@ -143,8 +154,10 @@ def register_hitl_routes(server: FastMCP, state: StateBackend, agent_ctx: AgentC
             return denied
         # agent_id query param is advisory — this process serves one agent, and
         # list_pending filters to it regardless. A mismatch yields an empty list.
+        # SMCP-37: accept either an exact match or a match after stripping each
+        # side's clone-pool suffix, so a caller using the bare alias still lines up.
         want = request.query_params.get("agent_id")
-        if want and want != agent_id:
+        if want and want != agent_id and _normalize_agent_id(want) != _normalize_agent_id(agent_id):
             return JSONResponse({"agent_id": agent_id, "pending": []}, status_code=200)
         try:
             pending = await hitl_endpoint.list_pending(state, agent_id)

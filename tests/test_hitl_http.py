@@ -117,3 +117,58 @@ def test_deny_via_http(monkeypatch):
         import anyio
 
         assert anyio.run(state.get, _preapproval_key(TOOL, ARGS_HASH)) is None
+
+
+def _app_with_suffixed_agent(monkeypatch, deployed_agent_id: str):
+    """Like _app_with_seed, but the deployed AGENT_ID carries a clone-pool suffix."""
+    monkeypatch.setenv("SCOPED_MCP_HITL_TOKEN", TOKEN)
+    state = InProcessBackend()
+    approval_id = f"{deployed_agent_id}.abc123def456"
+    payload = json.dumps(
+        {
+            "tool": TOOL,
+            "agent_id": deployed_agent_id,
+            "args_hash": ARGS_HASH,
+            "approval_id": approval_id,
+        }
+    )
+    import time
+
+    state._store[f"hitl:{approval_id}"] = (payload, time.monotonic() + 300)
+
+    server = FastMCP("scoped-mcp/test")
+    register_hitl_routes(
+        server, state, AgentContext(agent_id=deployed_agent_id, agent_type="build")
+    )
+    return server.http_app()
+
+
+def test_pending_agent_id_query_exact_match_unchanged(monkeypatch):
+    """SMCP-37 regression: the exact-match path (live deployed configs) keeps working."""
+    app = _app_with_suffixed_agent(monkeypatch, "sysadmin-01")
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    with TestClient(app) as client:
+        r = client.get("/hitl/pending", params={"agent_id": "sysadmin-01"}, headers=auth)
+        assert r.status_code == 200
+        assert len(r.json()["pending"]) == 1
+
+
+def test_pending_agent_id_query_normalizes_clone_suffix(monkeypatch):
+    """SMCP-37: a bare alias in the query param matches a suffixed deployed AGENT_ID."""
+    app = _app_with_suffixed_agent(monkeypatch, "sysadmin-01")
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    with TestClient(app) as client:
+        r = client.get("/hitl/pending", params={"agent_id": "sysadmin"}, headers=auth)
+        assert r.status_code == 200
+        assert r.json()["agent_id"] == "sysadmin-01"
+        assert len(r.json()["pending"]) == 1
+
+
+def test_pending_agent_id_query_rejects_different_agent(monkeypatch):
+    """SMCP-37: normalization must not let a genuinely different agent match."""
+    app = _app_with_suffixed_agent(monkeypatch, "sysadmin-01")
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    with TestClient(app) as client:
+        r = client.get("/hitl/pending", params={"agent_id": "developer"}, headers=auth)
+        assert r.status_code == 200
+        assert r.json()["pending"] == []
