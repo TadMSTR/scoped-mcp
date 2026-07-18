@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.1] — 2026-07-18
+
+### Fixed
+
+- **SMCP-37 — HITL agent-id clone-pool suffix normalization** (`hitl_http.py`):
+  `/hitl/pending`'s `agent_id` query-param check hard-rejected any non-exact
+  match against the deployed `AGENT_ID`, even though the check is advisory
+  (the actual list is always filtered server-side to the process's own
+  agent). Every scoped-mcp process deploys with a forward-compat numeric
+  suffix (e.g. `sysadmin-01`), which previously forced matrix-hitl-bot's
+  config to track that exact suffix instead of a stable bare alias. A
+  trailing `-\d+` suffix is now stripped from both sides before comparing,
+  so a bare alias and a suffixed deployed id both resolve, while a
+  genuinely different agent still correctly does not match. Companion fix
+  in `matrix-hitl-bot`. Audit: clean (1 Info finding, unrelated to this repo,
+  fixed in matrix-dispatcher).
+
 ## [1.10.0] — 2026-07-18
 
 ### Fixed
