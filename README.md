@@ -227,6 +227,17 @@ process cannot grow an unbounded log — tune with `SCOPED_MCP_LOG_MAX_BYTES` (d
 
 **Module Health** — `scoped_mcp_status` is always registered regardless of manifest content. Call it at session start to get `{modules, failed_count, total_count, healthy}` with per-module status values: `running`, `failed_import`, `failed_init`, `failed_startup`. Set `SCOPED_MCP_HEALTH_FILE` to a path and the lifespan will write a JSON health report after startup completes — useful for session-start hooks or external health-check scripts that need file-based status without calling an MCP tool. The health file is rewritten on every credential-health transition (see below) and carries a `written_at` timestamp so an external watcher can detect a wedged process by staleness. (v1.4.0)
 
+**Optional Modules** — a per-module manifest flag, `optional: true` (`ModuleConfig`), marks a dependency that's expected to be intentionally offline sometimes — e.g. `claudebox-ops`, which points at a host that's powered off on purpose outside working hours. A `failed_import` / `failed_init` / `failed_startup` on an optional module no longer counts toward `failed_count` / `healthy` in `scoped_mcp_status`, the health file, or `GET /health` — it's tracked separately under a new `offline_optional_modules` field instead, so the process stays `healthy: true` while an optional dependency is down. A healthy&harr;offline transition of an optional module still fires exactly one low-severity alert via the existing SMCP-26 Matrix&rarr;ntfy ops-alert path (comparing against the previous process's state, persisted in the health file) — no repeat spam across restarts while it stays offline, and recovery fires too. Non-optional module failures are unaffected — same degrade-to-503 behavior as before. (v1.10.0, SMCP-31)
+
+```yaml
+modules:
+  claudebox-ops:
+    type: mcp_proxy
+    optional: true              # expected to go offline when claudebox is powered down
+    config:
+      url: http://claudebox.local:8600/mcp
+```
+
 **Credential Health, Self-Heal & Alerting** — for `credentials.source: vault`, `scoped_mcp_status` and the health file also include a `credentials` block (`{source, token_healthy, consecutive_failures, last_renewal_ok_ts, last_reauth_ts, seconds_to_expiry_est, reauth_enabled}`), and top-level `healthy` goes `false` when the Vault token is unhealthy — so a process stuck in a permanent renewal-failure loop can no longer report `healthy: true`. Four layers make a silent credential failure both self-recovering and loud (SMCP-26):
 
 - **Self-heal re-auth** — when renewal fails with a permission/403 class error or crosses the critical-failure threshold, scoped-mcp mints a fresh token with a full AppRole login. This covers the hard `token_max_ttl` ceiling that `renew-self` alone can never exceed. **Opt-in via `SCOPED_MCP_VAULT_REAUTH=1`**, and only safe when the AppRole has a reusable secret_id (`secret_id_num_uses=0`) — re-logging in with a single-use secret_id would burn the only credential. When unset, re-auth is a no-op and the failure surfaces through the layers below.
@@ -656,7 +667,12 @@ guarantees. All are off by default; enable per-agent in the manifest:
   middleware finds and consumes the token and forwards the call upstream.
   Shadow-mode tools log a sanitised argument summary and return a
   synthetic empty-success without forwarding upstream — useful for
-  observing agent behaviour before enabling a tool.
+  observing agent behaviour before enabling a tool. Pre-approval tokens
+  carry the `approval_id`, so once a token is consumed on retry the
+  middleware resolves the `hitl_approvals` audit row to `consumed`
+  instead of leaving it stuck at `approved` forever (v1.10.0, SMCP-39) —
+  fails open on a pre-upgrade plain-string token, skipping only the audit
+  resolve.
 
   CLI subcommands:
   ```
