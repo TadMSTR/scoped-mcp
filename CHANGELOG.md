@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0] — 2026-07-21
+
 ### Added
 
 - **HITL interactive mode** (`hitl.mode: enforce | interactive`) — a formal,
@@ -36,6 +38,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     already runs under. Agent guidance must only call it after an explicit
     in-conversation approve/deny, never speculatively. Enforce mode (unchanged)
     remains the correct mode for headless / clone-pool agents.
+
+### Security
+
+- Audit `scoped-mcp-hitl-bypass-mode-2026-07`: 1 HIGH (accepted), 2 Info.
+  - **HIGH (accepted risk, tracked):** because scoped-mcp runs as one shared
+    long-lived HTTP process per agent, the `scoped_mcp_hitl_confirm` registration
+    gate (static `hitl.mode` field) cannot distinguish an attended session from a
+    headless `workflow_mode: auto` launch of the same agent identity — so enabling
+    interactive mode for an agent that is ever run headless-auto is a self-approval
+    bypass. The scoped-mcp code ships safe (default `enforce`, dormant); the risk is
+    realised only by the manifest flip + running those agents unattended. Accepted
+    by the operator (developer/sysadmin not run headless-auto today); to be secured
+    at the dispatcher layer before that changes.
+  - **Info (fixed):** added test coverage for `scoped_mcp_hitl_confirm`'s fail-closed
+    `backend_unavailable` path (a state-backend error must never fabricate an
+    approval). `resolved_via` SQL param threading verified correct — no change.
 
 ## [1.10.1] — 2026-07-18
 
