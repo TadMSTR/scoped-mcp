@@ -54,13 +54,13 @@ def _belongs_to_agent(approval_id: str, agent_id: str) -> bool:
     return "." in approval_id and approval_id.rsplit(".", 1)[0] == agent_id
 
 
-async def _resolve_audit(approval_id: str, state: str) -> None:
+async def _resolve_audit(approval_id: str, state: str, resolved_via: str | None = None) -> None:
     """Best-effort audit state update (fail-open)."""
     try:
         from .registry_db import get_registry
 
         registry = await get_registry()
-        await registry.resolve_hitl_approval(approval_id, state)
+        await registry.resolve_hitl_approval(approval_id, state, resolved_via=resolved_via)
     except Exception as e:  # fail-open
         _log.warning("hitl_audit_resolve_failed", approval_id=approval_id, error=type(e).__name__)
 
@@ -70,10 +70,17 @@ async def approve(
     agent_id: str,
     approval_id: str,
     otp: str | None = None,
+    resolved_via: str = "operator_endpoint",
 ) -> dict[str, Any]:
     """Approve a pending request. Returns a result dict with a ``status`` key.
 
     status ∈ {approved, not_found, already_decided, invalid_otp}.
+
+    ``resolved_via`` tags the audit row with the resolution channel so a later
+    audit can tell the real out-of-band path (``matrix_bot`` / ``courier``) apart
+    from the in-session ``interactive_self_service`` shortcut. It changes only the
+    audit label — the peek/claim/token-write logic is identical for every caller,
+    so the interactive tool reuses this function rather than duplicating it.
 
     Backend errors are NOT caught here — they propagate so the HTTP layer fails
     closed with a 503. Only the audit write is best-effort.
@@ -104,7 +111,7 @@ async def approve(
         # Audit: 2026-07-17/hitl-approval-flow-2026-07.
         stored_otp = await state.get_delete(_otp_key(approval_id))
         if stored_otp is None or not hmac.compare_digest(otp, stored_otp):
-            await _resolve_audit(approval_id, "denied")
+            await _resolve_audit(approval_id, "denied", resolved_via=resolved_via)
             _log.warning("hitl_approve_invalid_otp", approval_id=approval_id, agent_id=agent_id)
             return {"status": "invalid_otp"}
 
@@ -124,7 +131,7 @@ async def approve(
         # a token the middleware will never match (which would silently never
         # approve). Surface as not_found so the operator re-triggers.
         _log.warning("hitl_approve_missing_binding", approval_id=approval_id, agent_id=agent_id)
-        await _resolve_audit(approval_id, "expired")
+        await _resolve_audit(approval_id, "expired", resolved_via=resolved_via)
         return {"status": "not_found"}
 
     # Write the one-time pre-approval token the middleware consumes on retry.
@@ -137,19 +144,29 @@ async def approve(
         json.dumps({"status": "approved", "approval_id": approval_id}),
         PREAPPROVAL_TTL_SECONDS,
     )
-    await _resolve_audit(approval_id, "approved")
+    await _resolve_audit(approval_id, "approved", resolved_via=resolved_via)
     _log.warning(
         "hitl_approved_via_endpoint",
         approval_id=approval_id,
         agent_id=agent_id,
         tool=tool_name,
         courier=otp is not None,
+        resolved_via=resolved_via,
     )
     return {"status": "approved", "tool": tool_name, "agent_id": agent_id}
 
 
-async def deny(state: StateBackend, agent_id: str, approval_id: str) -> dict[str, Any]:
-    """Deny a pending request: drop the pending record and the OTP."""
+async def deny(
+    state: StateBackend,
+    agent_id: str,
+    approval_id: str,
+    resolved_via: str = "operator_endpoint",
+) -> dict[str, Any]:
+    """Deny a pending request: drop the pending record and the OTP.
+
+    ``resolved_via`` tags the audit row with the resolution channel (see
+    :func:`approve`).
+    """
     if not _belongs_to_agent(approval_id, agent_id):
         return {"status": "not_found"}
     claimed = await state.get_delete(_pending_key(approval_id))
@@ -159,9 +176,13 @@ async def deny(state: StateBackend, agent_id: str, approval_id: str) -> dict[str
     tool_name = ""
     with contextlib.suppress(json.JSONDecodeError, AttributeError):
         tool_name = json.loads(claimed).get("tool", "")
-    await _resolve_audit(approval_id, "denied")
+    await _resolve_audit(approval_id, "denied", resolved_via=resolved_via)
     _log.warning(
-        "hitl_denied_via_endpoint", approval_id=approval_id, agent_id=agent_id, tool=tool_name
+        "hitl_denied_via_endpoint",
+        approval_id=approval_id,
+        agent_id=agent_id,
+        tool=tool_name,
+        resolved_via=resolved_via,
     )
     return {"status": "denied", "tool": tool_name, "agent_id": agent_id}
 

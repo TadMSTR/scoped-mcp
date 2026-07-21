@@ -1,0 +1,14 @@
+-- ---------------------------------------------------------------------------
+-- 0002 — HITL resolution channel (SMCP — hitl interactive mode)
+--
+-- Records HOW a gated call was resolved, so an audit can distinguish approvals
+-- that went through the real out-of-band external channel (matrix_bot / courier)
+-- from the in-session interactive shortcut (interactive_self_service), which
+-- trusts the requesting agent's own report of the operator's decision.
+--
+-- Nullable, no default: rows written before this column existed, and any path
+-- that does not set a channel, simply leave it NULL. Idempotent — safe to run
+-- more than once, and safe to apply BEFORE the code that writes it (old code
+-- never references the column).
+-- ---------------------------------------------------------------------------
+ALTER TABLE hitl_approvals ADD COLUMN IF NOT EXISTS resolved_via TEXT;

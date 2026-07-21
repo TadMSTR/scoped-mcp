@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **HITL interactive mode** (`hitl.mode: enforce | interactive`) — a formal,
+  cheap, in-session approval path for agents working live with the operator,
+  replacing the ad-hoc "read the Matrix message and self-resolve via a shell
+  call" workaround.
+  - New manifest field `hitl.mode` (`manifest.py`), default `enforce` — no
+    behavior change for any manifest that does not opt in. `enforce` keeps the
+    existing reject-then-wait via the matrix-hitl-bot endpoint / operator CLI.
+  - `interactive` mode fires the same Matrix notify and the same immediate
+    reject (the agent still stops and asks), but registers a companion tool
+    **`scoped_mcp_hitl_confirm(approval_id, decision)`** (`registry.py`) that
+    the agent calls directly to resolve the pending request. It reuses the
+    shared `hitl_endpoint.approve`/`deny` logic — no duplicated approval path,
+    no Matrix round-trip. The tool is registered **only** for interactive-mode
+    agents that actually gate tools, so an `enforce`-mode / unattended agent can
+    never reach it.
+  - Audit rows now carry a `resolved_via` channel (`hitl_endpoint.py`,
+    `hitl_http.py`, `registry_db.py`) — `matrix_bot` / `courier` for the real
+    out-of-band paths vs `interactive_self_service` for the in-session shortcut
+    — so an audit can always distinguish them. New migration
+    `migrations/0002_hitl_resolved_via.sql` (`ADD COLUMN IF NOT EXISTS`, safe to
+    apply before the code; the column write fails open until applied).
+  - **Trust tradeoff (interactive only, by design):** `scoped_mcp_hitl_confirm`
+    trusts the agent's own report that the operator approved in the current
+    conversation turn — the same trust level every other interactive tool call
+    already runs under. Agent guidance must only call it after an explicit
+    in-conversation approve/deny, never speculatively. Enforce mode (unchanged)
+    remains the correct mode for headless / clone-pool agents.
+
 ## [1.10.1] — 2026-07-18
 
 ### Fixed

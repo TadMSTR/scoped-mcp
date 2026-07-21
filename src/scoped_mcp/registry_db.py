@@ -157,7 +157,11 @@ class RegistryDB:
             _log.warning("registry_insert_approval_failed", error=type(e).__name__)
 
     async def resolve_hitl_approval(
-        self, approval_id: str, state: str, expected_state: str | None = None
+        self,
+        approval_id: str,
+        state: str,
+        expected_state: str | None = None,
+        resolved_via: str | None = None,
     ) -> None:
         """Mark an approval resolved (approved | denied | consumed | expired).
 
@@ -170,39 +174,45 @@ class RegistryDB:
         the initial "pending" state without knowing it in advance (hitl_endpoint.py's
         approve/deny paths) — passing "pending" there would be redundant with the
         Dragonfly get_delete claim that already makes that transition exactly-once.
+
+        ``resolved_via``, when given, records the resolution channel (e.g.
+        ``matrix_bot``, ``courier``, ``interactive_self_service``) in the audit row.
+        Left None (the default) for callers that don't know or don't want to change it
+        — notably hitl.py's approved->consumed transition, which must preserve the
+        channel recorded at approve time — so the column is only written when a caller
+        explicitly supplies it, never clobbered back to NULL on a later transition.
         """
         if self._pool is None:
             return
         try:
             async with self._pool.acquire() as conn:
+                # Build the base SET/WHERE + params, then append resolved_via only
+                # when supplied — a NULL param would overwrite the approve-time
+                # channel on a later consume/expire transition.
+                params: list[Any] = [approval_id, state]
+                where = "approval_id = $1"
                 if expected_state is not None:
-                    result = await conn.execute(
-                        """
-                        UPDATE hitl_approvals
-                           SET state = $2, resolved_at = now()
-                         WHERE approval_id = $1 AND state = $3
-                        """,
-                        approval_id,
-                        state,
-                        expected_state,
-                    )
-                    if result == "UPDATE 0":
-                        _log.warning(
-                            "registry_resolve_approval_state_mismatch",
-                            approval_id=approval_id,
-                            target_state=state,
-                            expected_state=expected_state,
-                        )
-                    return
-                await conn.execute(
-                    """
+                    params.append(expected_state)
+                    where += f" AND state = ${len(params)}"
+                via_clause = ""
+                if resolved_via is not None:
+                    params.append(resolved_via)
+                    via_clause = f", resolved_via = ${len(params)}"
+                result = await conn.execute(
+                    f"""
                     UPDATE hitl_approvals
-                       SET state = $2, resolved_at = now()
-                     WHERE approval_id = $1
+                       SET state = $2, resolved_at = now(){via_clause}
+                     WHERE {where}
                     """,
-                    approval_id,
-                    state,
+                    *params,
                 )
+                if expected_state is not None and result == "UPDATE 0":
+                    _log.warning(
+                        "registry_resolve_approval_state_mismatch",
+                        approval_id=approval_id,
+                        target_state=state,
+                        expected_state=expected_state,
+                    )
         except Exception as e:  # fail-open
             _log.warning("registry_resolve_approval_failed", error=type(e).__name__)
 
