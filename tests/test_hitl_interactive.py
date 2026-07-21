@@ -248,6 +248,31 @@ async def test_confirm_tags_interactive_self_service(agent_ctx: AgentContext, mo
 
 
 @pytest.mark.asyncio
+async def test_confirm_fails_closed_on_backend_error(agent_ctx: AgentContext, monkeypatch) -> None:
+    """A state-backend error inside approve must NEVER resolve to an approval —
+    the tool returns backend_unavailable and writes no pre-approval token."""
+    state = InProcessBackend()
+    await _seed(state)
+    server = _build(agent_ctx, _manifest(mode="interactive", approval_required=[TOOL]), state)
+
+    async def _boom(*a, **k):
+        raise RuntimeError("dragonfly down")
+
+    # Force the shared endpoint logic to raise mid-resolution.
+    monkeypatch.setattr(hitl_endpoint, "approve", _boom)
+
+    async with Client(server) as client:
+        result = await client.call_tool(
+            "scoped_mcp_hitl_confirm", {"approval_id": APPROVAL_ID, "decision": "approve"}
+        )
+
+    assert result.data["status"] == "backend_unavailable"
+    # fail-closed: no pre-approval token written, pending record untouched
+    assert await state.get(_preapproval_key(TOOL, ARGS_HASH)) is None
+    assert await state.get(f"hitl:{APPROVAL_ID}") is not None
+
+
+@pytest.mark.asyncio
 async def test_endpoint_approve_defaults_to_operator_endpoint(monkeypatch) -> None:
     """The direct endpoint approve (unchanged callers) tags operator_endpoint."""
     recording = _RecordingRegistry()
