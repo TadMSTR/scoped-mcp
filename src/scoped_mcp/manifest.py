@@ -226,6 +226,19 @@ class HitlConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # Resolution mode for gated calls (SMCP — hitl interactive mode).
+    #   enforce     — (default) reject-then-wait via Matrix + the bot-mediated
+    #                 approve endpoint / operator CLI. Resolution comes from an
+    #                 out-of-band channel the requesting agent cannot write to.
+    #                 This is the real mechanism for headless / clone-pool agents.
+    #   interactive — same Matrix notify + same immediate reject (the agent still
+    #                 stops and asks), but resolved in-session by the agent itself
+    #                 via the ``scoped_mcp_hitl_confirm`` tool, which is registered
+    #                 ONLY for interactive-mode agents. It trusts the agent's own
+    #                 report that the operator approved in the current conversation
+    #                 turn — the same trust level every other interactive tool call
+    #                 already runs under. Never use for unattended runs.
+    mode: Literal["enforce", "interactive"] = "enforce"
     # Glob patterns for tools that require explicit operator approval before execution
     approval_required: list[str] = []
     # Glob patterns for tools that should be logged-only (synthetic empty-success response,

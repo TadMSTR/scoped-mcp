@@ -382,6 +382,64 @@ def test_state_backend_dragonfly_valid(tmp_path: Path) -> None:
     assert m.state_backend.url == "redis://localhost:6379/0"
 
 
+# ── hitl.mode (interactive vs enforce) ────────────────────────────────────────
+
+
+def test_hitl_mode_defaults_to_enforce() -> None:
+    """An hitl block without an explicit mode is enforce — no behavior change."""
+    m = Manifest.model_validate(
+        {
+            "agent_type": "developer",
+            "modules": {"ntfy": {}},
+            "state_backend": {"type": "dragonfly", "url": "redis://localhost:6379/0"},
+            "hitl": {"approval_required": ["gitea_pr_merge"]},
+        }
+    )
+    assert m.hitl is not None
+    assert m.hitl.mode == "enforce"
+
+
+def test_hitl_mode_interactive_accepted(tmp_path: Path) -> None:
+    path = write_manifest(
+        tmp_path,
+        """\
+        agent_type: developer
+        modules:
+          ntfy: {}
+        state_backend:
+          type: dragonfly
+          url: "redis://localhost:6379/0"
+        hitl:
+          mode: interactive
+          approval_required:
+            - gitea_pr_merge
+        """,
+    )
+    m = load_manifest(path)
+    assert m.hitl is not None
+    assert m.hitl.mode == "interactive"
+
+
+def test_hitl_mode_invalid_value_rejected(tmp_path: Path) -> None:
+    path = write_manifest(
+        tmp_path,
+        """\
+        agent_type: developer
+        modules:
+          ntfy: {}
+        state_backend:
+          type: dragonfly
+          url: "redis://localhost:6379/0"
+        hitl:
+          mode: bypass
+          approval_required:
+            - gitea_pr_merge
+        """,
+    )
+    with pytest.raises(ManifestError):
+        load_manifest(path)
+
+
 # ── rate_limits config ────────────────────────────────────────────────────────
 
 

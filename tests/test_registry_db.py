@@ -151,3 +151,50 @@ async def test_resolve_expected_state_guard_swallows_db_errors():
     """The guarded path must remain fail-open, same as the unguarded path."""
     reg = RegistryDB(pool=_RaisingPool())
     await reg.resolve_hitl_approval("developer.abc", "consumed", expected_state="approved")
+
+
+# ── resolved_via channel tag (hitl interactive mode) ──────────────────────────
+
+
+async def test_resolve_with_resolved_via_unguarded_appends_column():
+    """resolved_via, when supplied on the unguarded path, is appended as $3."""
+    conn = _FakeConn(status="UPDATE 1")
+    reg = RegistryDB(pool=_FakePool(conn))
+
+    await reg.resolve_hitl_approval(
+        "developer.abc", "approved", resolved_via="interactive_self_service"
+    )
+
+    assert len(conn.calls) == 1
+    query, *params = conn.calls[0]
+    assert "resolved_via = $3" in query
+    assert "AND state" not in query
+    assert params == ["developer.abc", "approved", "interactive_self_service"]
+
+
+async def test_resolve_with_resolved_via_and_expected_state_numbers_params():
+    """With both guards, expected_state is $3 and resolved_via becomes $4."""
+    conn = _FakeConn(status="UPDATE 1")
+    reg = RegistryDB(pool=_FakePool(conn))
+
+    await reg.resolve_hitl_approval(
+        "developer.abc", "consumed", expected_state="approved", resolved_via="matrix_bot"
+    )
+
+    assert len(conn.calls) == 1
+    query, *params = conn.calls[0]
+    assert "AND state = $3" in query
+    assert "resolved_via = $4" in query
+    assert params == ["developer.abc", "consumed", "approved", "matrix_bot"]
+
+
+async def test_resolve_without_resolved_via_omits_column():
+    """No resolved_via => the UPDATE never touches the column (preserves the
+    approve-time channel across a later consume/expire transition)."""
+    conn = _FakeConn(status="UPDATE 1")
+    reg = RegistryDB(pool=_FakePool(conn))
+
+    await reg.resolve_hitl_approval("developer.abc", "consumed", expected_state="approved")
+
+    query, *_ = conn.calls[0]
+    assert "resolved_via" not in query

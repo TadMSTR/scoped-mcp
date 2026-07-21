@@ -120,7 +120,13 @@ def register_hitl_routes(server: FastMCP, state: StateBackend, agent_ctx: AgentC
         if not approval_id or not isinstance(approval_id, str):
             return JSONResponse({"error": "approval_id required"}, status_code=400)
         try:
-            result = await hitl_endpoint.approve(state, agent_id, approval_id, otp=otp)
+            # Tag the audit channel: an OTP means the Phase 2 courier form, its
+            # absence the Phase 1 trusted matrix-hitl-bot. Either way it is the
+            # real out-of-band path, distinct from interactive_self_service.
+            via = "courier" if otp else "matrix_bot"
+            result = await hitl_endpoint.approve(
+                state, agent_id, approval_id, otp=otp, resolved_via=via
+            )
         except Exception as e:  # fail-closed — a backend error must deny, never approve
             _log.error(
                 "hitl_approve_backend_error", approval_id=approval_id, error=type(e).__name__
@@ -141,7 +147,9 @@ def register_hitl_routes(server: FastMCP, state: StateBackend, agent_ctx: AgentC
         if not approval_id or not isinstance(approval_id, str):
             return JSONResponse({"error": "approval_id required"}, status_code=400)
         try:
-            result = await hitl_endpoint.deny(state, agent_id, approval_id)
+            result = await hitl_endpoint.deny(
+                state, agent_id, approval_id, resolved_via="matrix_bot"
+            )
         except Exception as e:  # fail-closed
             _log.error("hitl_deny_backend_error", approval_id=approval_id, error=type(e).__name__)
             return JSONResponse({"error": "backend_unavailable"}, status_code=503)

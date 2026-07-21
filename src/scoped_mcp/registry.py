@@ -526,6 +526,77 @@ def _register_status_tool(
     server.tool(name="scoped_mcp_status")(scoped_mcp_status)
 
 
+def _register_hitl_confirm_tool(
+    server: FastMCP,
+    state: Any,
+    agent_ctx: AgentContext,
+) -> None:
+    """Register ``scoped_mcp_hitl_confirm`` — the interactive-mode approval tool.
+
+    Registered ONLY when the manifest sets ``hitl.mode: interactive`` (see
+    build_server). For an ``enforce``-mode agent the tool is never created, so it
+    cannot be reached for anything gating a headless run — the operator must use
+    the out-of-band Matrix/CLI path instead.
+
+    The tool trusts the requesting agent's own report that the operator approved
+    or denied in the current conversation. That is the deliberate, operator-accepted
+    trust downgrade of interactive mode — the same trust level every other tool call
+    in an interactive session already runs under. It resolves via the shared
+    :mod:`hitl_endpoint` approve/deny logic (no duplicated approval logic), tagged
+    ``resolved_via="interactive_self_service"`` so the audit trail stays honest.
+    """
+    from . import hitl_endpoint
+
+    agent_id = agent_ctx.agent_id
+
+    async def scoped_mcp_hitl_confirm(approval_id: str, decision: str) -> dict:
+        """Resolve a pending HITL approval for THIS agent, in-session.
+
+        Only call this AFTER the operator has given an explicit, unambiguous
+        approve/deny **in the current conversation turn**. Never call it
+        speculatively, never on an old approval, never chained automatically —
+        treat it exactly like any other "wait for explicit confirmation"
+        instruction governing a risky action.
+
+        Args:
+            approval_id: the ``{agent}.{uuid}`` id from the HITL rejection message.
+            decision: ``"approve"`` or ``"deny"``.
+
+        Returns a result dict with a ``status`` key:
+        approved | denied | not_found | already_decided | invalid_decision |
+        backend_unavailable. On ``approved``, retry the original gated tool call —
+        it will find the one-time pre-approval token and proceed.
+        """
+        if not approval_id or not isinstance(approval_id, str):
+            return {"status": "invalid_decision", "detail": "approval_id is required"}
+        decision_norm = (decision or "").strip().lower()
+        if decision_norm not in ("approve", "deny"):
+            return {
+                "status": "invalid_decision",
+                "detail": "decision must be 'approve' or 'deny'",
+            }
+        try:
+            if decision_norm == "approve":
+                return await hitl_endpoint.approve(
+                    state, agent_id, approval_id, resolved_via="interactive_self_service"
+                )
+            return await hitl_endpoint.deny(
+                state, agent_id, approval_id, resolved_via="interactive_self_service"
+            )
+        except Exception as exc:
+            # Fail-closed: a state-backend error must never resolve to an approval.
+            _log = get_ops_logger()
+            _log.error(
+                "hitl_confirm_backend_error",
+                approval_id=approval_id,
+                agent_id=agent_id,
+                error=type(exc).__name__,
+            )
+            return {"status": "backend_unavailable", "error": type(exc).__name__}
+
+    server.tool(name="scoped_mcp_hitl_confirm")(scoped_mcp_hitl_confirm)
+
+
 def _register_health_route(
     server: FastMCP,
     module_health: dict,
@@ -796,6 +867,22 @@ def build_server(
         optional_modules=optional_modules,
     )
     registered_tool_names.append("scoped_mcp_status")
+
+    # Interactive-mode HITL confirm tool (SMCP — hitl interactive mode). Registered
+    # ONLY when the manifest opts into hitl.mode: interactive AND actually gates
+    # tools AND a shared state backend exists to resolve against. For an
+    # enforce-mode agent the tool is never registered — an unattended run cannot
+    # reach it, so gating still requires the out-of-band Matrix/CLI path. Not gated
+    # on transport: it dispatches over the same channel as every other tool.
+    if (
+        manifest.hitl is not None
+        and manifest.hitl.mode == "interactive"
+        and manifest.hitl.approval_required
+        and state is not None
+    ):
+        _register_hitl_confirm_tool(server, state, agent_ctx)
+        registered_tool_names.append("scoped_mcp_hitl_confirm")
+        ops.info("hitl_confirm_tool_registered", agent_id=agent_ctx.agent_id)
 
     # Unauthenticated /health route — only under http, where an external prober can
     # reach it. Under stdio there is no HTTP server, so registration would be dead.

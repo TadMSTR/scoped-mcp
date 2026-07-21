@@ -190,6 +190,7 @@ Human-in-the-loop approval for selected tools. Optional. Requires `state_backend
 
 ```yaml
 hitl:
+  mode: interactive           # enforce (default) or interactive
   approval_required: ["filesystem_delete_*", "sqlite_execute"]
   shadow: ["mcp_proxy_*"]    # log-only — return synthetic empty-success, never forward
   timeout_seconds: 300        # auto-reject after this many seconds (default: 300)
@@ -200,12 +201,24 @@ hitl:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `mode` | `"enforce"`, `"interactive"` | `"enforce"` | Resolution mode for gated calls (see below) |
 | `approval_required` | list[str] | `[]` | Glob patterns — matching tools require explicit operator approval before forwarding |
 | `shadow` | list[str] | `[]` | Glob patterns — matching tools log a sanitised summary and return synthetic empty-success without forwarding upstream |
 | `timeout_seconds` | int | `300` | Auto-reject if no decision arrives within this window |
 | `notify.type` | `"log"`, `"ntfy"`, `"webhook"`, `"matrix"` | `"log"` | Notification channel for pending approval requests |
 
 Shadow takes precedence: a tool matched by both `shadow` and `approval_required` is always shadowed. Transport failures in the notifier are logged and swallowed — a notification outage cannot wedge the approval loop.
+
+### mode: enforce vs interactive
+
+Both modes fire the same Matrix/notify prompt and both reject the gated call immediately, so the agent always stops and asks — they differ only in **how the decision is returned**.
+
+- **`enforce`** (default) — resolution comes from an out-of-band channel the requesting agent cannot write to: the matrix-hitl-bot approve endpoint or the operator CLI (`scoped-mcp hitl approve <id>`). This is the correct mode for headless / clone-pool agents that run unattended. Unchanged from prior releases; any manifest that omits `mode` behaves exactly as before.
+- **`interactive`** — for an agent working live in a session with the operator watching the transcript. A companion tool, **`scoped_mcp_hitl_confirm(approval_id, decision)`**, is registered **only** for interactive-mode agents. After the operator gives an explicit approve/deny in the conversation, the agent calls this tool to resolve the pending request in one step, over its own connection — no Matrix round-trip, no `system-ops` shell workaround. It reuses the exact same pre-approval token-write logic as the bot path.
+
+> **Trust tradeoff (interactive only).** `scoped_mcp_hitl_confirm` trusts the agent's own report that the operator approved in the current turn — it does **not** cryptographically verify an out-of-band decision. This is the same trust level every other interactive tool call already runs under. It is registered **only** for interactive-mode agents, so an `enforce`-mode (e.g. unattended) agent can never reach it. Agent guidance must state plainly: only call it after an explicit, unambiguous operator approve/deny **in the current conversation turn** — never speculatively, never on an old approval, never chained automatically.
+
+Every resolution is tagged in the audit trail with a `resolved_via` channel — `matrix_bot` / `courier` (the real out-of-band paths) vs `interactive_self_service` (the in-session shortcut) — so an audit can always tell them apart. Recording the tag requires the `0002_hitl_resolved_via.sql` migration; without it the resolution still works (the column write fails open) but the tag is not persisted.
 
 > **Pattern grammar:** Tool names are `{manifest_key}_{method}` (underscore-joined, e.g. `mcp_proxy_call`, `filesystem_read_file`). Use `mcp_proxy_*`, not `mcp_proxy.*` — a dotted glob matches nothing and the rule silently never fires (fail-open). scoped-mcp warns at startup for any `approval_required` or `shadow` pattern that matches no registered tool.
 
