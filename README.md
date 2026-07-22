@@ -705,6 +705,32 @@ guarantees. All are off by default; enable per-agent in the manifest:
   resolves to `already_decided`; a Dragonfly error denies (`503`) rather than
   approving — same fail-closed rule as the CLI path above.
 
+  **Interactive mode** (v1.11.0) — a manifest field, `hitl.mode: enforce | interactive`
+  (default `enforce`, no behavior change for existing manifests), controls how a gated
+  call's approval is resolved. Both modes fire the same notify and the same immediate
+  reject — they differ only in how the decision comes back:
+  - **`enforce`** (default) — resolution comes from an out-of-band channel the agent
+    cannot write to itself: the matrix-hitl-bot endpoint or `scoped-mcp hitl approve
+    <id>`. Correct mode for headless / clone-pool agents that run unattended.
+  - **`interactive`** — for an agent working live in a session with the operator
+    watching the transcript. Registers a companion tool,
+    **`scoped_mcp_hitl_confirm(approval_id, decision)`**, *only* for interactive-mode
+    agents that gate tools, so the agent can resolve its own pending request in one
+    step after an explicit in-conversation approve/deny — no Matrix round-trip. It
+    reuses the same `hitl_endpoint.approve`/`deny` logic as the bot path, and every
+    resolution is tagged in the audit trail with a `resolved_via` channel
+    (`matrix_bot` / `courier` / `interactive_self_service`) so the two paths are
+    always distinguishable after the fact.
+
+  > **Trust tradeoff.** `scoped_mcp_hitl_confirm` trusts the agent's own report that
+  > the operator approved in the current turn — it does not cryptographically verify
+  > an out-of-band decision. Because scoped-mcp runs as one shared long-lived process
+  > per agent, the registration gate is a static manifest field: it cannot tell an
+  > attended session apart from a headless run of the same agent identity. **Only
+  > enable `interactive` for agents that are never run headless/unattended** — flipping
+  > it for an agent that is ever launched headless-auto turns this into a self-approval
+  > bypass. `enforce` remains correct for any agent that might run unattended.
+
   **Agent session registry** (v1.9.0, optional `[postgres]` extra) — a
   fail-open `asyncpg` DAL (`registry_db.py`) over a session registry on
   `agent-postgres`, configured via `AGENT_REGISTRY_DSN`
