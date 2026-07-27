@@ -194,6 +194,31 @@ async def _alert_optional_module_transitions(
         )
 
 
+def _redact_module_errors(module_health: dict) -> dict:
+    """Return a copy of ``module_health`` with each ``error`` reduced to its type.
+
+    ``module_health[name]["error"]`` is ``f"{type(exc).__name__}: {exc}"``. The
+    message half can embed whatever the raising library chose to include —
+    notably a dependency URL with inline userinfo. Anything written to a file or
+    pushed to an alert gets the type half only; the full string stays in the ops
+    log and the authenticated status tool.
+
+    Entries without an ``error`` pass through unchanged, so a ``running`` module
+    is untouched.
+    """
+    redacted: dict = {}
+    for name, health in module_health.items():
+        if not isinstance(health, dict) or "error" not in health:
+            redacted[name] = health
+            continue
+        entry = {k: v for k, v in health.items() if k != "error"}
+        error_type = str(health["error"]).split(":", 1)[0].strip()
+        if error_type:
+            entry["error_type"] = error_type
+        redacted[name] = entry
+    return redacted
+
+
 def _write_health_file(
     module_health: dict,
     ops: object,
@@ -212,6 +237,14 @@ def _write_health_file(
     ``optional_modules`` (SMCP-31): module names whose failure must not count
     toward ``failed_count``/``healthy`` — tracked separately under
     ``offline_optional_modules`` instead.
+
+    SECURITY: per-module entries are written with the exception **type** only
+    (``error_type``), never the raw exception message. A module constructor can
+    raise with a message echoing back a dependency URL carrying inline
+    credentials, and this file is a plain on-disk artifact polled by external
+    watchers. Same contract the ops alerts and the ``/health`` route already
+    hold. The full message stays available to the operator through the ops log
+    (``module_init_failed``) and the authenticated ``scoped_mcp_status`` tool.
     """
     path = os.environ.get("SCOPED_MCP_HEALTH_FILE")
     if not path:
@@ -221,7 +254,7 @@ def _write_health_file(
     )
     token_healthy = credential_health is None or credential_health.get("token_healthy", True)
     data = {
-        "modules": module_health,
+        "modules": _redact_module_errors(module_health),
         "failed_count": len(required_failed),
         "total_count": len(module_health),
         "healthy": len(required_failed) == 0 and token_healthy,

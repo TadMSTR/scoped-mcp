@@ -1071,6 +1071,50 @@ def test_write_health_file_required_failure_still_degrades_with_optional_present
     assert data["offline_optional_modules"] == ["claudebox-ops"]
 
 
+def test_write_health_file_redacts_exception_message_to_type(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audit LOW (scoped-mcp-module-init-selfheal-2026-07): the health file is a plain
+    on-disk artifact polled by external watchers. A module constructor can raise with a
+    message echoing a dependency URL that carries inline credentials, so only the
+    exception TYPE is written — matching the ops-alert and /health contracts."""
+    import structlog
+
+    path = tmp_path / "health.json"
+    monkeypatch.setenv("SCOPED_MCP_HEALTH_FILE", str(path))
+    ops = structlog.get_logger("ops")
+
+    health = {
+        "good": {"status": "running"},
+        "leaky": {
+            "status": "failed_init",
+            "error": "ConnectionError: failed to connect to http://user:hunter2@localhost:9/mcp",
+        },
+    }
+    _write_health_file(health, ops)
+
+    raw = path.read_text()
+    assert "hunter2" not in raw
+    assert "user:hunter2@" not in raw
+    data = json.loads(raw)
+    assert data["modules"]["leaky"]["error_type"] == "ConnectionError"
+    assert "error" not in data["modules"]["leaky"]
+    # Status is preserved, and a healthy module is passed through untouched.
+    assert data["modules"]["leaky"]["status"] == "failed_init"
+    assert data["modules"]["good"] == {"status": "running"}
+    # The caller's dict is not mutated — scoped_mcp_status still serves the full message.
+    assert health["leaky"]["error"].endswith("hunter2@localhost:9/mcp")
+
+
+def test_redact_module_errors_passes_through_non_dict_entries() -> None:
+    """Defensive: a malformed entry must not crash the health-file write path, which
+    runs on every startup and every credential transition."""
+    from scoped_mcp.registry import _redact_module_errors
+
+    out = _redact_module_errors({"weird": "not-a-dict", "ok": {"status": "running"}})
+    assert out == {"weird": "not-a-dict", "ok": {"status": "running"}}
+
+
 @pytest.mark.asyncio
 async def test_status_tool_healthy_with_optional_module_offline() -> None:
     from fastmcp import FastMCP

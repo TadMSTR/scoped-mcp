@@ -41,6 +41,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `system-ops` at startup, went `failed_init`, and stayed degraded-but-serving
   until manually restarted.
 
+### Security
+
+- **The health file no longer carries raw exception messages.** `SCOPED_MCP_HEALTH_FILE`
+  entries now expose `error_type` (the exception class name) in place of `error`
+  (`f"{type(exc).__name__}: {exc}"`). A module constructor can raise with a message
+  echoing back a dependency URL that carries inline credentials, and the health file
+  is a plain on-disk artifact polled by external watchers — so it is now held to the
+  same contract the ops alerts and the `/health` route already had. The full message
+  remains available through the ops log (`module_init_failed`) and the authenticated
+  `scoped_mcp_status` tool. Pre-existing gap, widened by this release's new retry call
+  site; found by the security audit of this build.
+  **Schema note:** anything parsing `modules.<name>.error` out of the health file must
+  read `modules.<name>.error_type` instead. No forge consumer does today.
+
 ### Changed
 
 - The registry now mounts a child FastMCP server for **every** declared module,

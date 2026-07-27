@@ -163,6 +163,44 @@ def test_is_loopback_url_rejects_remote_and_non_http() -> None:
     assert not is_loopback_url("http:///mcp")  # http scheme, no host
 
 
+def test_is_loopback_url_userinfo_cannot_spoof_the_host() -> None:
+    """Audit INFO: pin the userinfo cases explicitly. urlsplit().hostname strips
+    userinfo before the loopback check, so the decision always tracks the host the
+    connection would actually go to — never the decorative part before the '@'."""
+    # Looks loopback, connects to evil.com → must be rejected.
+    assert not is_loopback_url("http://localhost@evil.com/mcp")
+    assert not is_loopback_url("http://127.0.0.1:8282@evil.com/mcp")
+    # Looks remote, connects to localhost → correctly accepted.
+    assert is_loopback_url("http://evil.com@localhost:8282/mcp")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://0177.0.0.1:8282/mcp",  # octal IPv4
+        "http://2130706433:8282/mcp",  # integer IPv4
+        "http://127.0.0.1.evil.com:8282/mcp",  # loopback-prefixed hostname
+        "http://[fe80::1%eth0]:8282/mcp",  # IPv6 zone id
+    ],
+)
+def test_is_loopback_url_obfuscated_forms_fail_closed(url: str) -> None:
+    """Audit INFO: alternate/obfuscated address encodings must fail CLOSED — i.e.
+    return False, which skips the gate entirely and never connects. A false negative
+    only costs the module a retry cycle; a false positive would let a non-loopback
+    host gate startup."""
+    assert is_loopback_url(url) is False
+
+
+def test_is_loopback_url_accepts_dot_localhost_suffix() -> None:
+    """Audit INFO: `.localhost` is reserved for loopback by RFC 6761 §6.3, so
+    accepting it is intended, not a bypass. Pinned so the behaviour is deliberate
+    rather than incidental."""
+    assert is_loopback_url("http://anything.localhost:8282/mcp")
+    # ...but only as a real label boundary — a lookalike registrable domain is not.
+    assert not is_loopback_url("http://evil-localhost:8282/mcp")
+    assert not is_loopback_url("http://localhost.evil.com:8282/mcp")
+
+
 def test_redact_url_strips_userinfo_and_query() -> None:
     """Dependency URLs reach the log stream and ops alerts; inline credentials
     must not travel with them."""
@@ -170,6 +208,14 @@ def test_redact_url_strips_userinfo_and_query() -> None:
     assert out == "http://localhost:8282/mcp"
     assert "s3cret" not in out
     assert "abc" not in out
+
+
+def test_redact_url_strips_the_fragment_too() -> None:
+    """Audit INFO: urlunsplit's 5th element is the fragment — pin that it is blanked,
+    so a token hidden after '#' cannot ride along into logs or #alerts."""
+    out = redact_url("http://localhost:8282/mcp?q=1#token=s3cret")
+    assert out == "http://localhost:8282/mcp"
+    assert "s3cret" not in out
 
 
 def test_await_dependency_ready_returns_immediately_when_bound() -> None:
