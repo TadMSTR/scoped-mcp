@@ -225,7 +225,7 @@ process cannot grow an unbounded log — tune with `SCOPED_MCP_LOG_MAX_BYTES` (d
 - **Init** — if a module's `__init__` raises (bad config, missing credential), it is skipped. Other modules still instantiate and register normally.
 - **Startup** — `asyncio.gather` runs with `return_exceptions=True`. A startup failure is recorded in `module_health`; the server yields and remaining modules' tools stay available.
 
-**Module Health** — `scoped_mcp_status` is always registered regardless of manifest content. Call it at session start to get `{modules, failed_count, total_count, healthy}` with per-module status values: `running`, `failed_import`, `failed_init`, `failed_startup`. Set `SCOPED_MCP_HEALTH_FILE` to a path and the lifespan will write a JSON health report after startup completes — useful for session-start hooks or external health-check scripts that need file-based status without calling an MCP tool. The health file is rewritten on every credential-health transition (see below) and carries a `written_at` timestamp so an external watcher can detect a wedged process by staleness. (v1.4.0)
+**Module Health** — `scoped_mcp_status` is always registered regardless of manifest content. Call it at session start to get `{modules, failed_count, total_count, healthy}` with per-module status values: `running`, `failed_import`, `failed_init`, `failed_startup`. Set `SCOPED_MCP_HEALTH_FILE` to a path and the lifespan will write a JSON health report after startup completes — useful for session-start hooks or external health-check scripts that need file-based status without calling an MCP tool. The health file is rewritten on every credential-health transition (see below) and carries a `written_at` timestamp so an external watcher can detect a wedged process by staleness. Failed modules are reported there as `error_type` (the exception class name only) rather than the full exception message, since an exception can echo back a dependency URL with inline credentials and the file is a plain on-disk artifact — the full message stays in the ops log and in `scoped_mcp_status`. (v1.4.0)
 
 **Optional Modules** — a per-module manifest flag, `optional: true` (`ModuleConfig`), marks a dependency that's expected to be intentionally offline sometimes — e.g. `claudebox-ops`, which points at a host that's powered off on purpose outside working hours. A `failed_import` / `failed_init` / `failed_startup` on an optional module no longer counts toward `failed_count` / `healthy` in `scoped_mcp_status`, the health file, or `GET /health` — it's tracked separately under a new `offline_optional_modules` field instead, so the process stays `healthy: true` while an optional dependency is down. A healthy&harr;offline transition of an optional module still fires exactly one low-severity alert via the existing SMCP-26 Matrix&rarr;ntfy ops-alert path (comparing against the previous process's state, persisted in the health file) — no repeat spam across restarts while it stays offline, and recovery fires too. Non-optional module failures are unaffected — same degrade-to-503 behavior as before. (v1.10.0, SMCP-31)
 
@@ -236,6 +236,23 @@ modules:
     optional: true              # expected to go offline when claudebox is powered down
     config:
       url: http://claudebox.local:8600/mcp
+```
+
+**Module Init Self-Heal** — a module whose dependency isn't listening yet no longer stays dead for the life of the process. Two mechanisms cover the same failure from both ends:
+
+- **Dependency-ready gate** — before instantiating a module whose config carries a **loopback** HTTP `url`, the registry polls that port until it accepts a TCP connection, bounded by `dependency_wait_timeout_seconds` (default `30`) at `dependency_wait_interval_seconds` (default `1`). A successful connect is the whole test — no status code is required, since an MCP endpoint answers an unauthenticated probe with 401/404/405/406 depending on the server, all of which mean "it's up". This kills the common start-ordering race against a co-located dependency. **Only loopback URLs gate startup**: a remote dependency may be `optional: true` and powered off on purpose, so blocking on it would turn a supported state into an outage. On expiry the module falls through to the normal `failed_init` path — startup is always bounded and never hangs.
+- **Background re-init loop** — after startup, any module left in `failed_init` or `failed_startup` is retried by one asyncio task with exponential backoff (5s → 5min cap), cancelled cleanly on shutdown. On success the module's tools are registered onto its already-mounted child server, its status flips to `running` with the recorded error cleared, and the health file is rewritten — so `/health` returns `200` on the very next probe **with no restart**. `failed_import` is never retried: the class doesn't exist in this process, and waiting won't change that.
+
+Transitions fire one `module_init_degraded` and one `module_recovered` ops alert through the same Matrix→ntfy path as the credential alerts — one per transition, never per retry attempt. Optional modules keep their SMCP-31 event names (`optional_module_offline` / `optional_module_recovered`) and are not double-alerted. Alert payloads carry the exception **type** only, never its message, which can embed a credentialed URL.
+
+```yaml
+modules:
+  system-ops:
+    type: mcp_proxy
+    config:
+      url: http://localhost:8282/mcp
+    dependency_wait_timeout_seconds: 30   # optional; 0 disables the gate
+    dependency_wait_interval_seconds: 1   # optional
 ```
 
 **Credential Health, Self-Heal & Alerting** — for `credentials.source: vault`, `scoped_mcp_status` and the health file also include a `credentials` block (`{source, token_healthy, consecutive_failures, last_renewal_ok_ts, last_reauth_ts, seconds_to_expiry_est, reauth_enabled}`), and top-level `healthy` goes `false` when the Vault token is unhealthy — so a process stuck in a permanent renewal-failure loop can no longer report `healthy: true`. Four layers make a silent credential failure both self-recovering and loud (SMCP-26):

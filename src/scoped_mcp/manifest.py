@@ -16,9 +16,13 @@ from typing import Any, Literal
 
 import structlog
 import yaml
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .exceptions import ManifestError
+from .module_selfheal import (
+    DEFAULT_DEPENDENCY_INTERVAL_SECONDS,
+    DEFAULT_DEPENDENCY_TIMEOUT_SECONDS,
+)
 
 _log = structlog.get_logger("ops")
 
@@ -349,6 +353,18 @@ class ModuleConfig(BaseModel):
     # offline_optional_modules so it stays visible without flipping the whole
     # process to degraded/503.
     optional: bool = False
+    # Dependency-ready gate. When this module's config carries a loopback http
+    # URL, wait up to ``dependency_wait_timeout_seconds`` (polling every
+    # ``dependency_wait_interval_seconds``) for that port to accept a connection
+    # before instantiating the module — killing the PM2 start-ordering race
+    # against a co-located dependency. Loopback only; a remote dependency never
+    # gates startup. On expiry the module falls through to its normal
+    # failed_init path and the background re-init loop takes over, so startup
+    # stays bounded regardless of the value set here. 0 disables the gate.
+    dependency_wait_timeout_seconds: float = Field(default=DEFAULT_DEPENDENCY_TIMEOUT_SECONDS, ge=0)
+    dependency_wait_interval_seconds: float = Field(
+        default=DEFAULT_DEPENDENCY_INTERVAL_SECONDS, gt=0
+    )
 
     @field_validator("mode", mode="before")
     @classmethod
