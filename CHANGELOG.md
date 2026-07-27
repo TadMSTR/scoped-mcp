@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-07-27
+
+Security audit: 0 Critical, 0 High, 0 Medium, 1 Low, 2 Info — all resolved before merge
+(`scoped-mcp-module-init-selfheal-2026-07`).
+
 ### Added
 
 - **Module init self-heal** — a module that fails to initialise is now retried in
