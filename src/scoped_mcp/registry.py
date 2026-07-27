@@ -1014,6 +1014,26 @@ def build_server(
 
         try:
             await instance.startup()
+            # Every retryable module has a child mounted below — only
+            # failed_import is excluded from that loop, and failed_import is
+            # never retried. A KeyError here would mean the two have diverged,
+            # which should surface loudly rather than register tools nowhere.
+            #
+            # Registration is inside this try so a failure here still tears the
+            # instance down. Otherwise a module that started (holding a
+            # subprocess or socket) but failed to register would be orphaned:
+            # never reachable, never shut down, and replaced by a fresh instance
+            # on the next attempt.
+            _register_module_tools(
+                module_children[module_name],
+                module_name,
+                module_cfg,
+                instance,
+                chain,
+                middleware,
+                agent_ctx,
+                ops,
+            )
         except Exception as exc:
             module_health[module_name] = {
                 "status": "failed_startup",
@@ -1024,21 +1044,6 @@ def build_server(
             with contextlib.suppress(Exception):
                 await instance.shutdown()
             raise
-
-        # Every retryable module has a child mounted below — only failed_import
-        # is excluded from that loop, and failed_import is never retried. A
-        # KeyError here would mean the two have diverged, which should surface
-        # loudly rather than register a module's tools nowhere.
-        _register_module_tools(
-            module_children[module_name],
-            module_name,
-            module_cfg,
-            instance,
-            chain,
-            middleware,
-            agent_ctx,
-            ops,
-        )
         # Replaces the dict wholesale, so the recorded error is cleared too.
         module_health[module_name] = {"status": "running"}
         return instance
