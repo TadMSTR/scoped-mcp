@@ -238,6 +238,23 @@ modules:
       url: http://claudebox.local:8600/mcp
 ```
 
+**Module Init Self-Heal** — a module whose dependency isn't listening yet no longer stays dead for the life of the process. Two mechanisms cover the same failure from both ends:
+
+- **Dependency-ready gate** — before instantiating a module whose config carries a **loopback** HTTP `url`, the registry polls that port until it accepts a TCP connection, bounded by `dependency_wait_timeout_seconds` (default `30`) at `dependency_wait_interval_seconds` (default `1`). A successful connect is the whole test — no status code is required, since an MCP endpoint answers an unauthenticated probe with 401/404/405/406 depending on the server, all of which mean "it's up". This kills the common start-ordering race against a co-located dependency. **Only loopback URLs gate startup**: a remote dependency may be `optional: true` and powered off on purpose, so blocking on it would turn a supported state into an outage. On expiry the module falls through to the normal `failed_init` path — startup is always bounded and never hangs.
+- **Background re-init loop** — after startup, any module left in `failed_init` or `failed_startup` is retried by one asyncio task with exponential backoff (5s → 5min cap), cancelled cleanly on shutdown. On success the module's tools are registered onto its already-mounted child server, its status flips to `running` with the recorded error cleared, and the health file is rewritten — so `/health` returns `200` on the very next probe **with no restart**. `failed_import` is never retried: the class doesn't exist in this process, and waiting won't change that.
+
+Transitions fire one `module_init_degraded` and one `module_recovered` ops alert through the same Matrix→ntfy path as the credential alerts — one per transition, never per retry attempt. Optional modules keep their SMCP-31 event names (`optional_module_offline` / `optional_module_recovered`) and are not double-alerted. Alert payloads carry the exception **type** only, never its message, which can embed a credentialed URL.
+
+```yaml
+modules:
+  system-ops:
+    type: mcp_proxy
+    config:
+      url: http://localhost:8282/mcp
+    dependency_wait_timeout_seconds: 30   # optional; 0 disables the gate
+    dependency_wait_interval_seconds: 1   # optional
+```
+
 **Credential Health, Self-Heal & Alerting** — for `credentials.source: vault`, `scoped_mcp_status` and the health file also include a `credentials` block (`{source, token_healthy, consecutive_failures, last_renewal_ok_ts, last_reauth_ts, seconds_to_expiry_est, reauth_enabled}`), and top-level `healthy` goes `false` when the Vault token is unhealthy — so a process stuck in a permanent renewal-failure loop can no longer report `healthy: true`. Four layers make a silent credential failure both self-recovering and loud (SMCP-26):
 
 - **Self-heal re-auth** — when renewal fails with a permission/403 class error or crosses the critical-failure threshold, scoped-mcp mints a fresh token with a full AppRole login. This covers the hard `token_max_ttl` ceiling that `renew-self` alone can never exceed. **Opt-in via `SCOPED_MCP_VAULT_REAUTH=1`**, and only safe when the AppRole has a reusable secret_id (`secret_id_num_uses=0`) — re-logging in with a single-use secret_id would burn the only credential. When unset, re-auth is a no-op and the failure surfaces through the layers below.

@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Module init self-heal** — a module that fails to initialise is now retried in
+  the background instead of staying dead for the life of the process. Two
+  mechanisms, in `module_selfheal.py`:
+  - **Dependency-ready gate.** Before instantiating a module whose config carries
+    a *loopback* HTTP `url`, the registry polls that port until it accepts a TCP
+    connection, within a bounded budget (`dependency_wait_timeout_seconds`,
+    default 30s; `dependency_wait_interval_seconds`, default 1s — both new
+    per-module manifest fields). This removes the start-ordering race against a
+    co-located dependency at source. Only loopback URLs gate startup: a remote
+    dependency may be `optional: true` and deliberately powered off (SMCP-31), so
+    blocking on it would turn a supported state into an outage. On expiry the
+    module falls through to the existing `failed_init` path — startup never hangs.
+  - **Background re-init loop.** After startup, any module left in `failed_init`
+    or `failed_startup` is retried by one asyncio task with exponential backoff
+    (5s → 5min cap), cancelled cleanly on shutdown. On success the module's tools
+    are registered onto its already-mounted child server, `module_health` flips to
+    `running` with the recorded error cleared, and the health file is rewritten —
+    so `/health` returns 200 on the very next probe and the external prober emits
+    its own RECOVERED, with **no restart**. Modelled on
+    `credentials_vault.start_renewal()`. `failed_import` is never retried: the
+    class does not exist in this process.
+  - Ops alerts `module_init_degraded` / `module_recovered`, one per state
+    transition and never per retry attempt. Optional modules keep the SMCP-31
+    event names (`optional_module_offline` / `optional_module_recovered`) and are
+    not double-alerted. Alert payloads carry the exception **type** only, never
+    the message, which can embed a credentialed URL.
+
+  Fixes the failure behind two multi-hour fleet degradations (2026-07-20/21 and
+  2026-07-26/27) in which all five `scoped-mcp-*` proxies raced their shared local
+  `system-ops` at startup, went `failed_init`, and stayed degraded-but-serving
+  until manually restarted.
+
+### Changed
+
+- The registry now mounts a child FastMCP server for **every** declared module,
+  including ones that failed to instantiate, rather than only successful ones.
+  `mount()` is a live link, so a module recovering later only has to add tools to
+  its existing child for them to become dispatchable on the parent.
+- `server.mount(child, prefix=…)` → `namespace=…`; `prefix` is deprecated in
+  FastMCP 3.x. Tool naming is unchanged (`<module>_<tool>`).
+
 ## [1.11.0] — 2026-07-21
 
 ### Added

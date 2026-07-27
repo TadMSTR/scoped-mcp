@@ -21,12 +21,14 @@ and fix the problem.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fnmatch
 import importlib
 import inspect
 import json
 import os
 import pkgutil
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -41,6 +43,13 @@ from .exceptions import ManifestError
 from .identity import AgentContext
 from .manifest import Manifest, ModuleConfig
 from .middleware import MiddlewareChain, ToolCallMiddleware
+from .module_selfheal import (
+    DependencyGateBudget,
+    ModuleSelfHealer,
+    await_dependency_ready,
+    is_loopback_url,
+    redact_url,
+)
 from .modules._base import ToolModule
 
 logger = structlog.get_logger("ops")
@@ -248,6 +257,7 @@ def _make_module_lifespan(
     module_health: dict | None = None,
     agent_ctx: AgentContext | None = None,
     optional_modules: set[str] | None = None,
+    selfheal_retry: Callable[[str], Awaitable[ToolModule | None]] | None = None,
 ) -> object:
     """Build a FastMCP-compatible lifespan that calls startup/shutdown on all modules.
 
@@ -266,6 +276,12 @@ def _make_module_lifespan(
     optional_modules: manifest module names flagged ``optional: true`` (SMCP-31) — their
         failure is excluded from failed_count/healthy everywhere this lifespan touches the
         health file, and drives the healthy<->offline transition alert below.
+    selfheal_retry: optional coroutine taking a module name and re-running the full
+        instantiate → startup → register-tools sequence for it, returning the recovered
+        instance (or raising on failure). When given, any module left in ``failed_init``/
+        ``failed_startup`` after startup is retried by a background task with exponential
+        backoff, so a dependency that comes up late recovers with no restart. Recovered
+        instances are appended to the shutdown list so they are torn down normally.
     """
     if module_health is None:
         module_health = {}
@@ -304,6 +320,7 @@ def _make_module_lifespan(
     async def lifespan(server):  # server arg required by FastMCP lifespan protocol
         ops = get_ops_logger()
         started: list[tuple[str, ToolModule]] = []
+        healer: ModuleSelfHealer | None = None
         try:
             if vault_source is not None:
                 vault_source.set_health_change_callback(_on_credential_health_change)
@@ -375,8 +392,43 @@ def _make_module_lifespan(
                 credential_health=startup_cred_health,
                 optional_modules=optional_modules,
             )
+
+            # Background re-init loop. Started only when something actually
+            # failed, so a healthy process pays nothing for it. Recovery flips
+            # module_health to "running", which /health reads live on every
+            # request — the next probe returns 200 with no restart.
+            if selfheal_retry is not None:
+
+                async def _retry_and_track(name: str) -> None:
+                    instance = await selfheal_retry(name)
+                    if instance is not None:
+                        # Recovered mid-life: still needs shutdown at process exit.
+                        started.append((name, instance))
+
+                def _rewrite_health_file() -> None:
+                    _write_health_file(
+                        module_health,
+                        ops,
+                        credential_health=(
+                            vault_source.credential_health() if vault_source is not None else None
+                        ),
+                        optional_modules=optional_modules,
+                    )
+
+                healer = ModuleSelfHealer(
+                    _retry_and_track,
+                    module_health,
+                    agent_id=agent_id,
+                    agent_type=agent_type,
+                    optional_modules=optional_modules,
+                    on_health_change=_rewrite_health_file,
+                )
+                await healer.start()
+
             yield {}
         finally:
+            if healer is not None:
+                await healer.close()
             for manifest_name, mod in reversed(started):
                 ops.info("module_shutdown", module=manifest_name)
                 try:
@@ -387,6 +439,99 @@ def _make_module_lifespan(
                 await vault_source.close()
 
     return lifespan
+
+
+def _gate_local_dependency(
+    module_name: str,
+    module_cfg: ModuleConfig,
+    ops: object,
+    budget: DependencyGateBudget,
+) -> None:
+    """Wait for a module's loopback HTTP dependency to bind, within a bounded budget.
+
+    No-op unless the module's config declares a ``url`` that is loopback — a
+    remote dependency must never gate startup (it may be ``optional: true`` and
+    deliberately powered off, SMCP-31), and a module with no URL has nothing to
+    wait for.
+
+    ``budget`` is shared across every module in this build, so a manifest with a
+    dozen loopback dependencies cannot multiply its per-module budget into a
+    startup measured in minutes. When it is drained, the gate is skipped
+    entirely.
+
+    Logs a single ``dependency_wait`` line when a wait actually occurred, so the
+    race shows up in the logs next time instead of being invisible. Nothing is
+    logged on the happy path where the port is already bound.
+
+    On timeout this returns normally and the caller proceeds to instantiate. The
+    module will fail as it does today and be recorded ``failed_init``; the
+    background re-init loop covers it from there. Startup never hangs.
+    """
+    url = module_cfg.config.get("url")
+    if not isinstance(url, str) or not is_loopback_url(url):
+        return
+    requested = module_cfg.dependency_wait_timeout_seconds
+    if requested <= 0:
+        return  # gate explicitly disabled for this module
+    allowance = budget.allowance(requested)
+    if allowance <= 0:
+        ops.info("dependency_wait_budget_exhausted", module=module_name, url=redact_url(url))
+        return
+    ready, elapsed = await_dependency_ready(
+        url,
+        timeout=allowance,
+        interval=module_cfg.dependency_wait_interval_seconds,
+    )
+    budget.consume(elapsed)
+    if elapsed >= module_cfg.dependency_wait_interval_seconds or not ready:
+        ops.info(
+            "dependency_wait",
+            module=module_name,
+            url=redact_url(url),
+            elapsed_seconds=round(elapsed, 2),
+            ready=ready,
+            budget_remaining_seconds=round(budget.remaining, 2),
+        )
+
+
+def _register_module_tools(
+    child: FastMCP,
+    module_name: str,
+    module_cfg: ModuleConfig,
+    instance: ToolModule,
+    chain: MiddlewareChain,
+    middleware: list[ToolCallMiddleware] | None,
+    agent_ctx: AgentContext,
+    ops: object,
+) -> list[str]:
+    """Register a module's mode-filtered tools onto its child server.
+
+    Returns the full namespaced audit tool names, for policy-pattern validation.
+
+    Called twice for a recovered module's lifetime: once at startup for modules
+    that instantiated cleanly, and once from the background re-init loop for one
+    that did not. FastMCP's ``mount()`` is a live link — a tool added to an
+    already-mounted child is immediately visible and dispatchable on the parent —
+    so the second call needs no remount and no restart.
+    """
+    registered: list[str] = []
+    tool_methods = instance.get_tool_methods(module_cfg.mode)
+    if not tool_methods:
+        ops.warning("no_tools_registered", module=module_name, mode=module_cfg.mode)
+    for method in tool_methods:
+        # audit_tool_name is the full namespaced name used in logs and @audited.
+        # child.tool() receives only the bare method name — server.mount(namespace=)
+        # applies the module_name prefix, so using the full name here would double it.
+        audit_tool_name = f"{module_name}_{method.__name__}"
+        registered.append(audit_tool_name)
+        # Wrap with @audited — this is the only place @audited is applied.
+        # Module authors must not apply it themselves.
+        wrapped = audited(audit_tool_name)(method)
+        if middleware:
+            wrapped = chain.wrap(audit_tool_name, wrapped, agent_ctx)
+        child.tool(name=method.__name__)(wrapped)
+        ops.info("tool_registered", tool=audit_tool_name, mode=module_cfg.mode)
+    return registered
 
 
 def _resolve_class_name(module_name: str, module_cfg: ModuleConfig) -> str:
@@ -790,7 +935,10 @@ def build_server(
         vault_bundle = vault_source.fetch()
         _register_signing_hook_if_available(vault_bundle, ops)
 
-    # Instantiate modules, skipping any that failed discovery.
+    # Instantiate modules, skipping any that failed discovery. One shared gate
+    # budget for the whole build keeps total startup bounded no matter how many
+    # loopback dependencies the manifest declares.
+    gate_budget = DependencyGateBudget()
     all_instances: list[tuple[str, ModuleConfig, ToolModule]] = []
     for module_name, module_cfg in manifest.modules.items():
         if module_name in module_health:
@@ -798,6 +946,7 @@ def build_server(
         class_name = _resolve_class_name(module_name, module_cfg)
         module_cls = available[class_name]
         ops.info("loading_module", module=module_name, class_name=class_name, mode=module_cfg.mode)
+        _gate_local_dependency(module_name, module_cfg, ops, gate_budget)
         try:
             credentials = _resolve_module_credentials(
                 module_cls, manifest, vault_bundle=vault_bundle
@@ -818,6 +967,82 @@ def build_server(
         module_health[module_name] = {"status": "instantiated"}
         all_instances.append((module_name, module_cfg, instance))
 
+    chain = MiddlewareChain(middleware or [])
+
+    # One child FastMCP per declared module, populated below. Held here so the
+    # re-init loop can register a recovered module's tools onto the child that
+    # was already mounted at startup — the documented live-linking path, rather
+    # than mounting onto a parent that is already serving.
+    module_children: dict[str, FastMCP] = {}
+
+    async def _retry_module(module_name: str) -> ToolModule | None:
+        """Re-run instantiate → startup → register-tools for one failed module.
+
+        Handed to the lifespan, which drives it from a backoff loop. Raises on
+        failure (the loop reschedules); on success the module's tools are live on
+        the parent server and module_health says ``running`` with no error, which
+        is what flips /health back to 200.
+        """
+        module_cfg = manifest.modules[module_name]
+        class_name = _resolve_class_name(module_name, module_cfg)
+        module_cls = available[class_name]
+
+        def _instantiate() -> ToolModule:
+            credentials = _resolve_module_credentials(
+                module_cls, manifest, vault_bundle=vault_bundle
+            )
+            return module_cls(
+                agent_ctx=agent_ctx,
+                credentials=credentials,
+                config=module_cfg.config,
+            )
+
+        # Off the event loop on purpose: mcp_proxy.__init__ discovers upstream
+        # tools with asyncio.run(), which raises inside a running loop. A worker
+        # thread gives it the same bare-thread environment it had at startup.
+        try:
+            instance = await asyncio.to_thread(_instantiate)
+        except Exception as exc:
+            module_health[module_name] = {
+                "status": "failed_init",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            raise
+
+        if hasattr(instance, "_manifest_key"):
+            instance._manifest_key = module_name
+
+        try:
+            await instance.startup()
+        except Exception as exc:
+            module_health[module_name] = {
+                "status": "failed_startup",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            # A half-started module may hold a subprocess or socket; drop it
+            # before the next attempt builds a fresh instance.
+            with contextlib.suppress(Exception):
+                await instance.shutdown()
+            raise
+
+        # Every retryable module has a child mounted below — only failed_import
+        # is excluded from that loop, and failed_import is never retried. A
+        # KeyError here would mean the two have diverged, which should surface
+        # loudly rather than register a module's tools nowhere.
+        _register_module_tools(
+            module_children[module_name],
+            module_name,
+            module_cfg,
+            instance,
+            chain,
+            middleware,
+            agent_ctx,
+            ops,
+        )
+        # Replaces the dict wholesale, so the recorded error is cleared too.
+        module_health[module_name] = {"status": "running"}
+        return instance
+
     # Create the parent server with the module lifespan.
     # auth (a FastMCP TokenVerifier / AuthProvider) is set only for the HTTP transport —
     # it enforces bearer authentication on every request before tool dispatch. None (stdio)
@@ -830,33 +1055,39 @@ def build_server(
             module_health=module_health,
             agent_ctx=agent_ctx,
             optional_modules=optional_modules,
+            selfheal_retry=_retry_module,
         ),
         auth=auth,
     )
 
-    chain = MiddlewareChain(middleware or [])
+    # Mount a child for EVERY module that could still come up, including ones
+    # that failed to instantiate. A module recovering later then only has to add
+    # tools to its existing child — mount() is a live link, so those tools become
+    # dispatchable on the parent immediately, with no remount and no restart.
+    # failed_import is excluded: its Python class does not exist in this process,
+    # so no amount of retrying will produce an instance.
+    for module_name in manifest.modules:
+        if module_health.get(module_name, {}).get("status") == "failed_import":
+            continue
+        child = FastMCP(module_name)
+        module_children[module_name] = child
+        server.mount(child, namespace=module_name)
 
-    # Register tools with child servers and mount (only successfully instantiated modules).
+    # Register tools for the modules that instantiated cleanly.
     registered_tool_names: list[str] = []
     for module_name, module_cfg, instance in all_instances:
-        child = FastMCP(module_name)
-        tool_methods = instance.get_tool_methods(module_cfg.mode)
-        if not tool_methods:
-            ops.warning("no_tools_registered", module=module_name, mode=module_cfg.mode)
-        for method in tool_methods:
-            # audit_tool_name is the full namespaced name used in logs and @audited.
-            # child.tool() receives only the bare method name — server.mount(prefix=)
-            # applies the module_name prefix, so using the full name here would double it.
-            audit_tool_name = f"{module_name}_{method.__name__}"
-            registered_tool_names.append(audit_tool_name)
-            # Wrap with @audited — this is the only place @audited is applied.
-            # Module authors must not apply it themselves.
-            wrapped = audited(audit_tool_name)(method)
-            if middleware:
-                wrapped = chain.wrap(audit_tool_name, wrapped, agent_ctx)
-            child.tool(name=method.__name__)(wrapped)
-            ops.info("tool_registered", tool=audit_tool_name, mode=module_cfg.mode)
-        server.mount(child, prefix=module_name)
+        registered_tool_names.extend(
+            _register_module_tools(
+                module_children[module_name],
+                module_name,
+                module_cfg,
+                instance,
+                chain,
+                middleware,
+                agent_ctx,
+                ops,
+            )
+        )
 
     # Always-present status tool — no module namespace prefix.
     _register_status_tool(
