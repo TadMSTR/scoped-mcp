@@ -13,7 +13,7 @@ These tests pin two invariants:
   2. ``extra="forbid"`` is preserved, so genuinely unknown top-level fields are still
      rejected (shadowing-attack protection).
 
-The live-manifest test validates the real ``~/.claude/manifests/*-agent.yml`` files
+The live-manifest test validates the real ``/etc/forge/manifests/*-agent.yml`` files
 structurally (``model_validate`` on parsed YAML, no env expansion) and is skipped when
 the directory is absent — e.g. in CI.
 """
@@ -30,7 +30,12 @@ from pydantic import ValidationError
 
 from scoped_mcp.manifest import Manifest
 
-_LIVE_GLOB = os.path.expanduser("~/.claude/manifests/*-agent.yml")
+# The root-owned deployed copies — the files the running processes actually load
+# (run-scoped-mcp-http.sh passes --manifest /etc/forge/manifests/<agent>-agent.yml).
+# Deliberately NOT ~/.claude/manifests: that is a symlink into a git working tree,
+# so this test would validate whatever branch happened to be checked out rather
+# than what is deployed. vikunja#353.
+_LIVE_GLOB = "/etc/forge/manifests/*-agent.yml"
 _LIVE_MANIFESTS = sorted(glob.glob(_LIVE_GLOB))
 
 
