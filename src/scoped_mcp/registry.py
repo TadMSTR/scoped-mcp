@@ -219,11 +219,84 @@ def _redact_module_errors(module_health: dict) -> dict:
     return redacted
 
 
+# (module_name, exception_type) pairs already warned about, so a persistently broken
+# tool_inventory() is recorded once rather than on every /health probe. Bounded by
+# modules x exception types; never cleared, because "once per process" is the point.
+_INVENTORY_FAILURES_LOGGED: set[tuple[str, str]] = set()
+
+
+def _build_tool_inventory(
+    instances: dict[str, ToolModule],
+    module_health: dict,
+    include_names: bool = False,
+) -> dict[str, dict]:
+    """Return ``{module_name: inventory}`` for every running proxy module.
+
+    Answers "what is this process actually serving from each upstream", which is
+    what turns a *suspected* stale proxy into a confirmed one (vikunja#517). An
+    ``mcp_proxy`` enumerates its upstream exactly once, at ``__init__``, and never
+    widens that set afterwards — so a proxy can sit indefinitely on a tool list the
+    upstream has since grown, and nothing in the process notices. Comparing counts
+    across two agents proxying the same upstream detects that with no upstream
+    credentials, which is the whole point: the drift check must not be handed a
+    fleet-wide credential set.
+
+    Duck-typed on ``tool_inventory()`` rather than ``isinstance(McpProxyModule)`` so
+    a module type is free to opt in later, and so a module whose import failed can
+    never break status reporting. A module that does not implement it is simply
+    absent — it has no upstream to drift from.
+
+    A module that *raises* from it is different, and is reported as
+    ``{"error_type": ...}`` rather than dropped (audit LOW, 2026-08-25). Dropping it
+    left the reporters showing a smaller inventory than the manifest implies with no
+    reason given anywhere — an invisible failure mode. The exception never
+    propagates: this feeds three health reporters and must not be able to fail any
+    of them. Only the exception **type** is reported, matching
+    ``_redact_module_errors`` — the message half can echo back a dependency URL with
+    inline credentials, and two of the three reporters are unauthenticated or
+    on-disk.
+
+    Only ``running`` modules are included. A module that instantiated but failed
+    ``startup()`` has discovered tools it cannot actually serve; reporting its count
+    would tell a drift consumer the agent is serving a surface it is not. Its
+    failure is already visible in ``failed_count``/``module_health``.
+
+    SECURITY: ``include_names`` is False for the unauthenticated ``/health`` route
+    and the on-disk health file, True only for the authenticated
+    ``scoped_mcp_status`` tool. See ``McpProxyModule.tool_inventory``.
+    """
+    inventory: dict[str, dict] = {}
+    for name, instance in instances.items():
+        if module_health.get(name, {}).get("status") != "running":
+            continue
+        fn = getattr(instance, "tool_inventory", None)
+        if not callable(fn):
+            continue
+        try:
+            inventory[name] = fn(include_names=include_names)
+        except Exception as exc:  # a health reporter must never fail on one bad module
+            error_type = type(exc).__name__
+            inventory[name] = {"error_type": error_type}
+            # Log once per (module, error type) per process, NOT once per call. This
+            # runs on every /health request, and the health prober polls every two
+            # minutes — an unconditional warning here would put ~720 lines a day per
+            # broken module into the ops log, which is a queried artifact, not a
+            # dumping ground. The payload above is what carries the signal
+            # continuously; this is the one-shot record that it started.
+            if (name, error_type) not in _INVENTORY_FAILURES_LOGGED:
+                _INVENTORY_FAILURES_LOGGED.add((name, error_type))
+                get_ops_logger().warning(
+                    "tool_inventory_failed", module=name, error_type=error_type
+                )
+    return inventory
+
+
 def _write_health_file(
     module_health: dict,
     ops: object,
     credential_health: dict | None = None,
     optional_modules: set[str] | None = None,
+    instances: dict[str, ToolModule] | None = None,
 ) -> None:
     """Write health JSON to SCOPED_MCP_HEALTH_FILE if the env var is set.
 
@@ -238,6 +311,12 @@ def _write_health_file(
     toward ``failed_count``/``healthy`` — tracked separately under
     ``offline_optional_modules`` instead.
 
+    ``instances`` (vikunja#517): live module instances, keyed by manifest name. When
+    given, a ``tool_inventory`` block reports each running proxy's registered tool
+    count, transport and filtering state, so a watcher can confirm a stale proxy
+    rather than infer one. Passed by reference and read at write time, so a module
+    recovered by the self-healer is reflected on the next write.
+
     SECURITY: per-module entries are written with the exception **type** only
     (``error_type``), never the raw exception message. A module constructor can
     raise with a message echoing back a dependency URL carrying inline
@@ -245,6 +324,7 @@ def _write_health_file(
     watchers. Same contract the ops alerts and the ``/health`` route already
     hold. The full message stays available to the operator through the ops log
     (``module_init_failed``) and the authenticated ``scoped_mcp_status`` tool.
+    Tool inventory is written **without** names for the same reason.
     """
     path = os.environ.get("SCOPED_MCP_HEALTH_FILE")
     if not path:
@@ -262,6 +342,9 @@ def _write_health_file(
     }
     if optional_failed:
         data["offline_optional_modules"] = sorted(optional_failed)
+    tool_inventory = _build_tool_inventory(instances or {}, module_health)
+    if tool_inventory:
+        data["tool_inventory"] = tool_inventory
     if credential_health is not None:
         data["credentials"] = credential_health
     try:
@@ -291,6 +374,7 @@ def _make_module_lifespan(
     agent_ctx: AgentContext | None = None,
     optional_modules: set[str] | None = None,
     selfheal_retry: Callable[[str], Awaitable[ToolModule | None]] | None = None,
+    instances: dict[str, ToolModule] | None = None,
 ) -> object:
     """Build a FastMCP-compatible lifespan that calls startup/shutdown on all modules.
 
@@ -315,10 +399,14 @@ def _make_module_lifespan(
         ``failed_startup`` after startup is retried by a background task with exponential
         backoff, so a dependency that comes up late recovers with no restart. Recovered
         instances are appended to the shutdown list so they are torn down normally.
+    instances: live module instances keyed by manifest name, shared by reference with
+        build_server and updated in place when the self-healer replaces one. Folded
+        into every health-file write as ``tool_inventory`` (vikunja#517).
     """
     if module_health is None:
         module_health = {}
     optional_modules = optional_modules or set()
+    instances = {} if instances is None else instances
 
     agent_id = agent_ctx.agent_id if agent_ctx is not None else "unknown"
     agent_type = agent_ctx.agent_type if agent_ctx is not None else "unknown"
@@ -332,7 +420,11 @@ def _make_module_lifespan(
         """
         ops = get_ops_logger()
         _write_health_file(
-            module_health, ops, credential_health=health, optional_modules=optional_modules
+            module_health,
+            ops,
+            credential_health=health,
+            optional_modules=optional_modules,
+            instances=instances,
         )
         from .ops_alert import send_ops_alert
 
@@ -424,6 +516,7 @@ def _make_module_lifespan(
                 ops,
                 credential_health=startup_cred_health,
                 optional_modules=optional_modules,
+                instances=instances,
             )
 
             # Background re-init loop. Started only when something actually
@@ -446,6 +539,7 @@ def _make_module_lifespan(
                             vault_source.credential_health() if vault_source is not None else None
                         ),
                         optional_modules=optional_modules,
+                        instances=instances,
                     )
 
                 healer = ModuleSelfHealer(
@@ -637,6 +731,7 @@ def _register_status_tool(
     manifest_snapshot: dict[str, Any] | None = None,
     vault_source: object = None,
     optional_modules: set[str] | None = None,
+    instances: dict[str, ToolModule] | None = None,
 ) -> None:
     """Register scoped_mcp_status as a built-in tool on the parent server.
 
@@ -655,9 +750,15 @@ def _register_status_tool(
 
     optional_modules (SMCP-31): module names flagged ``optional: true`` — their failure
     is excluded from failed_count/healthy and surfaced instead as offline_optional_modules.
+
+    instances (vikunja#517): live module instances keyed by manifest name, shared by
+    reference with build_server so the self-healer's replacements are picked up. This
+    is the **authenticated** reporter, so it is the only one that gets tool *names* —
+    /health and the health file get counts only.
     """
     manifest_snapshot = manifest_snapshot or {}
     optional_modules = optional_modules or set()
+    instances = {} if instances is None else instances
 
     async def scoped_mcp_status() -> dict:
         """Return the health status of all manifest-declared modules.
@@ -675,6 +776,13 @@ def _register_status_tool(
         changed since this process started — under the HTTP transport, that requires
         a PM2 restart to take effect (see manifest_stale_hint for the exact command).
 
+        tool_inventory reports, per running mcp_proxy module, the tool names and count
+        actually registered from that upstream, its transport, whether an allowlist or
+        denylist filtered it, and when discovery ran. A proxy enumerates its upstream
+        once at startup and never re-discovers, so a count that disagrees with another
+        agent proxying the same upstream under the same filtering means this process is
+        serving a stale tool set and needs a restart.
+
         Call this at session start to check for degraded modules before running tasks.
         """
         required_failed, optional_failed = _split_failed_by_optional(
@@ -689,6 +797,9 @@ def _register_status_tool(
         }
         if optional_failed:
             result["offline_optional_modules"] = sorted(optional_failed)
+        tool_inventory = _build_tool_inventory(instances, module_health, include_names=True)
+        if tool_inventory:
+            result["tool_inventory"] = tool_inventory
         # Credential health (Vault agents only). Never raises — a missing/None
         # vault_source omits the block so stdio/env-cred agents are unaffected.
         if vault_source is not None:
@@ -780,6 +891,7 @@ def _register_health_route(
     module_health: dict,
     vault_source: object,
     optional_modules: set[str] | None = None,
+    instances: dict[str, ToolModule] | None = None,
 ) -> None:
     """Register an unauthenticated GET /health route (http transport only).
 
@@ -794,11 +906,19 @@ def _register_health_route(
     optional_modules (SMCP-31): module names flagged ``optional: true`` — their failure
     is excluded from failed_count/healthy (200, not 503) and surfaced instead as
     offline_optional_modules.
+
+    instances (vikunja#517): live module instances keyed by manifest name, used to add a
+    ``tool_inventory`` block. This route is unauthenticated, so the inventory is built
+    with ``include_names=False`` — per-module tool **counts**, transport and filtering
+    booleans only, never the tool names, and never a URL or header. Module names are
+    already implied by the manifest and were never the sensitive part; the count is what
+    a drift check needs. Every scoped-mcp binds 127.0.0.1, so this is loopback-only.
     """
     from starlette.requests import Request
     from starlette.responses import JSONResponse
 
     optional_modules = optional_modules or set()
+    instances = {} if instances is None else instances
 
     @server.custom_route("/health", methods=["GET"])
     async def health(request: Request) -> JSONResponse:
@@ -813,6 +933,9 @@ def _register_health_route(
         }
         if optional_failed:
             payload["offline_optional_modules"] = sorted(optional_failed)
+        tool_inventory = _build_tool_inventory(instances, module_health)
+        if tool_inventory:
+            payload["tool_inventory"] = tool_inventory
         if vault_source is not None:
             try:
                 cred_health = vault_source.credential_health()
@@ -1000,6 +1123,13 @@ def build_server(
         module_health[module_name] = {"status": "instantiated"}
         all_instances.append((module_name, module_cfg, instance))
 
+    # Live instance registry, shared by reference with the lifespan, the status tool and
+    # the /health route so all three report the *current* instance for each module. It has
+    # to be a shared mutable mapping rather than a snapshot: the self-healer replaces a
+    # recovered module's instance wholesale, and a snapshot taken here would keep reporting
+    # the tool inventory of an instance that no longer serves anything (vikunja#517).
+    instance_registry: dict[str, ToolModule] = {name: inst for name, _, inst in all_instances}
+
     chain = MiddlewareChain(middleware or [])
 
     # One child FastMCP per declared module, populated below. Held here so the
@@ -1077,6 +1207,11 @@ def build_server(
             with contextlib.suppress(Exception):
                 await instance.shutdown()
             raise
+        # Publish the recovered instance BEFORE flipping to running. The inventory
+        # builder keys off status == "running", so this order means a reporter can
+        # never see running with the previous (or no) instance still registered and
+        # report the tool set of an object that is no longer serving.
+        instance_registry[module_name] = instance
         # Replaces the dict wholesale, so the recorded error is cleared too.
         module_health[module_name] = {"status": "running"}
         return instance
@@ -1094,6 +1229,7 @@ def build_server(
             agent_ctx=agent_ctx,
             optional_modules=optional_modules,
             selfheal_retry=_retry_module,
+            instances=instance_registry,
         ),
         auth=auth,
     )
@@ -1134,6 +1270,7 @@ def build_server(
         manifest_snapshot,
         vault_source=vault_source,
         optional_modules=optional_modules,
+        instances=instance_registry,
     )
     registered_tool_names.append("scoped_mcp_status")
 
@@ -1157,7 +1294,11 @@ def build_server(
     # reach it. Under stdio there is no HTTP server, so registration would be dead.
     if transport == "http":
         _register_health_route(
-            server, module_health, vault_source, optional_modules=optional_modules
+            server,
+            module_health,
+            vault_source,
+            optional_modules=optional_modules,
+            instances=instance_registry,
         )
 
         # HITL approve endpoint (SMCP-14) — only meaningful when this agent gates

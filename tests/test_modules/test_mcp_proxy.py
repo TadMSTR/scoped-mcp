@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
+from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -591,3 +594,160 @@ def test_env_default_is_empty(agent_ctx):
             config={"command": "python3"},
         )
     assert mod._env == {}
+
+
+# ---------------------------------------------------------------------------
+# tool_inventory() — vikunja#517, per-module tool inventory for drift detection
+# ---------------------------------------------------------------------------
+
+
+def _make_module(agent_ctx, config: dict, tools: list[str]) -> McpProxyModule:
+    """Helper: build an McpProxyModule with a patched upstream tool list."""
+    with patch("scoped_mcp.modules.mcp_proxy.Client") as MockClient:
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_cm.list_tools = AsyncMock(return_value=[_make_tool(t) for t in tools])
+        MockClient.return_value = mock_cm
+        return McpProxyModule(agent_ctx=agent_ctx, credentials={}, config=config)
+
+
+def test_tool_inventory_counts_registered_tools(agent_ctx):
+    """tool_count is the post-filter registered surface, not the upstream's total."""
+    mod = _make_module(
+        agent_ctx,
+        {"url": "http://127.0.0.1:8485/mcp"},
+        ["submit_task", "get_task", "list_tasks"],
+    )
+    inv = mod.tool_inventory()
+    assert inv["tool_count"] == 3
+    assert inv["transport"] == "http"
+    assert inv["allowlisted"] is False
+    assert inv["denylisted"] is False
+
+
+def test_tool_inventory_count_reflects_allowlist(agent_ctx):
+    """An allowlisted proxy reports the filtered count, and says it is filtered.
+
+    Without the allowlisted flag a drift consumer comparing this agent against an
+    unfiltered one would read the (correct) count difference as drift.
+    """
+    mod = _make_module(
+        agent_ctx,
+        {
+            "url": "http://127.0.0.1:8485/mcp",
+            "tool_allowlist": ["submit_task", "get_task"],
+        },
+        ["submit_task", "get_task", "list_tasks", "update_task"],
+    )
+    inv = mod.tool_inventory()
+    assert inv["tool_count"] == 2
+    assert inv["allowlisted"] is True
+    assert inv["denylisted"] is False
+
+
+def test_tool_inventory_count_reflects_denylist(agent_ctx):
+    """A denylist changes the count too, so it is reported alongside the allowlist."""
+    mod = _make_module(
+        agent_ctx,
+        {"url": "http://127.0.0.1:8485/mcp", "tool_denylist": ["delete_task"]},
+        ["submit_task", "get_task", "delete_task"],
+    )
+    inv = mod.tool_inventory()
+    assert inv["tool_count"] == 2
+    assert inv["allowlisted"] is False
+    assert inv["denylisted"] is True
+
+
+def test_tool_inventory_reports_stdio_transport(agent_ctx):
+    """stdio proxies are reported as such — their child is spawned by the parent,
+    so they share its age and cannot drift. A consumer skips them on this field."""
+    mod = _make_module(agent_ctx, {"command": "python3"}, ["run_cmd"])
+    assert mod.tool_inventory()["transport"] == "stdio"
+
+
+def test_tool_inventory_omits_names_by_default(agent_ctx):
+    """The default must be name-free — /health is unauthenticated and calls it bare."""
+    mod = _make_module(agent_ctx, {"url": "http://127.0.0.1:8485/mcp"}, ["submit_task", "get_task"])
+    assert "tools" not in mod.tool_inventory()
+
+
+def test_tool_inventory_include_names_lists_registered_tools(agent_ctx):
+    """include_names lists exactly the post-filter names, sorted."""
+    mod = _make_module(
+        agent_ctx,
+        {"url": "http://127.0.0.1:8485/mcp", "tool_denylist": ["delete_task"]},
+        ["submit_task", "get_task", "delete_task"],
+    )
+    assert mod.tool_inventory(include_names=True)["tools"] == ["get_task", "submit_task"]
+
+
+def test_tool_inventory_never_exposes_url_headers_or_schemas(agent_ctx):
+    """The payload is counts, booleans, a timestamp and (opt-in) names — nothing else.
+
+    A future field carrying the upstream URL or an Authorization header would reach
+    the unauthenticated /health route; pin the key set so that is caught here.
+    """
+    mod = _make_module(
+        agent_ctx,
+        {
+            "url": "http://127.0.0.1:8485/mcp",
+            "headers": {"Authorization": "Bearer super-secret-token"},
+        },
+        ["submit_task"],
+    )
+    for inv in (mod.tool_inventory(), mod.tool_inventory(include_names=True)):
+        assert set(inv) <= {
+            "tool_count",
+            "transport",
+            "allowlisted",
+            "denylisted",
+            "discovered_at",
+            "tools",
+        }
+        blob = json.dumps(inv)
+        assert "super-secret-token" not in blob
+        assert "127.0.0.1:8485" not in blob
+        assert "inputSchema" not in blob
+
+
+def test_tool_inventory_records_discovery_timestamp(agent_ctx):
+    """discovered_at is set at discovery, not read from the clock on each call.
+
+    It bounds how stale the exposed surface can be, and — unlike process start time —
+    it moves when the self-healer re-instantiates a module.
+    """
+    mod = _make_module(agent_ctx, {"url": "http://127.0.0.1:8485/mcp"}, ["submit_task"])
+    stamp = mod.tool_inventory()["discovered_at"]
+    assert datetime.fromisoformat(stamp).tzinfo is not None
+    assert mod.tool_inventory()["discovered_at"] == stamp
+
+
+def test_tool_inventory_reports_normalized_names_not_raw_upstream_strings(agent_ctx):
+    """A hostile upstream tool name must not reach the inventory verbatim.
+
+    tool_inventory() lands in an agent's context via scoped_mcp_status, and that
+    agent may go on to render it into Matrix or a tracker ticket — escaping belongs
+    to those destinations and cannot be assumed here. The raw name is
+    upstream-controlled; the registered name is [a-zA-Z0-9_]+ by construction, and
+    is also the truthful answer to what this proxy registered.
+    """
+    hostile = "<img src=x onerror=alert(1)>\nrm -rf /"
+    mod = _make_module(agent_ctx, {"url": "http://127.0.0.1:8485/mcp"}, [hostile, "submit_task"])
+    names = mod.tool_inventory(include_names=True)["tools"]
+    assert hostile not in names
+    assert all(re.fullmatch(r"[a-zA-Z0-9_]+", n) for n in names), names
+    assert "submit_task" in names
+
+
+def test_tool_inventory_count_matches_the_reported_names(agent_ctx):
+    """tool_count and the name list are derived from two different structures
+    (_schemas, keyed by raw name; _registered_names, normalized). They are filled
+    in the same loop iteration and must not drift apart."""
+    mod = _make_module(
+        agent_ctx,
+        {"url": "http://127.0.0.1:8485/mcp", "tool_denylist": ["delete_task"]},
+        ["submit_task", "get_task", "delete_task"],
+    )
+    inv = mod.tool_inventory(include_names=True)
+    assert inv["tool_count"] == len(inv["tools"])
