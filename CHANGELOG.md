@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.0] — 2026-08-25
+
+### Added
+
+- **Per-module tool inventory in `scoped_mcp_status`, `GET /health` and the health
+  file.** An `mcp_proxy` enumerates its upstream exactly once, in `_discover_tools()`
+  at `__init__`, and never widens that set afterwards — `_refresh_schemas_from_client()`
+  deliberately refuses to add a tool, so a misconfigured or malicious upstream cannot
+  widen the surface via a refresh. The consequence is that **a new upstream tool is
+  invisible to a running proxy until the process restarts**, and nothing in the process
+  notices. Each running proxy module now reports what it actually registered:
+
+  ```json
+  "tool_inventory": {
+    "vikunja-mcp": {"tool_count": 73, "transport": "http",
+                    "allowlisted": false, "denylisted": false,
+                    "discovered_at": "2026-08-25T14:01:32+00:00"}
+  }
+  ```
+
+  Two agents proxying the same upstream under the same filtering must report the same
+  `tool_count`; a mismatch means one of them is serving a stale tool set and needs a
+  restart. That comparison needs **no upstream credentials**, which is the point — a
+  fleet-wide drift check must not be handed every upstream's secrets to query
+  `tools/list` itself. `allowlisted`/`denylisted` are what keep the comparison sound: a
+  count difference between a filtered and an unfiltered agent is expected, not drift.
+  `discovered_at` is recorded at discovery rather than inferred from process start
+  time, because the two diverge — the self-healer re-instantiates a recovered module
+  and it re-discovers mid-process.
+
+  Only `running` modules appear. A module that instantiated but failed `startup()`
+  discovered tools it cannot serve; reporting its count would tell a consumer the agent
+  serves a surface it does not. Its failure is already visible in `failed_count`.
+
+  **Security:** `GET /health` is unauthenticated. It and the on-disk health file carry
+  counts, transport and filtering booleans only — never tool names, schemas, URLs or
+  headers. Only the authenticated `scoped_mcp_status` tool includes names. This matches
+  the existing redaction contract, where `/health` already reduces module detail to
+  counts and the health file carries `error_type` in place of the raw exception message.
+  Every scoped-mcp binds `127.0.0.1`.
+
+  The inventory builder is duck-typed on `tool_inventory()` rather than
+  isinstance-checking `McpProxyModule`, and drops a module that raises, because it feeds
+  three health reporters and must not be able to fail any of them. Non-proxy modules
+  have no upstream to drift from and are simply absent; an agent with no proxies gets no
+  `tool_inventory` key at all, leaving its payload unchanged.
+
+  (vikunja#517, Phase 4 of `scoped-mcp-tool-drift-detection-2026-08`. Phases 1–3 — the
+  hourly drift check, the health prober's agent enumeration, and naming the restart set
+  at config-apply and MCP-deploy time — shipped in `host-forge-scripts`.)
+
 ## [1.12.0] — 2026-07-27
 
 Security audit: 0 Critical, 0 High, 0 Medium, 1 Low, 2 Info — all resolved before merge
