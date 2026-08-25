@@ -126,7 +126,44 @@ def test_inventory_survives_a_module_that_raises() -> None:
     instances = {"broken": _BrokenProxy(), "vikunja-mcp": _FakeProxy(["a"])}
     health = {"broken": {"status": "running"}, "vikunja-mcp": {"status": "running"}}
     inv = _build_tool_inventory(instances, health)
-    assert set(inv) == {"vikunja-mcp"}
+    assert inv["vikunja-mcp"]["tool_count"] == 1
+
+
+def test_inventory_reports_a_raising_module_rather_than_dropping_it() -> None:
+    """Audit LOW (2026-08-25): dropping it was an invisible failure mode.
+
+    An operator reading /health saw a smaller inventory than the manifest implies,
+    with no reason given anywhere. Report the exception type in its place — the
+    type only, matching _redact_module_errors, since the message half can echo back
+    a dependency URL with inline credentials and two of the three reporters are
+    unauthenticated or on-disk.
+    """
+    instances = {"broken": _BrokenProxy()}
+    inv = _build_tool_inventory(instances, {"broken": {"status": "running"}})
+    assert inv["broken"] == {"error_type": "RuntimeError"}
+    assert "unreadable" not in json.dumps(inv)  # the message never reaches the payload
+
+
+def test_inventory_failure_is_logged_once_per_process_not_once_per_call(monkeypatch) -> None:
+    """/health is probed every two minutes; an unconditional warning here would put
+    ~720 lines a day per broken module into a log that is actually queried."""
+    warnings: list[tuple[str, dict]] = []
+
+    class _Rec:
+        def warning(self, event: str, **kw) -> None:
+            warnings.append((event, kw))
+
+    monkeypatch.setattr(registry, "_INVENTORY_FAILURES_LOGGED", set())
+    monkeypatch.setattr(registry, "get_ops_logger", lambda: _Rec())
+
+    instances = {"broken": _BrokenProxy()}
+    health = {"broken": {"status": "running"}}
+    for _ in range(5):
+        _build_tool_inventory(instances, health)
+
+    assert len(warnings) == 1
+    assert warnings[0][0] == "tool_inventory_failed"
+    assert warnings[0][1] == {"module": "broken", "error_type": "RuntimeError"}
 
 
 def test_inventory_include_names_is_opt_in() -> None:

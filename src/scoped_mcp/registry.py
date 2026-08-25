@@ -219,6 +219,12 @@ def _redact_module_errors(module_health: dict) -> dict:
     return redacted
 
 
+# (module_name, exception_type) pairs already warned about, so a persistently broken
+# tool_inventory() is recorded once rather than on every /health probe. Bounded by
+# modules x exception types; never cleared, because "once per process" is the point.
+_INVENTORY_FAILURES_LOGGED: set[tuple[str, str]] = set()
+
+
 def _build_tool_inventory(
     instances: dict[str, ToolModule],
     module_health: dict,
@@ -237,9 +243,18 @@ def _build_tool_inventory(
 
     Duck-typed on ``tool_inventory()`` rather than ``isinstance(McpProxyModule)`` so
     a module type is free to opt in later, and so a module whose import failed can
-    never break status reporting. A module that does not implement it (or raises
-    from it) is simply absent — this feeds three health reporters and must not be
-    able to fail any of them.
+    never break status reporting. A module that does not implement it is simply
+    absent — it has no upstream to drift from.
+
+    A module that *raises* from it is different, and is reported as
+    ``{"error_type": ...}`` rather than dropped (audit LOW, 2026-08-25). Dropping it
+    left the reporters showing a smaller inventory than the manifest implies with no
+    reason given anywhere — an invisible failure mode. The exception never
+    propagates: this feeds three health reporters and must not be able to fail any
+    of them. Only the exception **type** is reported, matching
+    ``_redact_module_errors`` — the message half can echo back a dependency URL with
+    inline credentials, and two of the three reporters are unauthenticated or
+    on-disk.
 
     Only ``running`` modules are included. A module that instantiated but failed
     ``startup()`` has discovered tools it cannot actually serve; reporting its count
@@ -259,8 +274,20 @@ def _build_tool_inventory(
             continue
         try:
             inventory[name] = fn(include_names=include_names)
-        except Exception:  # a health reporter must never fail on one bad module
-            continue
+        except Exception as exc:  # a health reporter must never fail on one bad module
+            error_type = type(exc).__name__
+            inventory[name] = {"error_type": error_type}
+            # Log once per (module, error type) per process, NOT once per call. This
+            # runs on every /health request, and the health prober polls every two
+            # minutes — an unconditional warning here would put ~720 lines a day per
+            # broken module into the ops log, which is a queried artifact, not a
+            # dumping ground. The payload above is what carries the signal
+            # continuously; this is the one-shot record that it started.
+            if (name, error_type) not in _INVENTORY_FAILURES_LOGGED:
+                _INVENTORY_FAILURES_LOGGED.add((name, error_type))
+                get_ops_logger().warning(
+                    "tool_inventory_failed", module=name, error_type=error_type
+                )
     return inventory
 
 

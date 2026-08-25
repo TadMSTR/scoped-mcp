@@ -54,10 +54,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Every scoped-mcp binds `127.0.0.1`.
 
   The inventory builder is duck-typed on `tool_inventory()` rather than
-  isinstance-checking `McpProxyModule`, and drops a module that raises, because it feeds
-  three health reporters and must not be able to fail any of them. Non-proxy modules
-  have no upstream to drift from and are simply absent; an agent with no proxies gets no
-  `tool_inventory` key at all, leaving its payload unchanged.
+  isinstance-checking `McpProxyModule`. Non-proxy modules have no upstream to drift from
+  and are simply absent; an agent with no proxies gets no `tool_inventory` key at all,
+  leaving its payload unchanged. A module that *raises* from `tool_inventory()` is
+  reported as `{"error_type": ...}` — the exception never propagates (this feeds three
+  health reporters and must not be able to fail any of them), and only the exception
+  **type** is reported, matching the `_redact_module_errors` convention. The failure is
+  also logged once per `(module, exception type)` per process rather than on every call,
+  since `/health` is polled every two minutes.
 
   (vikunja#517, Phase 4 of `scoped-mcp-tool-drift-detection-2026-08`. Phases 1–3 — the
   hourly drift check, the health prober's agent enumeration, and naming the restart set
