@@ -50,6 +50,7 @@ import contextlib
 import inspect
 import keyword
 import re
+from datetime import UTC, datetime
 from typing import Any, ClassVar
 
 import anyio
@@ -155,6 +156,43 @@ class McpProxyModule(ToolModule):
         self._proxy_methods: list[Any] = asyncio.run(
             asyncio.wait_for(self._discover_tools(), timeout=self._discovery_timeout)
         )
+
+        # When this instance's tool set was determined. Discovery happens exactly once,
+        # here, and is never widened afterwards (see _refresh_schemas_from_client) — so
+        # this timestamp bounds how stale the exposed surface can be. It is NOT always
+        # the process start time: a module that failed init and was later recovered by
+        # the self-healer re-discovers, and this moves while the process does not.
+        self._discovered_at: str = datetime.now(UTC).isoformat()
+
+    def tool_inventory(self, include_names: bool = False) -> dict[str, Any]:
+        """Return what this proxy actually registered from its upstream.
+
+        The registry surfaces this through ``scoped_mcp_status``, ``GET /health``
+        and the health file so an external drift check can compare like-for-like:
+        two agents proxying the same upstream with the same filtering must report
+        the same ``tool_count``, and a mismatch is unambiguous drift — one of them
+        is running against a tool set the upstream no longer has (vikunja#517).
+
+        ``allowlisted``/``denylisted`` are what make that comparison sound: a
+        count difference between an allowlisted and an unfiltered agent is
+        expected, not drift.
+
+        SECURITY: counts, booleans and a timestamp only. ``include_names`` adds
+        the registered upstream tool names and nothing else — never a schema, a
+        URL, a header, or a credential. ``/health`` is unauthenticated, so the
+        registry calls this with ``include_names=False`` there and on the health
+        file; only the authenticated ``scoped_mcp_status`` tool passes True.
+        """
+        inventory: dict[str, Any] = {
+            "tool_count": len(self._schemas),
+            "transport": "http" if self._url else "stdio",
+            "allowlisted": bool(self._tool_allowlist),
+            "denylisted": bool(self._tool_denylist),
+            "discovered_at": self._discovered_at,
+        }
+        if include_names:
+            inventory["tools"] = sorted(self._schemas)
+        return inventory
 
     def _transport(self) -> str | dict | StreamableHttpTransport:
         """Return a fastmcp.Client-compatible transport spec."""
