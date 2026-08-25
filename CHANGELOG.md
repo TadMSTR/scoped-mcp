@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Release workflow could not publish to PyPI.** `pypa/gh-action-pypi-publish` was pinned
+  at v1.14.0, whose bundled Twine rejects `Metadata-Version: 2.5` outright
+  (`InvalidDistribution: '2.5' is not a valid metadata version`). Current `hatchling`
+  (1.32.0) emits exactly that, and `build-system.requires` does not pin it — so the
+  release path broke on dependency drift alone, with no change on our side. v1.12.0
+  published fine on 2026-07-27; v1.13.0 was the first tag to hit it. Bumped the pin to
+  v1.14.2, which ships Twine v7 specifically to accept metadata 2.5.
+
+  Consequence for v1.13.0: the `create-github-release` job `needs: publish-pypi`, so it
+  was skipped and the tag was left with no GitHub release and no PyPI artifact. The
+  package itself is unaffected — forge deploys from a locally built wheel, not PyPI.
+
 ## [1.13.0] — 2026-08-25
 
 ### Added
