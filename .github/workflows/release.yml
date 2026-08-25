@@ -50,7 +50,10 @@ jobs:
           path: dist/
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        # v1.14.2 bumps the bundled Twine to v7. v1.14.0 shipped a Twine that
+        # rejects Metadata-Version 2.5 outright ("not a valid metadata version"),
+        # which is what current hatchling emits — see the v1.13.0 release failure.
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         # Trusted publishing — no API token needed in secrets.
         # Requires pending publisher configured at PyPI:
         #   Project: scoped-mcp
