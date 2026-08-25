@@ -43,7 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   **Security:** `GET /health` is unauthenticated. It and the on-disk health file carry
   counts, transport and filtering booleans only — never tool names, schemas, URLs or
-  headers. Only the authenticated `scoped_mcp_status` tool includes names. This matches
+  headers. Only the authenticated `scoped_mcp_status` tool includes names, and the names
+  it reports are the **normalized** ones this proxy registered (`[a-zA-Z0-9_]+`), not the
+  raw upstream strings: the raw name is upstream-controlled, and the payload lands in an
+  agent's context from where that agent may render it into Matrix or a tracker ticket.
+  Escaping belongs to those destinations and can't be assumed here, so the value is
+  constrained at the source instead. This matches
   the existing redaction contract, where `/health` already reduces module detail to
   counts and the health file carries `error_type` in place of the raw exception message.
   Every scoped-mcp binds `127.0.0.1`.

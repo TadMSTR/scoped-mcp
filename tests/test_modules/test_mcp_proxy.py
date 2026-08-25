@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from unittest.mock import AsyncMock, patch
@@ -720,3 +721,33 @@ def test_tool_inventory_records_discovery_timestamp(agent_ctx):
     stamp = mod.tool_inventory()["discovered_at"]
     assert datetime.fromisoformat(stamp).tzinfo is not None
     assert mod.tool_inventory()["discovered_at"] == stamp
+
+
+def test_tool_inventory_reports_normalized_names_not_raw_upstream_strings(agent_ctx):
+    """A hostile upstream tool name must not reach the inventory verbatim.
+
+    tool_inventory() lands in an agent's context via scoped_mcp_status, and that
+    agent may go on to render it into Matrix or a tracker ticket — escaping belongs
+    to those destinations and cannot be assumed here. The raw name is
+    upstream-controlled; the registered name is [a-zA-Z0-9_]+ by construction, and
+    is also the truthful answer to what this proxy registered.
+    """
+    hostile = "<img src=x onerror=alert(1)>\nrm -rf /"
+    mod = _make_module(agent_ctx, {"url": "http://127.0.0.1:8485/mcp"}, [hostile, "submit_task"])
+    names = mod.tool_inventory(include_names=True)["tools"]
+    assert hostile not in names
+    assert all(re.fullmatch(r"[a-zA-Z0-9_]+", n) for n in names), names
+    assert "submit_task" in names
+
+
+def test_tool_inventory_count_matches_the_reported_names(agent_ctx):
+    """tool_count and the name list are derived from two different structures
+    (_schemas, keyed by raw name; _registered_names, normalized). They are filled
+    in the same loop iteration and must not drift apart."""
+    mod = _make_module(
+        agent_ctx,
+        {"url": "http://127.0.0.1:8485/mcp", "tool_denylist": ["delete_task"]},
+        ["submit_task", "get_task", "delete_task"],
+    )
+    inv = mod.tool_inventory(include_names=True)
+    assert inv["tool_count"] == len(inv["tools"])

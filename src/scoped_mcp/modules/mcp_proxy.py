@@ -152,6 +152,16 @@ class McpProxyModule(ToolModule):
         # against the upstream-declared JSON Schema before forwarding the call.
         self._schemas: dict[str, dict[str, Any] | None] = {}
 
+        # The normalized names actually registered as proxy methods, in discovery order.
+        # Kept separately from _schemas (which is keyed by the RAW upstream name) because
+        # this is what tool_inventory() reports, and the raw name is upstream-controlled:
+        # an upstream could advertise a tool whose name carries markup, newlines or
+        # control characters, and the inventory flows into an agent's context and from
+        # there into whatever that agent renders it with. The normalized form is
+        # ``[a-zA-Z0-9_]+`` by construction, and is also the truthful answer to what this
+        # proxy registered.
+        self._registered_names: list[str] = []
+
         # Discover tools synchronously at init time (before event loop starts).
         self._proxy_methods: list[Any] = asyncio.run(
             asyncio.wait_for(self._discover_tools(), timeout=self._discovery_timeout)
@@ -178,10 +188,17 @@ class McpProxyModule(ToolModule):
         expected, not drift.
 
         SECURITY: counts, booleans and a timestamp only. ``include_names`` adds
-        the registered upstream tool names and nothing else — never a schema, a
-        URL, a header, or a credential. ``/health`` is unauthenticated, so the
-        registry calls this with ``include_names=False`` there and on the health
-        file; only the authenticated ``scoped_mcp_status`` tool passes True.
+        the registered tool names and nothing else — never a schema, a URL, a
+        header, or a credential. ``/health`` is unauthenticated, so the registry
+        calls this with ``include_names=False`` there and on the health file;
+        only the authenticated ``scoped_mcp_status`` tool passes True.
+
+        The names reported are the **normalized** ones this proxy registered, not
+        the raw upstream strings. The raw name is upstream-controlled and this
+        payload lands in an agent's context, from where the agent may render it
+        into Matrix or a tracker ticket — escaping belongs to those destinations
+        and cannot be assumed here, so the value is constrained to
+        ``[a-zA-Z0-9_]+`` at the source instead (IV-01/OE-01).
         """
         inventory: dict[str, Any] = {
             "tool_count": len(self._schemas),
@@ -191,7 +208,7 @@ class McpProxyModule(ToolModule):
             "discovered_at": self._discovered_at,
         }
         if include_names:
-            inventory["tools"] = sorted(self._schemas)
+            inventory["tools"] = sorted(self._registered_names)
         return inventory
 
     def _transport(self) -> str | dict | StreamableHttpTransport:
@@ -233,6 +250,7 @@ class McpProxyModule(ToolModule):
                     f"which collides with an earlier tool — use tool_allowlist to exclude one"
                 )
             seen_safe.add(safe)
+            self._registered_names.append(safe)
 
             self._schemas[tool_name] = _coerce_schema(getattr(upstream_tool, "inputSchema", None))
 
