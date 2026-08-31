@@ -48,6 +48,15 @@ bearer token — so *who acted* remains non-spoofable. Only the session
 *correlation* rides the header, at the same trust level the launcher's
 environment injection already has.
 
+That is not sufficient on its own, and the second half of the control lives in
+``registry_db.upsert_session``. A well-formed UUID is not proof of ownership:
+real run ids are readable out of ``~/.claude/comms/artifacts/task-launches/``
+by any agent running as the same user, and sessions are never closed, so any
+historical id stays a live target. The upsert therefore refuses to relabel or
+refresh a session row owned by a different ``agent_id``, and returns False —
+which lands here as "not attributable" and stores NULL. See that method's
+docstring for why preserving the owner alone would not have closed it.
+
 Fail-open, like everything else in the registry path: any failure here is
 logged and swallowed. Attribution is a paper trail and must never block a tool
 call.
@@ -221,10 +230,14 @@ async def attribute_current_call(agent_id: str) -> str | None:
 class SessionAttributionMiddleware:
     """Register the launching run as a session on every tool call.
 
-    Placed **first** in the chain, so the ``sessions`` row exists before any
-    gating middleware runs. That ordering is what the foreign key needs: HITL
-    mints its approval downstream of this, and an approval carrying an id with
-    no session row would be rejected by ``hitl_approvals_session_id_fkey``.
+    Placed **after rate-limit and arg-filter, before HITL** — see
+    ``server._build_middleware``, which is what actually governs the position;
+    this docstring is not the source of truth for it. Both halves matter. Before
+    HITL because the foreign key needs it: HITL mints its approval downstream of
+    this, and an approval carrying an id with no session row would be rejected by
+    ``hitl_approvals_session_id_fkey``. After the rate limiter because this
+    middleware performs a database write, and running it first would put an
+    unmetered write ahead of the only thing bounding call volume.
 
     Registering here rather than only at the HITL gate is deliberate. Most runs
     never trigger a gated call, and a registry that only learns about the runs

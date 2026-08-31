@@ -84,12 +84,33 @@ class RegistryDB:
     ) -> bool:
         """Insert or refresh a session row (used for approve-routing).
 
-        Returns True only when the row is known to exist afterwards. The caller
+        Returns True only when this agent owns the row afterwards. The caller
         needs that answer rather than a silent no-op: ``hitl_approvals.session_id``
         and ``session_tasks.session_id`` both carry a real foreign key to this
         table, so treating a *failed* upsert as success would hand a downstream
         INSERT a dangling id. A failure must degrade to NULL, never to a dangling
         id.
+
+        **A session id you do not already own is not your identity.**
+        ``session_id`` is a bare TEXT primary key with no binding to an agent, and
+        the run id reaches us in a request header validated only as a well-formed
+        UUID — not as *belonging to the caller*. Real run ids are readable from
+        ``~/.claude/comms/artifacts/task-launches/*.json`` by any agent running as
+        the same user, and sessions are never closed, so every historical id stays
+        a live target. Two consequences, both closed here:
+
+        1. ``agent_id`` is **not** in the ``DO UPDATE SET`` list, so a second agent
+           presenting the same id cannot relabel whose session it is.
+        2. The update is guarded by ``WHERE sessions.agent_id = EXCLUDED.agent_id``
+           and the statement ``RETURNING``s the id, so a mismatched caller gets no
+           row back and this returns False. Preserving the owner alone would not
+           be enough — the caller would still be handed the id and would stamp its
+           own approvals with a session belonging to somebody else, which is the
+           same misattribution running the other way.
+
+        A mismatch is never legitimate: a run id is minted per launch for exactly
+        one agent. It is logged at WARNING because it means a collision, a reused
+        id, or an attempt to claim another agent's session.
 
         Refreshing ``last_seen_at`` on every call is what makes ``status`` mean
         anything. **Staleness rule:** a session whose ``last_seen_at`` has not
@@ -104,20 +125,21 @@ class RegistryDB:
             return False
         try:
             async with self._pool.acquire() as conn:
-                await conn.execute(
+                owned = await conn.fetchval(
                     """
                     INSERT INTO sessions (
                         session_id, agent_id, transport, room_id, project_dir,
                         scoped_mcp_url, status, last_seen_at
                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, now())
                     ON CONFLICT (session_id) DO UPDATE SET
-                        agent_id       = EXCLUDED.agent_id,
                         transport      = EXCLUDED.transport,
                         room_id        = COALESCE(EXCLUDED.room_id, sessions.room_id),
                         project_dir    = COALESCE(EXCLUDED.project_dir, sessions.project_dir),
                         scoped_mcp_url = COALESCE(EXCLUDED.scoped_mcp_url, sessions.scoped_mcp_url),
                         status         = EXCLUDED.status,
                         last_seen_at   = now()
+                      WHERE sessions.agent_id = EXCLUDED.agent_id
+                    RETURNING session_id
                     """,
                     session_id,
                     agent_id,
@@ -127,6 +149,16 @@ class RegistryDB:
                     scoped_mcp_url,
                     status,
                 )
+            if owned is None:
+                # The row exists and belongs to a different agent. Not an error to
+                # the caller — it degrades to an unattributed approval — but it is
+                # never legitimate, so say so loudly.
+                _log.warning(
+                    "registry_session_owner_mismatch",
+                    session_id=session_id,
+                    claimed_by=agent_id,
+                )
+                return False
             return True
         except Exception as e:  # fail-open
             _log.warning("registry_upsert_session_failed", error=type(e).__name__)

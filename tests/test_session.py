@@ -329,3 +329,24 @@ async def test_middleware_still_runs_the_tool_when_attribution_fails(monkeypatch
 
     ctx = AgentContext(agent_id="developer", agent_type="developer")
     assert await mw(ctx, "some_tool", {}, _next) == "tool-result"
+
+
+# -- session hijack (audit HIGH, 2026-08-31) ----------------------------------
+
+
+async def test_another_agents_run_id_is_not_attributable(monkeypatch):
+    """Presenting a run id owned by a different agent must yield nothing.
+
+    A well-formed UUID is not proof of ownership. Real run ids are readable from
+    ~/.claude/comms/artifacts/task-launches/ by any agent running as the same user,
+    and sessions are never closed, so any historical id stays a live target. The
+    upsert's owner guard reports False for a mismatch; this asserts the caller then
+    stores NULL rather than stamping its approval with someone else's session.
+    """
+    _headers(monkeypatch, **{session.RUN_ID_HEADER: RUN_ID, session.TASK_ID_HEADER: TASK_ID})
+    # upsert_ok=False is exactly what the owner-mismatch guard returns.
+    reg = _use(monkeypatch, _Registry(upsert_ok=False))
+
+    assert await session.attribute_current_call("developer") is None
+    # And no task link either — that FK points at the same disputed row.
+    assert reg.links == []

@@ -206,24 +206,34 @@ async def test_resolve_without_resolved_via_omits_column():
 class _RecordingConn:
     """Captures every statement and its parameters."""
 
-    def __init__(self, calls):
+    def __init__(self, calls, fetchval_result):
         self._calls = calls
+        self._fetchval_result = fetchval_result
 
     async def execute(self, sql, *params):
         self._calls.append((sql, params))
         return "INSERT 0 1"
 
+    async def fetchval(self, sql, *params):
+        self._calls.append((sql, params))
+        return self._fetchval_result
+
 
 class _RecordingPool:
-    def __init__(self):
+    """A working pool. ``fetchval_result=None`` emulates the ownership guard
+    rejecting the upsert (RETURNING yielded no row)."""
+
+    def __init__(self, fetchval_result="session-id"):
         self.calls: list[tuple] = []
+        self._fetchval_result = fetchval_result
 
     def acquire(self):
         calls = self.calls
+        result = self._fetchval_result
 
         class _Ctx:
             async def __aenter__(self):
-                return _RecordingConn(calls)
+                return _RecordingConn(calls, result)
 
             async def __aexit__(self, *a):
                 return False
@@ -333,3 +343,53 @@ def test_registry_health_never_leaks_the_dsn(monkeypatch):
     assert "hunter2" not in rendered
     assert "127.0.0.1" not in rendered
     assert "postgresql" not in rendered
+
+
+# -- session ownership (audit HIGH, 2026-08-31) -------------------------------
+
+
+async def test_upsert_does_not_overwrite_agent_id_on_conflict():
+    """A second agent presenting the same run id must not relabel the row.
+
+    session_id is a bare TEXT primary key with no binding to an agent, and the id
+    arrives in a header validated only as a well-formed UUID. Real run ids are
+    readable from ~/.claude/comms/artifacts/task-launches/ by any agent running as
+    the same user, and sessions are never closed — so every historical id is a live
+    target. If agent_id were in the SET list, whoever presented the id last would
+    own the row.
+    """
+    pool = _RecordingPool()
+    await RegistryDB(pool=pool).upsert_session("s1", "developer", "headless")
+    normalized = " ".join(pool.calls[0][0].split())
+    set_clause = normalized.split("DO UPDATE SET", 1)[1]
+    assert "agent_id" not in set_clause.split("WHERE")[0], (
+        "agent_id must not be reassignable on conflict — that is session hijacking"
+    )
+
+
+async def test_upsert_is_guarded_by_owner_and_returns_the_id():
+    """Preserving the owner is necessary but NOT sufficient.
+
+    With only `agent_id = sessions.agent_id`, a mismatched caller still gets a
+    successful upsert, is handed the run id back, and stamps its own approvals with
+    a session belonging to someone else — the same misattribution running the other
+    way. The WHERE guard plus RETURNING is what makes the mismatch observable.
+    """
+    pool = _RecordingPool()
+    await RegistryDB(pool=pool).upsert_session("s1", "developer", "headless")
+    normalized = " ".join(pool.calls[0][0].split())
+    assert "WHERE sessions.agent_id = EXCLUDED.agent_id" in normalized
+    assert "RETURNING session_id" in normalized
+
+
+async def test_owner_mismatch_reports_failure():
+    """No row returned ⇒ someone else owns it ⇒ this call is not attributable."""
+    assert not await RegistryDB(pool=_RecordingPool(fetchval_result=None)).upsert_session(
+        "s1", "developer", "headless"
+    )
+
+
+async def test_owner_match_reports_success():
+    assert await RegistryDB(pool=_RecordingPool(fetchval_result="s1")).upsert_session(
+        "s1", "developer", "headless"
+    )

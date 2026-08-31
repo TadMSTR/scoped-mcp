@@ -77,6 +77,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AGENT_ID`, pinned by a per-agent port and bearer token, so *who acted* stays
   non-spoofable; only the session correlation rides the header.
 
+- **A session id you do not already own is not your identity** (security audit, High).
+  `sessions.session_id` is a bare TEXT primary key with no binding to an agent, and the
+  run id arrives validated only as a well-formed UUID — not as *belonging to the caller*.
+  Real run ids are readable from `~/.claude/comms/artifacts/task-launches/` by any agent
+  running as the same user, and sessions are never closed, so every historical id stays a
+  live target. As first written, `upsert_session`'s `ON CONFLICT` reassigned
+  `agent_id = EXCLUDED.agent_id`, so whichever agent presented an id last owned the row —
+  a session hijack reachable with nothing but a read of that directory and a request to
+  the attacker's own broker.
+
+  Closed in two parts, because the first alone is not sufficient: `agent_id` is no longer
+  in the `DO UPDATE SET` list at all, **and** the update is guarded by
+  `WHERE sessions.agent_id = EXCLUDED.agent_id` with `RETURNING session_id`, so a
+  mismatched caller gets no row back and the upsert reports failure. Merely preserving the
+  owner would still have handed the caller the id, letting it stamp its own approvals with
+  someone else's session — the same misattribution running the other way. A mismatch is
+  never legitimate (a run id is minted per launch for exactly one agent) and is logged at
+  WARNING as `registry_session_owner_mismatch`.
+
 - The 382 pre-existing approvals are **not** backfilled. The originating session is
   unrecoverable — `approval_id` carries the agent, not the session — and a synthesised
   value would be worse than NULL in an audit column.
