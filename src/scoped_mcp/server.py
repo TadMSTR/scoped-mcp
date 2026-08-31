@@ -31,6 +31,14 @@ def _build_middleware(
     """Build the middleware stack from manifest config and environment."""
     middleware: list[ToolCallMiddleware] = []
 
+    # Session attribution — FIRST, so the sessions row exists before the HITL
+    # gate downstream mints an approval that references it (the foreign key is
+    # real). Unconditional: it is a no-op without AGENT_REGISTRY_DSN, and a
+    # no-op for any session the launcher did not mint a run id for.
+    from .session import SessionAttributionMiddleware
+
+    middleware.append(SessionAttributionMiddleware())
+
     # Rate limiting — auto-registered when rate_limits is present in manifest
     if rate_limits_cfg is not None:
         from .contrib.rate_limit import RateLimitMiddleware

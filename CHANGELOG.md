@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.0] — 2026-08-31
+
+### Added
+
+- **HITL approvals are now attributable to the run that produced them (vikunja#596).**
+  Every one of the 382 rows in `hitl_approvals` had a NULL `session_id`. The cause was
+  not a failure: `insert_hitl_approval` has always accepted a `session_id`, and
+  `hitl.py` simply never passed one. `task-dispatcher` has likewise always minted a
+  per-launch `FORGE_RUN_ID` and injected it into the launched agent's environment.
+  Nothing connected the two.
+
+  **The run id now reaches the broker as a request header, not an environment
+  variable.** This is the part worth reading: under the deployed HTTP transport
+  scoped-mcp is *not* a per-session process — `run-scoped-mcp-http.sh` starts one
+  long-lived PM2 process per agent at boot, which serves every run that agent ever
+  performs. `FORGE_RUN_ID` lives in the `claude` CLI child's environment, on the far
+  side of a socket, so reading `os.environ` in the broker would have found nothing,
+  forever. Each agent's `.mcp.json` now forwards `X-Forge-Run-Id` / `X-Forge-Task-Id`
+  via the CLI's `${VAR}` header interpolation — the same mechanism
+  `SCOPED_MCP_BEARER_TOKEN` already uses. The `os.environ` path is kept as a fallback
+  for the stdio transport, where the broker *is* per-session.
+
+  A new `SessionAttributionMiddleware` runs **first** in the chain and registers the
+  session via the existing `upsert_session`, so the row exists before the HITL gate
+  downstream mints an approval referencing it (`hitl_approvals.session_id` is a real
+  foreign key). Registration is memoised per run id and refreshed every 60s, which
+  also advances `sessions.last_seen_at` — previously every row had
+  `last_seen_at == started_at`, one of them since 2026-07-17.
+
+  `session_tasks` gets its first writer too, linking a session to the task it was
+  launched for.
+
+- **`session_registry` block in `scoped_mcp_status`.** The registry fails open by
+  design — a down database must never block a HITL-gated tool call — but that failure
+  was invisible: one WARNING at startup, then every writer silently no-oping. `state`
+  reports `disabled` / `uninitialised` / `unavailable` / `recording`, where
+  `unavailable` means approvals are landing unattributed. It deliberately does **not**
+  affect top-level `healthy`, and never contains the DSN. Follows the
+  `credential_health()` precedent.
+
+### Fixed
+
+- **An unknown `session_id` would have destroyed the approval audit row.**
+  `hitl_approvals.session_id` carries a real FK, so a plain INSERT of an id with no
+  `sessions` row raises `hitl_approvals_session_id_fkey` — and `insert_hitl_approval`'s
+  fail-open `except` would have swallowed it, losing the entire approval record rather
+  than just its attribution. The id is now resolved through a subselect, so an unknown
+  session stores NULL and the row survives. Verified against the live schema.
+
+### Security
+
+- **The run id is validated as a UUID before use, and this is a control rather than
+  tidiness.** When `FORGE_RUN_ID` is unset the Claude CLI interpolates the header to
+  the *literal string* `${FORGE_RUN_ID}` — not an empty value, not an absent header
+  (measured, not assumed). Accepting it would have registered one shared `sessions` row
+  named `${FORGE_RUN_ID}` that every interactive approval across every agent joined to,
+  turning an audit column from "unknown" into "known and wrong". An id that does not
+  validate means no launcher-minted identity: nothing is registered and the column stays
+  NULL. **A session id is never self-generated** — a self-minted UUID is
+  indistinguishable in the table from a real one while carrying none of the guarantee,
+  which would convert an audit control into self-attestation.
+
+- `agent_id` is never taken from a header. It remains the broker's own root-controlled
+  `AGENT_ID`, pinned by a per-agent port and bearer token, so *who acted* stays
+  non-spoofable; only the session correlation rides the header.
+
+- The 382 pre-existing approvals are **not** backfilled. The originating session is
+  unrecoverable — `approval_id` carries the agent, not the session — and a synthesised
+  value would be worse than NULL in an audit column.
+
+### Known limitations
+
+- **Sessions are never closed.** `status` stays `active`; read it as "last seen at
+  `last_seen_at`", not "running now". A terminal status needs the launcher's exit
+  signal, which lives in task-dispatcher's run records — that component runs from cron
+  with no database access, so wiring it up means adding `asyncpg` and a DSN to a cron
+  job and is tracked separately.
+
 ## [1.13.0] — 2026-08-25
 
 ### Fixed

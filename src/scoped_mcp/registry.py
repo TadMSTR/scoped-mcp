@@ -783,6 +783,12 @@ def _register_status_tool(
         agent proxying the same upstream under the same filtering means this process is
         serving a stale tool set and needs a restart.
 
+        session_registry reports whether HITL approvals are being attributed to a
+        session: disabled (no DSN), uninitialised (no writer has run yet),
+        unavailable (configured but the pool could not be built — approvals are
+        landing with a NULL session_id) or recording. It never affects healthy,
+        because the registry is fail-open on purpose.
+
         Call this at session start to check for degraded modules before running tasks.
         """
         required_failed, optional_failed = _split_failed_by_optional(
@@ -809,6 +815,19 @@ def _register_status_tool(
                 result["healthy"] = healthy and cred_health.get("token_healthy", True)
             except Exception as exc:  # diagnostic tool must never fail
                 result["credentials"] = {"error": type(exc).__name__}
+        # Session-attribution registry. Reported but deliberately NOT folded into
+        # ``healthy``: the registry is fail-open by design — a down database must
+        # never block a HITL-gated tool call, so it must not make the agent look
+        # unhealthy either. What was missing was only visibility. Read
+        # ``session_registry.state``: "unavailable" means approvals are being
+        # written without attribution, which is exactly the condition that was
+        # previously silent (a single WARNING at startup, then nothing).
+        try:
+            from .registry_db import registry_health
+
+            result["session_registry"] = registry_health()
+        except Exception as exc:  # diagnostic tool must never fail
+            result["session_registry"] = {"error": type(exc).__name__}
         result.update(_manifest_status_fields(manifest_snapshot))
         return result
 
