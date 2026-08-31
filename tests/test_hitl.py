@@ -1109,3 +1109,80 @@ def test_build_notifier_unknown_type_raises() -> None:
     cfg.type = "unknown_channel"
     with pytest.raises(Exception):
         build_notifier(cfg)
+
+
+# ── Session attribution on the audit row (vikunja#596) ───────────────────────
+
+
+class _CapturingRegistry:
+    """Captures the kwargs insert_hitl_approval was called with."""
+
+    def __init__(self) -> None:
+        self.approvals: list[dict] = []
+
+    async def insert_hitl_approval(self, **kw) -> None:
+        self.approvals.append(kw)
+
+
+def _install_registry(monkeypatch, registry):
+    async def _get_registry():
+        return registry
+
+    monkeypatch.setattr("scoped_mcp.registry_db.get_registry", _get_registry)
+    return registry
+
+
+@pytest.mark.asyncio
+async def test_approval_row_carries_the_session_id(monkeypatch) -> None:
+    """The whole point of #596: a gated call inside a dispatcher-launched run
+    must produce an approval row that joins to a real sessions row."""
+    run_id = "11111111-2222-3333-4444-555555555555"
+    registry = _install_registry(monkeypatch, _CapturingRegistry())
+
+    async def _attribute(agent_id):
+        return run_id
+
+    monkeypatch.setattr("scoped_mcp.session.attribute_current_call", _attribute)
+
+    mw = _make_middleware(InProcessBackend(), approval_required=["some_tool"], agent_id="a1")
+    with pytest.raises(HitlRejectedError):
+        await mw(agent_ctx=None, tool_name="some_tool", kwargs={}, call_next=_passthrough)
+
+    assert len(registry.approvals) == 1
+    assert registry.approvals[0]["session_id"] == run_id
+
+
+@pytest.mark.asyncio
+async def test_unattributable_approval_stores_null_session(monkeypatch) -> None:
+    """An interactive session has no launcher-minted id. NULL is the correct,
+    honest value — the row must still be written."""
+    registry = _install_registry(monkeypatch, _CapturingRegistry())
+
+    async def _attribute(agent_id):
+        return None
+
+    monkeypatch.setattr("scoped_mcp.session.attribute_current_call", _attribute)
+
+    mw = _make_middleware(InProcessBackend(), approval_required=["some_tool"], agent_id="a1")
+    with pytest.raises(HitlRejectedError):
+        await mw(agent_ctx=None, tool_name="some_tool", kwargs={}, call_next=_passthrough)
+
+    assert len(registry.approvals) == 1
+    assert registry.approvals[0]["session_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_attribution_failure_does_not_block_the_reject(monkeypatch) -> None:
+    """Attribution is a paper trail. If it explodes, the HITL gate must still
+    reject the call — the security decision is enforced by the Dragonfly OTP,
+    not by this table."""
+    _install_registry(monkeypatch, _CapturingRegistry())
+
+    async def _boom(agent_id):
+        raise RuntimeError("registry on fire")
+
+    monkeypatch.setattr("scoped_mcp.session.attribute_current_call", _boom)
+
+    mw = _make_middleware(InProcessBackend(), approval_required=["some_tool"], agent_id="a1")
+    with pytest.raises(HitlRejectedError):
+        await mw(agent_ctx=None, tool_name="some_tool", kwargs={}, call_next=_passthrough)

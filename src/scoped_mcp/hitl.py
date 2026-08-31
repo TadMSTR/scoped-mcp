@@ -286,6 +286,14 @@ class HitlMiddleware:
         # enforced by the Dragonfly OTP above.
         try:
             from .registry_db import get_registry, hash_otp
+            from .session import attribute_current_call
+
+            # Attribute the approval to the run that launched this agent. Returns
+            # None — and the column is then correctly NULL — for an interactive
+            # session with no launcher-minted id, for a disabled registry, or for
+            # a failed session upsert. It returns an id only once the matching
+            # ``sessions`` row exists, which is what the foreign key requires.
+            session_id = await attribute_current_call(self._agent_id)
 
             registry = await get_registry()
             await registry.insert_hitl_approval(
@@ -295,6 +303,7 @@ class HitlMiddleware:
                 state="pending",
                 token_hash=hash_otp(otp),
                 ttl_seconds=self._timeout,
+                session_id=session_id,
             )
         except Exception as e:  # fail-open — audit must never block the reject
             _log.warning("hitl_audit_write_failed", approval_id=approval_id, error=type(e).__name__)

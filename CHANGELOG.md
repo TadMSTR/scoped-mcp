@@ -7,6 +7,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.0] — 2026-08-31
+
+### Added
+
+- **HITL approvals are now attributable to the run that produced them (vikunja#596).**
+  Every one of the 382 rows in `hitl_approvals` had a NULL `session_id`. The cause was
+  not a failure: `insert_hitl_approval` has always accepted a `session_id`, and
+  `hitl.py` simply never passed one. `task-dispatcher` has likewise always minted a
+  per-launch `FORGE_RUN_ID` and injected it into the launched agent's environment.
+  Nothing connected the two.
+
+  **The run id now reaches the broker as a request header, not an environment
+  variable.** This is the part worth reading: under the deployed HTTP transport
+  scoped-mcp is *not* a per-session process — `run-scoped-mcp-http.sh` starts one
+  long-lived PM2 process per agent at boot, which serves every run that agent ever
+  performs. `FORGE_RUN_ID` lives in the `claude` CLI child's environment, on the far
+  side of a socket, so reading `os.environ` in the broker would have found nothing,
+  forever. Each agent's `.mcp.json` now forwards `X-Forge-Run-Id` / `X-Forge-Task-Id`
+  via the CLI's `${VAR}` header interpolation — the same mechanism
+  `SCOPED_MCP_BEARER_TOKEN` already uses. The `os.environ` path is kept as a fallback
+  for the stdio transport, where the broker *is* per-session.
+
+  A new `SessionAttributionMiddleware` registers the session via the existing
+  `upsert_session`. It is placed **after the rate limiter and arg filter, before
+  HITL**, and both halves matter: before HITL because `hitl_approvals.session_id` is
+  a real foreign key so the row must exist first, and after the rate limiter because
+  this middleware performs a database write — running it first would put an unmetered
+  write ahead of the only thing bounding call volume, letting an agent that loops
+  calls with a fresh run id grow the `sessions` table without hitting the limit.
+  Registration is memoised per run id and refreshed every 60s, which also advances
+  `sessions.last_seen_at` — previously every row had `last_seen_at == started_at`,
+  one of them since 2026-07-17.
+
+  `session_tasks` gets its first writer too, linking a session to the task it was
+  launched for.
+
+- **`session_registry` block in `scoped_mcp_status`.** The registry fails open by
+  design — a down database must never block a HITL-gated tool call — but that failure
+  was invisible: one WARNING at startup, then every writer silently no-oping. `state`
+  reports `disabled` / `uninitialised` / `unavailable` / `recording`, where
+  `unavailable` means approvals are landing unattributed. It deliberately does **not**
+  affect top-level `healthy`, and never contains the DSN. Follows the
+  `credential_health()` precedent.
+
+### Fixed
+
+- **An unknown `session_id` would have destroyed the approval audit row.**
+  `hitl_approvals.session_id` carries a real FK, so a plain INSERT of an id with no
+  `sessions` row raises `hitl_approvals_session_id_fkey` — and `insert_hitl_approval`'s
+  fail-open `except` would have swallowed it, losing the entire approval record rather
+  than just its attribution. The id is now resolved through a subselect, so an unknown
+  session stores NULL and the row survives. Verified against the live schema.
+
+### Security
+
+- **The run id is validated as a UUID before use, and this is a control rather than
+  tidiness.** When `FORGE_RUN_ID` is unset the Claude CLI interpolates the header to
+  the *literal string* `${FORGE_RUN_ID}` — not an empty value, not an absent header
+  (measured, not assumed). Accepting it would have registered one shared `sessions` row
+  named `${FORGE_RUN_ID}` that every interactive approval across every agent joined to,
+  turning an audit column from "unknown" into "known and wrong". An id that does not
+  validate means no launcher-minted identity: nothing is registered and the column stays
+  NULL. **A session id is never self-generated** — a self-minted UUID is
+  indistinguishable in the table from a real one while carrying none of the guarantee,
+  which would convert an audit control into self-attestation.
+
+- `agent_id` is never taken from a header. It remains the broker's own root-controlled
+  `AGENT_ID`, pinned by a per-agent port and bearer token, so *who acted* stays
+  non-spoofable; only the session correlation rides the header.
+
+- **A session id you do not already own is not your identity** (security audit, High).
+  `sessions.session_id` is a bare TEXT primary key with no binding to an agent, and the
+  run id arrives validated only as a well-formed UUID — not as *belonging to the caller*.
+  Real run ids are readable from `~/.claude/comms/artifacts/task-launches/` by any agent
+  running as the same user, and sessions are never closed, so every historical id stays a
+  live target. As first written, `upsert_session`'s `ON CONFLICT` reassigned
+  `agent_id = EXCLUDED.agent_id`, so whichever agent presented an id last owned the row —
+  a session hijack reachable with nothing but a read of that directory and a request to
+  the attacker's own broker.
+
+  Closed in two parts, because the first alone is not sufficient: `agent_id` is no longer
+  in the `DO UPDATE SET` list at all, **and** the update is guarded by
+  `WHERE sessions.agent_id = EXCLUDED.agent_id` with `RETURNING session_id`, so a
+  mismatched caller gets no row back and the upsert reports failure. Merely preserving the
+  owner would still have handed the caller the id, letting it stamp its own approvals with
+  someone else's session — the same misattribution running the other way. A mismatch is
+  never legitimate (a run id is minted per launch for exactly one agent) and is logged at
+  WARNING as `registry_session_owner_mismatch`.
+
+- The 382 pre-existing approvals are **not** backfilled. The originating session is
+  unrecoverable — `approval_id` carries the agent, not the session — and a synthesised
+  value would be worse than NULL in an audit column.
+
+### Known limitations
+
+- **Sessions are never closed.** `status` stays `active`; read it as "last seen at
+  `last_seen_at`", not "running now". A terminal status needs the launcher's exit
+  signal, which lives in task-dispatcher's run records — that component runs from cron
+  with no database access, so wiring it up means adding `asyncpg` and a DSN to a cron
+  job and is tracked separately.
+
 ## [1.13.0] — 2026-08-25
 
 ### Fixed

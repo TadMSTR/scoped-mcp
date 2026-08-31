@@ -57,6 +57,20 @@ def _build_middleware(
             )
         )
 
+    # Session attribution — after rate-limiting and arg-filtering, before HITL.
+    # Both halves of that placement matter. It must precede HITL because
+    # hitl_approvals.session_id is a real foreign key, so the sessions row has to
+    # exist before the gate mints an approval referencing it. It must follow the
+    # rate limiter because this middleware performs a database write, and running
+    # it first would put an unmetered write ahead of the only thing that bounds
+    # call volume — an agent looping calls with a fresh run id each time would
+    # grow the sessions table without ever touching the limit. A call the rate
+    # limiter or the arg filter rejects never reaches HITL either, so nothing
+    # downstream needs a session for it.
+    from .session import SessionAttributionMiddleware
+
+    middleware.append(SessionAttributionMiddleware())
+
     # HITL — auto-registered when hitl is present. Placed last among the
     # gating middleware so an approval request reflects the call as it would
     # actually run (post rate-limit, post arg-filter).
