@@ -29,12 +29,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SCOPED_MCP_BEARER_TOKEN` already uses. The `os.environ` path is kept as a fallback
   for the stdio transport, where the broker *is* per-session.
 
-  A new `SessionAttributionMiddleware` runs **first** in the chain and registers the
-  session via the existing `upsert_session`, so the row exists before the HITL gate
-  downstream mints an approval referencing it (`hitl_approvals.session_id` is a real
-  foreign key). Registration is memoised per run id and refreshed every 60s, which
-  also advances `sessions.last_seen_at` — previously every row had
-  `last_seen_at == started_at`, one of them since 2026-07-17.
+  A new `SessionAttributionMiddleware` registers the session via the existing
+  `upsert_session`. It is placed **after the rate limiter and arg filter, before
+  HITL**, and both halves matter: before HITL because `hitl_approvals.session_id` is
+  a real foreign key so the row must exist first, and after the rate limiter because
+  this middleware performs a database write — running it first would put an unmetered
+  write ahead of the only thing bounding call volume, letting an agent that loops
+  calls with a fresh run id grow the `sessions` table without hitting the limit.
+  Registration is memoised per run id and refreshed every 60s, which also advances
+  `sessions.last_seen_at` — previously every row had `last_seen_at == started_at`,
+  one of them since 2026-07-17.
 
   `session_tasks` gets its first writer too, linking a session to the task it was
   launched for.

@@ -48,14 +48,14 @@ def test_build_middleware_assembles_full_stack(monkeypatch) -> None:
         [ArgumentFilterRule(name="no-secrets", pattern="secret")],
         HitlConfig(approval_required=["dangerous_*"]),
     )
-    # Order matters: attribution → rate-limit → arg-filter → HITL (gating order
-    # documented in server.py). Attribution is FIRST because hitl_approvals
-    # carries a real foreign key to sessions — the row has to exist before the
-    # HITL gate downstream mints an approval that references it.
+    # Order matters: rate-limit → arg-filter → attribution → HITL (documented in
+    # server.py). Attribution sits BEFORE HITL because hitl_approvals carries a
+    # real foreign key to sessions, and AFTER the rate limiter because it does a
+    # database write that must not run unmetered.
     assert [type(m) for m in mw] == [
-        SessionAttributionMiddleware,
         RateLimitMiddleware,
         ArgumentFilterMiddleware,
+        SessionAttributionMiddleware,
         HitlMiddleware,
     ]
 
@@ -134,3 +134,27 @@ def test_main_without_manifest_exits() -> None:
     # No subcommand and no legacy --manifest → prints help and exits non-zero.
     with pytest.raises(SystemExit):
         main([])
+
+
+def test_attribution_runs_after_rate_limit_and_before_hitl(monkeypatch) -> None:
+    """Both halves of the placement are load-bearing, so pin both.
+
+    Before HITL: hitl_approvals.session_id is a real foreign key, so the sessions
+    row must exist before the gate mints an approval referencing it.
+    After the rate limiter: this middleware performs a database write, and an
+    unmetered write ahead of the limiter would let an agent looping calls with a
+    fresh run id grow the sessions table without ever hitting the limit.
+    """
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    mw = _build_middleware(
+        "agent-x",
+        "research",
+        _state(),
+        RateLimitsConfig(global_limit="5/minute"),
+        [ArgumentFilterRule(name="no-secrets", pattern="secret")],
+        HitlConfig(approval_required=["dangerous_*"]),
+    )
+    types = [type(m) for m in mw]
+    assert types.index(SessionAttributionMiddleware) > types.index(RateLimitMiddleware)
+    assert types.index(SessionAttributionMiddleware) > types.index(ArgumentFilterMiddleware)
+    assert types.index(SessionAttributionMiddleware) < types.index(HitlMiddleware)
