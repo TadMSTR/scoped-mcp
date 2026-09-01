@@ -762,6 +762,56 @@ guarantees. All are off by default; enable per-agent in the manifest:
   `pip install scoped-mcp[postgres]`; apply
   `migrations/0001_agent_session_registry.sql` before setting the DSN.
 
+  **Session attribution** (v1.14.0) — ties a registry row to the run that
+  produced it. If you deploy scoped-mcp under `--transport http` behind the
+  Claude CLI, your agent's `.mcp.json` must forward two headers:
+
+  ```json
+  {
+    "mcpServers": {
+      "tools": {
+        "type": "http",
+        "url": "http://127.0.0.1:9200/mcp",
+        "headers": {
+          "Authorization": "Bearer ${SCOPED_MCP_BEARER_TOKEN}",
+          "X-Forge-Run-Id": "${FORGE_RUN_ID}",
+          "X-Forge-Task-Id": "${FORGE_TASK_ID}"
+        }
+      }
+    }
+  }
+  ```
+
+  Without them, attribution silently does nothing — by design, but invisible
+  unless you know to look for it.
+
+  *Why headers, not environment variables.* Under the HTTP transport, scoped-mcp
+  is one long-lived process per agent — it never sees the environment of the
+  CLI child that launched any individual run, so reading `os.environ` for a
+  per-run id would find nothing, ever. The CLI's `${VAR}` header interpolation
+  reads that child's environment and forwards it per-request, the same
+  mechanism `SCOPED_MCP_BEARER_TOKEN` already uses. The `stdio` transport *is*
+  spawned per session and does inherit the variable directly, so the
+  environment-variable path is kept there as a fallback.
+
+  *`session_registry` in `scoped_mcp_status`* reports one of four states:
+  `disabled` (no DSN — nothing wrong), `uninitialised` (configured, no writer
+  has run yet), `unavailable` (configured, but the pool couldn't be built —
+  **approvals are being recorded without attribution**), or `recording`. This
+  field never affects top-level `healthy`: the registry is fail-open by design,
+  since a down database must never block a HITL-gated tool call.
+
+  *Two things that look like bugs and aren't:*
+  - An interactive (non-dispatcher) session produces no `sessions` row and a
+    NULL `session_id`. Correct — there is no launcher-minted identity to
+    record.
+  - `sessions.status` stays `"active"` forever. Read it as "last seen at
+    `last_seen_at`", never as "running now". Session closure is tracked
+    separately (vikunja#602).
+
+  No API change beyond the `session_registry` status field — existing tool
+  signatures are unchanged.
+
 - **Response filtering** (v1.0.2) — opt-in post-execution content scanning.
   `block`, `warn`, or `redact` modes applied per-field via `ResponseFilterRule`
   entries in the manifest's `audit:` section. Redaction applies to string leaves
