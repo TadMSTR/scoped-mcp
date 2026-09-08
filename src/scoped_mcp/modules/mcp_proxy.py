@@ -23,12 +23,59 @@ Config:
     command (str): Executable path for a stdio MCP server.
     args (list[str]): Arguments to pass to the command.
 
+    env (dict[str, str]): Optional environment variables for a spawned stdio
+        child. Only applies to stdio (command) transport — has no effect on HTTP
+        transport, which spawns nothing.
+
+        **A stdio child does not inherit scoped-mcp's environment**, however many
+        credentials the broker process itself holds. Anything the child needs must
+        be named here explicitly.
+
+        What it gets instead is a minimal safe base, and the mechanism matters more
+        than any snapshot of it: the MCP SDK forwards a fixed ALLOWLIST of names
+        (`mcp.client.stdio.DEFAULT_INHERITED_ENV_VARS` — currently HOME, LOGNAME,
+        PATH, SHELL, TERM, USER on POSIX), and forwards each one **only if it is set
+        in the parent**. So the base is a subset of that list, not the list itself:
+        measured on this host, a child saw HOME, LOGNAME, PATH, SHELL with TERM and
+        USER unset in the parent, and all six with them set. Python adds LC_CTYPE on
+        top, which is not part of the SDK allowlist at all.
+
+        Do not treat any of those names as guaranteed present. The allowlist is
+        SDK-version and platform dependent, and membership of it is necessary but
+        not sufficient — read the constant if you need the current answer.
+
+        `env` EXTENDS that safe base rather than replacing it: a module declaring
+        one variable still gets PATH. It does not widen to the rest of the broker
+        environment — only the keys named here are added. That is the intended
+        exposure model (vikunja#436 explicitly rejected blanket passthrough), and
+        it is asserted against a real spawned child in
+        tests/test_modules/test_mcp_proxy.py rather than against the transport
+        spec, since neither property is observable from the spec alone.
+
+        Note what this means for diagnosis: a child silently missing a credential
+        looks identical to the upstream feature being disabled. If a proxied
+        stdio server reports a capability as "not configured", check for an `env`
+        block in the manifest before concluding the upstream is at fault — that
+        misreading is what vikunja#436 recorded.
+
     headers (dict[str, str]): Optional HTTP headers to send with every request
         to the upstream MCP server. Only applies to HTTP (url) transport — has
-        no effect on stdio transport. Header values support ${VAR_NAME}
-        substitution via the manifest credentials block (resolved before this
-        module is instantiated). Sensitive header values (e.g. Authorization)
+        no effect on stdio transport. Sensitive header values (e.g. Authorization)
         are automatically redacted by the structlog sanitize processor.
+
+    ${VAR_NAME} substitution applies to `headers` values and to `env` values, and
+        in fact to every field of the manifest: manifest.py expands the whole file
+        as text before it is parsed as YAML (`_expand_env_vars`, called from
+        `load_manifest`), reading from the environment of the scoped-mcp process.
+        It is not a per-field feature of this module and there is no field it
+        skips. Two consequences worth knowing:
+          - Only the braced form is expanded. A bare $VAR is left alone.
+          - An undefined variable is a hard startup failure for the whole agent,
+            not a silent empty string — the manifest names it and load fails.
+        Expanded values are never logged. `env` values are never logged either:
+        the one place `env` is mentioned in a log record is the ignored-on-HTTP
+        warning below, which emits sorted key names only — the same
+        keys-not-values discipline _validate_arguments uses for arguments.
 
     tool_allowlist (list[str]): If set, only these tools are exposed.
         Empty list or absent = all tools exposed.
@@ -47,8 +94,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import inspect
 import keyword
+import operator
 import re
 from datetime import UTC, datetime
 from typing import Any, ClassVar
@@ -133,6 +182,17 @@ class McpProxyModule(ToolModule):
             _log.warning(
                 "mcp_proxy_headers_ignored",
                 reason="headers config has no effect on stdio transport",
+            )
+        if self._env and self._url:
+            # Mirror of the headers warning above. Without it, an `env` block on an
+            # HTTP module is accepted in silence and looks configured — the same
+            # shape of misreading vikunja#436 recorded, where a missing credential
+            # was indistinguishable from a disabled upstream feature.
+            # Key names only, never values: env is a common secret carrier.
+            _log.warning(
+                "mcp_proxy_env_ignored",
+                reason="env config has no effect on http transport (nothing is spawned)",
+                env_keys=sorted(self._env),
             )
 
         allowlist = config.get("tool_allowlist", [])
@@ -382,8 +442,17 @@ class McpProxyModule(ToolModule):
         fastmcp rejects tool functions whose signature contains **kwargs, so each
         proxied tool gets a synthesized signature derived from the upstream-declared
         inputSchema properties. The proxy body keeps **kwargs and receives args as
-        keywords at call time; strict per-call validation still runs against the full
-        schema in _validate_arguments(), so a lossy type mapping here is safe.
+        keywords at call time.
+
+        This signature is NOT private to the proxy: FastMCP derives the inputSchema it
+        advertises to clients from these annotations, so whatever is lost here is lost
+        from the published schema too. A narrowing is therefore not recoverable by
+        _validate_arguments() — that runs against the full upstream schema and would
+        accept the value, but the client rejects it first against the narrower schema
+        it was given, so the call never arrives. This docstring previously argued a
+        lossy mapping was safe *because* of _validate_arguments; that reasoning holds
+        for the call path and is wrong for the advertise path, and it is what let
+        vikunja#755 through. Widen rather than narrow when a type cannot be expressed.
 
         Returns (signature, rename_map) where rename_map maps a sanitized Python
         parameter name back to the original upstream property name. Upstream names
@@ -400,21 +469,81 @@ class McpProxyModule(ToolModule):
         }
 
         def py_type(prop: dict) -> Any:
+            """Map one JSON Schema property to a Python annotation.
+
+            Both union spellings are handled, and both are handled the same way:
+
+              ``type: [X, null]``            — the JSON Schema list form
+              ``anyOf: [{type: X}, {...}]``  — emitted by pydantic/FastMCP for
+                                               ``Optional[T]`` and for genuine unions
+
+            A *single* non-null branch is ``Optional[T]`` and annotates as ``T``.
+            **Two or more non-null branches are a real union and must annotate as a
+            real union** (``int | str``), because FastMCP derives the advertised
+            inputSchema from this annotation — so collapsing to the first branch does
+            not merely lose precision internally, it publishes a narrower schema than
+            the upstream declared and clients then reject values the upstream accepts
+            (SMCP-42 / vikunja#755). The collapse was also branch-order dependent:
+            ``anyOf:[integer,string]`` narrowed to ``int`` and ``anyOf:[string,integer]``
+            to ``str``, so which values an agent could pass depended on the order the
+            upstream happened to emit.
+
+            Any branch this mapping cannot express falls back to ``Any`` for the whole
+            property. That direction is deliberate: ``Any`` publishes no constraint, so
+            it is never narrower than upstream, and ``_validate_arguments`` still checks
+            every call against the full upstream schema. Narrowing is the failure mode
+            that silently removes capability; widening is caught on the call path.
+            """
             t = prop.get("type")
             if isinstance(t, list):
-                non_null = [x for x in t if x != "null"]
-                t = non_null[0] if non_null else None
+                branches: list[Any] = [x for x in t if x != "null"]
             elif t is None:
-                # anyOf: [{type: X}, {type: null}] — emitted by pydantic/FastMCP 2.x
-                # for Optional[T] fields instead of type: [X, null].
                 any_of = prop.get("anyOf", [])
-                non_null = [
-                    x.get("type")
-                    for x in any_of
-                    if isinstance(x, dict) and x.get("type") not in ("null", None)
-                ]
-                t = non_null[0] if non_null else None
-            return json_py.get(t, Any)
+                # A branch is "null" only if it says so. Anything else is a real branch,
+                # including one carrying no "type" at all (a $ref, or an enum-only
+                # branch) — those are kept here precisely so they can force the Any
+                # fallback below rather than being filtered out and letting a lone
+                # typed sibling narrow the property.
+                branches = []
+                for x in any_of:
+                    if not isinstance(x, dict):
+                        branches.append(None)  # unmappable — forces Any
+                        continue
+                    branch_type = x.get("type")
+                    if branch_type == "null":
+                        continue
+                    if isinstance(branch_type, list):
+                        # The two union spellings nested: an anyOf branch that is itself
+                        # a `type: [...]` list. Valid JSON Schema, just an unusual way to
+                        # write it. Flatten rather than widen — the flattened union is
+                        # exactly what the upstream declared, where Any would drop a
+                        # constraint we can in fact express. (SMCP-42 audit, LOW-1)
+                        branches.extend(b for b in branch_type if b != "null")
+                    else:
+                        branches.append(branch_type)
+            elif isinstance(t, str):
+                return json_py.get(t, Any)
+            else:
+                # `type` present but neither a string nor a list — malformed upstream.
+                return Any
+
+            if not branches:
+                # No non-null branch at all (e.g. type: ["null"]) — nothing to express.
+                return Any
+            # The isinstance guard matters as much as the mapping. An unhashable branch
+            # value (a list, from the nested spelling above) raises TypeError out of
+            # json_py.get, and _discover_tools has no per-tool try/except — so one odd
+            # schema aborted discovery for the whole module and denied every tool from
+            # that upstream. Unmappable must widen, never raise. (SMCP-42 audit, LOW-1)
+            mapped = [json_py.get(b) if isinstance(b, str) else None for b in branches]
+            if any(m is None for m in mapped):
+                return Any
+            # dict.fromkeys dedupes while preserving upstream branch order, so the
+            # published anyOf reads in the same order the upstream declared it.
+            unique = list(dict.fromkeys(mapped))
+            if len(unique) == 1:
+                return unique[0]
+            return functools.reduce(operator.or_, unique)
 
         rename: dict[str, str] = {}
         used: set[str] = set()
