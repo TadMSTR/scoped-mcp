@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from unittest.mock import AsyncMock, patch
@@ -597,6 +599,100 @@ def test_env_default_is_empty(agent_ctx):
 
 
 # ---------------------------------------------------------------------------
+# Stdio env: what a real child process actually sees (SMCP-42 / vikunja#436)
+#
+# The four SMCP-9 tests above assert the transport *spec* — that "env" lands in
+# the dict handed to fastmcp. None of them prove a variable reaches a spawned
+# child, and none pin the two semantics that actually matter:
+#
+#   1. A child does NOT inherit scoped-mcp's environment. It gets the MCP SDK's
+#      minimal safe base (HOME, LOGNAME, PATH, SHELL, USER) and nothing else.
+#      This is the fact vikunja#436 was really reporting: agent-bus's child had
+#      no NATS credential even though the broker process did. Forwarding was
+#      never the missing piece — a declared `env:` block was.
+#   2. `env` EXTENDS that base rather than replacing it. A module declaring one
+#      variable must not lose PATH.
+#
+# These spawn a real subprocess, because a mock cannot observe either property.
+# ---------------------------------------------------------------------------
+
+
+_ENV_PROBE_SERVER = """
+import json, os
+from fastmcp import FastMCP
+
+mcp = FastMCP("env-probe")
+
+
+@mcp.tool()
+def dump_env() -> str:
+    return json.dumps(sorted(os.environ.keys()) + ["=" + (os.environ.get("PROBE_VALUE") or "")])
+
+
+mcp.run()
+"""
+
+
+def _spawn_env_probe(agent_ctx, tmp_path, env: dict | None):
+    """Build a real stdio proxy over a child that reports its own environment."""
+    server = tmp_path / "env_probe_server.py"
+    server.write_text(_ENV_PROBE_SERVER)
+    config: dict = {"command": sys.executable, "args": [str(server)]}
+    if env is not None:
+        config["env"] = env
+    module = McpProxyModule(agent_ctx=agent_ctx, credentials={}, config=config)
+    method = module._proxy_methods[0]
+
+    async def _call():
+        return await method()
+
+    raw = asyncio.run(_call())
+    payload = json.loads(raw if isinstance(raw, str) else raw[0].text)
+    keys = [k for k in payload if not k.startswith("=")]
+    value = next(k[1:] for k in payload if k.startswith("="))
+    return keys, value
+
+
+def test_stdio_child_does_not_inherit_the_broker_environment(agent_ctx, tmp_path, monkeypatch):
+    """A spawned child must NOT see scoped-mcp's own environment.
+
+    This is the mechanism behind vikunja#436. The broker holds every credential
+    in its own .env; if children inherited that, agent-bus's NATS publish would
+    have worked without any config at all. They do not, so a secret the child
+    needs must be named explicitly — which is also why blanket passthrough was
+    never the right fix.
+    """
+    monkeypatch.setenv("PROBE_VALUE", "broker-only-secret")
+    keys, value = _spawn_env_probe(agent_ctx, tmp_path, env=None)
+    assert value == "", f"child inherited the broker's PROBE_VALUE: {value!r}"
+    assert "PROBE_VALUE" not in keys
+
+
+def test_stdio_env_extends_rather_than_replaces_the_safe_base(agent_ctx, tmp_path, monkeypatch):
+    """A declared `env` adds to the MCP safe base; it does not replace it.
+
+    A module that declares one variable must still get PATH — otherwise every
+    manifest using `env` would have to restate the whole environment, and the
+    first one to forget would break its child in a way no unit test would see.
+    """
+    monkeypatch.delenv("PROBE_VALUE", raising=False)
+    keys, value = _spawn_env_probe(agent_ctx, tmp_path, env={"PROBE_VALUE": "declared"})
+    assert value == "declared"
+    assert "PATH" in keys, f"declaring env stripped the safe base: {keys}"
+
+
+def test_stdio_declared_env_does_not_widen_to_other_broker_vars(agent_ctx, tmp_path, monkeypatch):
+    """Declaring one variable must not drag the rest of the broker env along.
+
+    Guards the forwarding against becoming blanket passthrough by accident —
+    vikunja#436 explicitly rejected that option for its exposure implications.
+    """
+    monkeypatch.setenv("PROBE_NEIGHBOUR", "must-not-leak")
+    keys, _ = _spawn_env_probe(agent_ctx, tmp_path, env={"PROBE_VALUE": "declared"})
+    assert "PROBE_NEIGHBOUR" not in keys
+
+
+# ---------------------------------------------------------------------------
 # tool_inventory() — vikunja#517, per-module tool inventory for drift detection
 # ---------------------------------------------------------------------------
 
@@ -751,3 +847,28 @@ def test_tool_inventory_count_matches_the_reported_names(agent_ctx):
     )
     inv = mod.tool_inventory(include_names=True)
     assert inv["tool_count"] == len(inv["tools"])
+
+
+def test_env_on_http_transport_warns_with_key_names_only(agent_ctx, capsys):
+    """`env` on an HTTP module is inert and must say so — naming keys, never values.
+
+    Mirrors the existing headers-on-stdio warning. Silence here leaves a config
+    block that looks applied but does nothing, which is the same misreading
+    vikunja#436 recorded from the other direction.
+    """
+    with patch("scoped_mcp.modules.mcp_proxy.Client") as MockClient:
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_cm.list_tools = AsyncMock(return_value=[_make_tool("t")])
+        MockClient.return_value = mock_cm
+        McpProxyModule(
+            agent_ctx=agent_ctx,
+            credentials={},
+            config={"url": "http://example.test", "env": {"API_TOKEN": "s3cret-value"}},
+        )
+    # structlog emits to stdout (not stdlib logging), so we capture via capsys.
+    text = capsys.readouterr().out
+    assert "mcp_proxy_env_ignored" in text
+    assert "API_TOKEN" in text
+    assert "s3cret-value" not in text, "env VALUE leaked into the warning log"

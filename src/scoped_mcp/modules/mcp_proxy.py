@@ -23,12 +23,47 @@ Config:
     command (str): Executable path for a stdio MCP server.
     args (list[str]): Arguments to pass to the command.
 
+    env (dict[str, str]): Optional environment variables for a spawned stdio
+        child. Only applies to stdio (command) transport — has no effect on HTTP
+        transport, which spawns nothing.
+
+        **A stdio child does not inherit scoped-mcp's environment.** It is given
+        the MCP SDK's minimal safe base — HOME, LOGNAME, PATH, SHELL, USER — and
+        nothing else, however many credentials the broker process itself holds.
+        Anything the child needs must therefore be named here explicitly.
+
+        `env` EXTENDS that safe base rather than replacing it: a module declaring
+        one variable still gets PATH. It does not widen to the rest of the broker
+        environment — only the keys named here are added. That is the intended
+        exposure model (vikunja#436 explicitly rejected blanket passthrough), and
+        it is asserted against a real spawned child in
+        tests/test_modules/test_mcp_proxy.py rather than against the transport
+        spec, since neither property is observable from the spec alone.
+
+        Note what this means for diagnosis: a child silently missing a credential
+        looks identical to the upstream feature being disabled. If a proxied
+        stdio server reports a capability as "not configured", check for an `env`
+        block in the manifest before concluding the upstream is at fault — that
+        misreading is what vikunja#436 recorded.
+
     headers (dict[str, str]): Optional HTTP headers to send with every request
         to the upstream MCP server. Only applies to HTTP (url) transport — has
-        no effect on stdio transport. Header values support ${VAR_NAME}
-        substitution via the manifest credentials block (resolved before this
-        module is instantiated). Sensitive header values (e.g. Authorization)
+        no effect on stdio transport. Sensitive header values (e.g. Authorization)
         are automatically redacted by the structlog sanitize processor.
+
+    ${VAR_NAME} substitution applies to `headers` values and to `env` values, and
+        in fact to every field of the manifest: manifest.py expands the whole file
+        as text before it is parsed as YAML (`_expand_env_vars`, called from
+        `load_manifest`), reading from the environment of the scoped-mcp process.
+        It is not a per-field feature of this module and there is no field it
+        skips. Two consequences worth knowing:
+          - Only the braced form is expanded. A bare $VAR is left alone.
+          - An undefined variable is a hard startup failure for the whole agent,
+            not a silent empty string — the manifest names it and load fails.
+        Expanded values are never logged. `env` values are never logged either:
+        the one place `env` is mentioned in a log record is the ignored-on-HTTP
+        warning below, which emits sorted key names only — the same
+        keys-not-values discipline _validate_arguments uses for arguments.
 
     tool_allowlist (list[str]): If set, only these tools are exposed.
         Empty list or absent = all tools exposed.
@@ -135,6 +170,17 @@ class McpProxyModule(ToolModule):
             _log.warning(
                 "mcp_proxy_headers_ignored",
                 reason="headers config has no effect on stdio transport",
+            )
+        if self._env and self._url:
+            # Mirror of the headers warning above. Without it, an `env` block on an
+            # HTTP module is accepted in silence and looks configured — the same
+            # shape of misreading vikunja#436 recorded, where a missing credential
+            # was indistinguishable from a disabled upstream feature.
+            # Key names only, never values: env is a common secret carrier.
+            _log.warning(
+                "mcp_proxy_env_ignored",
+                reason="env config has no effect on http transport (nothing is spawned)",
+                env_keys=sorted(self._env),
             )
 
         allowlist = config.get("tool_allowlist", [])
