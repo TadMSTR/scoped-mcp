@@ -77,6 +77,20 @@ that comes with it.
 - **`.pre-commit-config.yaml` ruff pin realigned** from v0.11.6 to v0.15.17, matching the
   `ruff>=0.15,<0.16` bound CI now enforces.
 
+### Baselines recorded
+
+Measured values, dated, so a later reader can tell a deliberate number from a stale one — the
+same discipline the coverage floor is under (vikunja#680).
+
+- **OSSF Scorecard: 6.6** — first published result, 2026-09-08, against commit `0770a3c`.
+  Note the workflow has no `pull_request` trigger, so this could not come from the PR that
+  added it; the first run is the first push to `main`. Treat the score as a measurement, not a
+  target: several checks assess things this project deliberately does not do (signed releases,
+  branch protection on a single-maintainer repo).
+- **Test coverage: 91.02%** over 876 tests, 2026-09-08, against a `fail_under = 88` floor.
+- **GitHub community profile: 100%**, 2026-09-08 (71% before this release — the community
+  files were on the PR branch, and GitHub measures the default branch).
+
 ## [1.14.0] — 2026-08-31
 
 ### Added
