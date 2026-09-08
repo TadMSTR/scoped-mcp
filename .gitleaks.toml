@@ -10,9 +10,12 @@
 # corresponding finding — a file that looks tuned while suppressing nothing that exists. They
 # are removed. The entries below were each derived from a real hit on this tree.
 #
-# The scan that produced them also found something real: `192.168.1.11`, an operator
-# workstation's actual LAN address, in three test fixtures. Those are now `192.0.2.11`
-# (TEST-NET-1). That is what this file is for.
+# The scan that produced them also found something real: an operator workstation's actual LAN
+# address, in three test fixtures. Those now use TEST-NET-1. That is what this file is for.
+#
+# The address itself is deliberately not repeated here. Writing "we removed X" into a public
+# file publishes X, and this file is allowlisted from its own scan (see `paths` below), so
+# nothing would have caught it — a suppression file is the one place a disclosure is invisible.
 
 [extend]
 useDefault = true
@@ -62,7 +65,7 @@ regexes = [
   '''127\.0\.0\.2''',
   '''0\.0\.0\.0''',
   # RFC 5737 documentation ranges. Use these for any NEW fixture that needs a routable-looking
-  # address; that is what 192.168.1.11 was replaced with.
+  # address; they are what the removed operator address was replaced with.
   '''192\.0\.2\.\d{1,3}''',
   '''198\.51\.100\.\d{1,3}''',
   '''203\.0\.113\.\d{1,3}''',
