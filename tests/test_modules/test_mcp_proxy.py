@@ -872,3 +872,24 @@ def test_env_on_http_transport_warns_with_key_names_only(agent_ctx, capsys):
     assert "mcp_proxy_env_ignored" in text
     assert "API_TOKEN" in text
     assert "s3cret-value" not in text, "env VALUE leaked into the warning log"
+
+
+def test_env_docstring_names_the_sdk_allowlist_constant() -> None:
+    """The env docstring must point at the SDK constant, not a copied key list.
+
+    An inlined list of "what a child gets" was wrong three ways when audited: it omitted
+    TERM, omitted the LC_CTYPE Python adds, and stated the set as guaranteed when the SDK
+    forwards each name only if it is set in the parent. The constant is the only answer
+    that cannot go stale, so the docstring must keep referring to it. (SMCP-42 audit, LOW-2)
+    """
+    from mcp.client.stdio import DEFAULT_INHERITED_ENV_VARS
+
+    doc = (
+        McpProxyModule.__module__
+        and __import__("scoped_mcp.modules.mcp_proxy", fromlist=["x"]).__doc__
+    )
+    assert "DEFAULT_INHERITED_ENV_VARS" in doc
+    assert "only if it is set" in doc
+    # The names quoted in the docstring must still be the constant's actual contents.
+    for name in DEFAULT_INHERITED_ENV_VARS:
+        assert name in doc, f"{name} is in the SDK allowlist but not in the docstring"

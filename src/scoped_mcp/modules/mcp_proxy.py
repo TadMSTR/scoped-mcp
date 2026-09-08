@@ -27,10 +27,22 @@ Config:
         child. Only applies to stdio (command) transport — has no effect on HTTP
         transport, which spawns nothing.
 
-        **A stdio child does not inherit scoped-mcp's environment.** It is given
-        the MCP SDK's minimal safe base — HOME, LOGNAME, PATH, SHELL, USER — and
-        nothing else, however many credentials the broker process itself holds.
-        Anything the child needs must therefore be named here explicitly.
+        **A stdio child does not inherit scoped-mcp's environment**, however many
+        credentials the broker process itself holds. Anything the child needs must
+        be named here explicitly.
+
+        What it gets instead is a minimal safe base, and the mechanism matters more
+        than any snapshot of it: the MCP SDK forwards a fixed ALLOWLIST of names
+        (`mcp.client.stdio.DEFAULT_INHERITED_ENV_VARS` — currently HOME, LOGNAME,
+        PATH, SHELL, TERM, USER on POSIX), and forwards each one **only if it is set
+        in the parent**. So the base is a subset of that list, not the list itself:
+        measured on this host, a child saw HOME, LOGNAME, PATH, SHELL with TERM and
+        USER unset in the parent, and all six with them set. Python adds LC_CTYPE on
+        top, which is not part of the SDK allowlist at all.
+
+        Do not treat any of those names as guaranteed present. The allowlist is
+        SDK-version and platform dependent, and membership of it is necessary but
+        not sufficient — read the constant if you need the current answer.
 
         `env` EXTENDS that safe base rather than replacing it: a module declaring
         one variable still gets PATH. It does not widen to the rest of the broker
@@ -492,16 +504,38 @@ class McpProxyModule(ToolModule):
                 # branch) — those are kept here precisely so they can force the Any
                 # fallback below rather than being filtered out and letting a lone
                 # typed sibling narrow the property.
-                branches = [
-                    x.get("type") for x in any_of if isinstance(x, dict) and x.get("type") != "null"
-                ]
-            else:
+                branches = []
+                for x in any_of:
+                    if not isinstance(x, dict):
+                        branches.append(None)  # unmappable — forces Any
+                        continue
+                    branch_type = x.get("type")
+                    if branch_type == "null":
+                        continue
+                    if isinstance(branch_type, list):
+                        # The two union spellings nested: an anyOf branch that is itself
+                        # a `type: [...]` list. Valid JSON Schema, just an unusual way to
+                        # write it. Flatten rather than widen — the flattened union is
+                        # exactly what the upstream declared, where Any would drop a
+                        # constraint we can in fact express. (SMCP-42 audit, LOW-1)
+                        branches.extend(b for b in branch_type if b != "null")
+                    else:
+                        branches.append(branch_type)
+            elif isinstance(t, str):
                 return json_py.get(t, Any)
+            else:
+                # `type` present but neither a string nor a list — malformed upstream.
+                return Any
 
             if not branches:
                 # No non-null branch at all (e.g. type: ["null"]) — nothing to express.
                 return Any
-            mapped = [json_py.get(b) for b in branches]
+            # The isinstance guard matters as much as the mapping. An unhashable branch
+            # value (a list, from the nested spelling above) raises TypeError out of
+            # json_py.get, and _discover_tools has no per-tool try/except — so one odd
+            # schema aborted discovery for the whole module and denied every tool from
+            # that upstream. Unmappable must widen, never raise. (SMCP-42 audit, LOW-1)
+            mapped = [json_py.get(b) if isinstance(b, str) else None for b in branches]
             if any(m is None for m in mapped):
                 return Any
             # dict.fromkeys dedupes while preserving upstream branch order, so the

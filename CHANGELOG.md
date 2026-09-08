@@ -31,10 +31,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previously reported: passing a list of sites was equally impossible.
 
   Exactly one non-null branch remains `Optional[T]` and annotates `T`, unchanged. Two or more
-  now annotate a real union. A branch that cannot be expressed as a Python annotation widens
-  the whole property to `Any` rather than letting a lone typed sibling narrow it — never
-  narrower than upstream, with the call path still checked against the true schema. No
-  parameter in the live fleet takes that path today. (vikunja#755)
+  now annotate a real union. An `anyOf` branch that is itself a `type: [...]` list — the two
+  union spellings nested — is flattened into that union. A branch that cannot be expressed as
+  a Python annotation at all widens the whole property to `Any` rather than letting a lone
+  typed sibling narrow it: never narrower than upstream, with the call path still checked
+  against the true schema. No parameter in the live fleet takes that path today.
+
+  No schema shape raises out of `_signature_from_schema`. That matters more than any single
+  narrowing, because `_discover_tools` has no per-tool `try`/`except` — one malformed schema
+  would abort discovery for the whole module and deny every tool from that upstream.
+  (vikunja#755)
 
 - **`tests/test_ops_alert.py` read alert config from the ambient environment**, so the suite
   passed or failed depending on the operator's shell. `SCOPED_MCP_ALERT_NTFY_URL` is exported

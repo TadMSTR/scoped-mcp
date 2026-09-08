@@ -469,3 +469,73 @@ async def test_anyof_array_published_schema_is_array(optional_array_module) -> N
     module, _ = optional_array_module
     published = await _published_schema(module, "create_item")
     assert published["properties"]["labels"].get("type") == "array"
+
+
+# ── unmappable branch shapes must widen, never raise (SMCP-42 audit, LOW-1) ──
+
+
+@pytest.fixture
+def nested_type_list_module(agent_ctx):
+    # An anyOf branch that is itself a `type: [...]` list — the two union spellings
+    # nested. Valid JSON Schema; this raised TypeError before the audit fix.
+    yield from _union_module(
+        agent_ctx, {"anyOf": [{"type": "string"}, {"type": ["integer", "boolean"]}]}
+    )
+
+
+@pytest.fixture
+def non_dict_branch_module(agent_ctx):
+    yield from _union_module(agent_ctx, {"anyOf": ["not-a-dict", {"type": "string"}]})
+
+
+@pytest.mark.asyncio
+async def test_nested_type_list_branch_is_flattened_not_raised(nested_type_list_module) -> None:
+    """`anyOf:[{type:string},{type:[integer,boolean]}]` publishes all three branches.
+
+    The branch's own `type` is a list, which was passed straight into a dict lookup —
+    an unhashable-type TypeError out of _signature_from_schema. `_discover_tools` has no
+    per-tool try/except, so one tool with this shape aborted discovery for the entire
+    module and denied every tool from that upstream (registry.py catches it and marks the
+    module failed_init).
+
+    Flattened rather than widened to Any: the flattened union is exactly what the upstream
+    declared, so there is no reason to drop a constraint that can be expressed.
+    """
+    module, _ = nested_type_list_module
+    published = await _published_schema(module, "task_get")
+    assert set(_branch_types(published, "task_id")) == {"string", "integer", "boolean"}
+
+
+def test_unmappable_branch_shapes_never_raise(agent_ctx) -> None:
+    """No schema shape may raise out of _signature_from_schema — it must widen instead.
+
+    Raising is worse than any narrowing: it takes out the whole module's discovery, not
+    just the one parameter. Each shape below either resolves or falls back to Any.
+    """
+    shapes = {
+        "nested type list": {"anyOf": [{"type": "string"}, {"type": ["integer", "boolean"]}]},
+        "nested unmappable": {"anyOf": [{"type": "string"}, {"type": ["integer", "widget"]}]},
+        "non-dict branch": {"anyOf": ["garbage", {"type": "string"}]},
+        "type is a dict": {"type": {"weird": 1}},
+        "type is an int": {"type": 7},
+        "empty anyOf": {"anyOf": []},
+        "all-null anyOf": {"anyOf": [{"type": "null"}]},
+    }
+    for label, prop in shapes.items():
+        schema = {"type": "object", "properties": {"p": prop}, "required": ["p"]}
+        sig, _ = McpProxyModule._signature_from_schema(schema)  # must not raise
+        assert "p" in sig.parameters, label
+
+
+def test_non_dict_branch_widens_instead_of_letting_a_sibling_narrow(
+    non_dict_branch_module,
+) -> None:
+    """A malformed non-dict branch must not be filtered out, leaving a lone typed sibling.
+
+    Same failure class as the $ref case: dropping a branch the mapping cannot read and
+    then annotating whatever is left publishes a narrower schema than the upstream
+    declared.
+    """
+    module, _ = non_dict_branch_module
+    method = module._proxy_methods[0]
+    assert method.__signature__.parameters["task_id"].annotation is not str
