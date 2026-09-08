@@ -311,3 +311,161 @@ async def test_anyof_array_param_string_rejected(optional_array_module) -> None:
     with pytest.raises(_ProxyValidationError, match="schema validation"):
         await method(name="ticket", labels='["uuid1","uuid2"]')
     mock_cm.call_tool.assert_not_awaited()
+
+
+# ── multi-branch unions in the PUBLISHED schema (SMCP-42 / vikunja#755) ──────
+#
+# These assert what a client is actually told, not what the synthesized signature
+# says. That distinction is the whole bug: `_signature_from_schema` is not private
+# to the proxy — FastMCP derives the advertised inputSchema from its annotations —
+# so a test that only inspects the signature passes while every client still sees a
+# narrowed schema. `test_anyof_array_signature_annotated_as_list` above is exactly
+# that shape, and it passed against the bug these tests were written for.
+
+
+async def _published_schema(module: McpProxyModule, tool_name: str) -> dict:
+    """Return the inputSchema a real MCP client is served for *tool_name*.
+
+    Registers the module's synthesized proxy methods on a FastMCP server the same
+    way registry.py does (``child.tool(name=method.__name__)``) and reads the result
+    back through an in-memory client — i.e. the published layer, end to end.
+    """
+    from fastmcp import Client as _RealClient
+    from fastmcp import FastMCP
+
+    server = FastMCP("published-schema-probe")
+    for method in module._proxy_methods:
+        server.tool(name=method.__name__)(method)
+    async with _RealClient(server) as client:
+        for tool in await client.list_tools():
+            if tool.name == tool_name:
+                return tool.inputSchema
+    raise AssertionError(f"{tool_name!r} was not published")
+
+
+def _union_module(agent_ctx, prop: dict):
+    """Build a proxy over one tool whose single required param is *prop*."""
+    schema = {"type": "object", "properties": {"task_id": prop}, "required": ["task_id"]}
+    yield from _module_fixture(agent_ctx, [_make_tool("task_get", schema)])
+
+
+@pytest.fixture
+def union_int_str_module(agent_ctx):
+    yield from _union_module(agent_ctx, {"anyOf": [{"type": "integer"}, {"type": "string"}]})
+
+
+@pytest.fixture
+def union_str_int_module(agent_ctx):
+    yield from _union_module(agent_ctx, {"anyOf": [{"type": "string"}, {"type": "integer"}]})
+
+
+@pytest.fixture
+def union_type_list_module(agent_ctx):
+    yield from _union_module(agent_ctx, {"type": ["integer", "string"]})
+
+
+@pytest.fixture
+def optional_string_module(agent_ctx):
+    yield from _union_module(agent_ctx, {"anyOf": [{"type": "string"}, {"type": "null"}]})
+
+
+@pytest.fixture
+def unmappable_branch_module(agent_ctx):
+    yield from _union_module(agent_ctx, {"anyOf": [{"type": "string"}, {"$ref": "#/$defs/Widget"}]})
+
+
+def _branch_types(published: dict, param: str) -> list[str]:
+    return [b.get("type") for b in published["properties"][param].get("anyOf", [])]
+
+
+@pytest.mark.asyncio
+async def test_published_schema_preserves_int_str_union(union_int_str_module) -> None:
+    """The published schema for anyOf:[integer,string] must carry BOTH branches.
+
+    This is vikunja#755 itself: 21 vikunja-mcp tools declare task_id as int | str, the
+    proxy published `{"type": "integer"}`, and so every `#N` ticket reference was
+    rejected at the client boundary before it could reach an upstream that would have
+    resolved it.
+    """
+    module, _ = union_int_str_module
+    published = await _published_schema(module, "task_get")
+    assert _branch_types(published, "task_id") == ["integer", "string"], (
+        f"published schema narrowed the union: {published['properties']['task_id']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_published_union_is_branch_order_independent(union_str_int_module) -> None:
+    """Reversing the upstream's branch order must not change what is published.
+
+    The old collapse took non_null[0], so anyOf:[integer,string] narrowed to integer
+    and anyOf:[string,integer] narrowed to string — which values an agent could pass
+    depended on the order the upstream happened to emit. Both branches must survive
+    either way round.
+    """
+    module, _ = union_str_int_module
+    published = await _published_schema(module, "task_get")
+    assert set(_branch_types(published, "task_id")) == {"string", "integer"}
+
+
+@pytest.mark.asyncio
+async def test_published_schema_preserves_type_list_union(union_type_list_module) -> None:
+    """The `type: [integer, string]` spelling had the identical bug and the identical fix."""
+    module, _ = union_type_list_module
+    published = await _published_schema(module, "task_get")
+    assert set(_branch_types(published, "task_id")) == {"string", "integer"}
+
+
+@pytest.mark.asyncio
+async def test_published_schema_optional_still_narrows_to_t(optional_string_module) -> None:
+    """anyOf:[T, null] must keep publishing plain T — the union fix must not widen it.
+
+    Exactly one non-null branch is Optional[T], not a union. Regression guard for the
+    SMCP-6 behaviour above.
+    """
+    module, _ = optional_string_module
+    published = await _published_schema(module, "task_get")
+    assert published["properties"]["task_id"].get("type") == "string"
+    assert "anyOf" not in published["properties"]["task_id"]
+
+
+@pytest.mark.asyncio
+async def test_published_schema_widens_rather_than_narrows_unmappable(
+    unmappable_branch_module,
+) -> None:
+    """A branch with no expressible type must widen the property, never narrow it.
+
+    anyOf:[{type: string}, {$ref: ...}] cannot be expressed as a Python annotation.
+    Publishing `{"type": "string"}` would forbid every value the $ref branch allows —
+    the same silent capability loss as #755. Publishing no constraint is safe because
+    _validate_arguments still checks the call against the full upstream schema.
+    """
+    module, _ = unmappable_branch_module
+    published = await _published_schema(module, "task_get")
+    task_id = published["properties"]["task_id"]
+    assert task_id.get("type") != "string", (
+        f"unmappable branch was dropped and the property narrowed: {task_id}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_union_param_accepts_both_branches_on_the_call_path(union_int_str_module) -> None:
+    """Both branches of a published union must survive _validate_arguments too."""
+    module, mock_cm = union_int_str_module
+    method = module._proxy_methods[0]
+    assert await method(task_id=836) == {"ok": True}
+    assert await method(task_id="#753") == {"ok": True}
+    assert mock_cm.call_tool.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_anyof_array_published_schema_is_array(optional_array_module) -> None:
+    """Companion to test_anyof_array_signature_annotated_as_list at the published layer.
+
+    That test asserts the annotation; its docstring says the point is what the tool
+    "advertises ... to downstream LLMs". This asserts the advertised schema, so the
+    stated intent is actually covered.
+    """
+    module, _ = optional_array_module
+    published = await _published_schema(module, "create_item")
+    assert published["properties"]["labels"].get("type") == "array"

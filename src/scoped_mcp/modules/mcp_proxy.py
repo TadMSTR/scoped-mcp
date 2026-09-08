@@ -47,8 +47,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import inspect
 import keyword
+import operator
 import re
 from datetime import UTC, datetime
 from typing import Any, ClassVar
@@ -382,8 +384,17 @@ class McpProxyModule(ToolModule):
         fastmcp rejects tool functions whose signature contains **kwargs, so each
         proxied tool gets a synthesized signature derived from the upstream-declared
         inputSchema properties. The proxy body keeps **kwargs and receives args as
-        keywords at call time; strict per-call validation still runs against the full
-        schema in _validate_arguments(), so a lossy type mapping here is safe.
+        keywords at call time.
+
+        This signature is NOT private to the proxy: FastMCP derives the inputSchema it
+        advertises to clients from these annotations, so whatever is lost here is lost
+        from the published schema too. A narrowing is therefore not recoverable by
+        _validate_arguments() — that runs against the full upstream schema and would
+        accept the value, but the client rejects it first against the narrower schema
+        it was given, so the call never arrives. This docstring previously argued a
+        lossy mapping was safe *because* of _validate_arguments; that reasoning holds
+        for the call path and is wrong for the advertise path, and it is what let
+        vikunja#755 through. Widen rather than narrow when a type cannot be expressed.
 
         Returns (signature, rename_map) where rename_map maps a sanitized Python
         parameter name back to the original upstream property name. Upstream names
@@ -400,21 +411,59 @@ class McpProxyModule(ToolModule):
         }
 
         def py_type(prop: dict) -> Any:
+            """Map one JSON Schema property to a Python annotation.
+
+            Both union spellings are handled, and both are handled the same way:
+
+              ``type: [X, null]``            — the JSON Schema list form
+              ``anyOf: [{type: X}, {...}]``  — emitted by pydantic/FastMCP for
+                                               ``Optional[T]`` and for genuine unions
+
+            A *single* non-null branch is ``Optional[T]`` and annotates as ``T``.
+            **Two or more non-null branches are a real union and must annotate as a
+            real union** (``int | str``), because FastMCP derives the advertised
+            inputSchema from this annotation — so collapsing to the first branch does
+            not merely lose precision internally, it publishes a narrower schema than
+            the upstream declared and clients then reject values the upstream accepts
+            (SMCP-42 / vikunja#755). The collapse was also branch-order dependent:
+            ``anyOf:[integer,string]`` narrowed to ``int`` and ``anyOf:[string,integer]``
+            to ``str``, so which values an agent could pass depended on the order the
+            upstream happened to emit.
+
+            Any branch this mapping cannot express falls back to ``Any`` for the whole
+            property. That direction is deliberate: ``Any`` publishes no constraint, so
+            it is never narrower than upstream, and ``_validate_arguments`` still checks
+            every call against the full upstream schema. Narrowing is the failure mode
+            that silently removes capability; widening is caught on the call path.
+            """
             t = prop.get("type")
             if isinstance(t, list):
-                non_null = [x for x in t if x != "null"]
-                t = non_null[0] if non_null else None
+                branches: list[Any] = [x for x in t if x != "null"]
             elif t is None:
-                # anyOf: [{type: X}, {type: null}] — emitted by pydantic/FastMCP 2.x
-                # for Optional[T] fields instead of type: [X, null].
                 any_of = prop.get("anyOf", [])
-                non_null = [
-                    x.get("type")
-                    for x in any_of
-                    if isinstance(x, dict) and x.get("type") not in ("null", None)
+                # A branch is "null" only if it says so. Anything else is a real branch,
+                # including one carrying no "type" at all (a $ref, or an enum-only
+                # branch) — those are kept here precisely so they can force the Any
+                # fallback below rather than being filtered out and letting a lone
+                # typed sibling narrow the property.
+                branches = [
+                    x.get("type") for x in any_of if isinstance(x, dict) and x.get("type") != "null"
                 ]
-                t = non_null[0] if non_null else None
-            return json_py.get(t, Any)
+            else:
+                return json_py.get(t, Any)
+
+            if not branches:
+                # No non-null branch at all (e.g. type: ["null"]) — nothing to express.
+                return Any
+            mapped = [json_py.get(b) for b in branches]
+            if any(m is None for m in mapped):
+                return Any
+            # dict.fromkeys dedupes while preserving upstream branch order, so the
+            # published anyOf reads in the same order the upstream declared it.
+            unique = list(dict.fromkeys(mapped))
+            if len(unique) == 1:
+                return unique[0]
+            return functools.reduce(operator.or_, unique)
 
         rename: dict[str, str] = {}
         used: set[str] = set()
