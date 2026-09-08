@@ -1,0 +1,47 @@
+# Dependabot configuration.
+#
+# This file is not optional scaffolding here. A committed lockfile without something maintaining
+# it is a *freeze*, not an improvement — pinned-and-forgotten is a different failure, not the
+# absence of one. vikunja#670 says so explicitly. uv.lock has been in this repo for a while and
+# nothing has been updating it; this file is what makes its presence mean something.
+#
+# The ecosystem is `uv`, NOT `pip`. They are separate ecosystems in Dependabot, and the
+# distinction is load-bearing: `pip` would update pyproject.toml and leave uv.lock untouched,
+# which is precisely the frozen-lock failure above, wearing the appearance of coverage. Verified
+# on webhook-doorman during this same programme — within minutes of merge, Dependabot opened a
+# `dependabot/uv/...` PR, which the `pip` ecosystem would never have produced.
+#
+# No `docker` ecosystem: this repo has no Dockerfile. It publishes a wheel and an sdist to PyPI.
+#
+# Majors are ignored for every dependency. A semver-major bump is a reading task, not a merge
+# task, and the bounded ranges in pyproject.toml already stop one arriving silently — that is
+# what vikunja#627 was: `fastmcp>=2.0` resolving to 4.0.1, two majors past anything tested,
+# unobserved for ten days. To take a major, do it by hand and read the upstream changelog.
+version: 2
+
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    # Dev dependencies batch into one PR. They update often and none of them ship in the
+    # published wheel, so one PR per bump would drown the runtime updates that actually need
+    # reading.
+    groups:
+      dev-dependencies:
+        dependency-type: "development"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Actions are SHA-pinned with a trailing version comment (see .github/workflows/*.yml).
+    # Dependabot understands SHA pins and bumps the SHA while updating that comment, so pinning
+    # costs no update coverage.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]

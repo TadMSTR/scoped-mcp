@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "scoped-mcp"
-version = "1.14.0"
+version = "1.15.0"
 description = "Per-agent scoped MCP tool proxy with credential isolation and audit logging"
 readme = "README.md"
 license = "MIT"
@@ -21,13 +21,23 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
+# EVERY RANGE IS BOUNDED ON BOTH SIDES. This is a Flagship requirement and it exists because
+# of a specific incident: vikunja-mcp declared `fastmcp>=2.0`, which was conformant under the
+# standard's old "pin to minimum, not exact" rule, and resolved to fastmcp 4.0.1 — two majors
+# past anything that had ever been tested — unobserved for ten days (vikunja#627). An unbounded
+# upper is not a permissive choice, it is an unstated assumption that every future major of
+# every dependency will be compatible.
+#
+# The upper bound is what makes a major bump a deliberate act. Dependabot is configured to
+# ignore majors (.github/dependabot.yml), so taking one means editing this file and reading the
+# upstream changelog, which is the intended cost.
 dependencies = [
     "fastmcp>=3.2.0,<4.0.0",
     "pydantic>=2.0,<3.0",
-    "structlog",
-    "pyyaml",
-    "sqlglot>=30.0",
-    "jsonschema>=4.18",
+    "structlog>=25.0,<27.0",
+    "pyyaml>=6.0,<7.0",
+    "sqlglot>=30.0,<31.0",
+    "jsonschema>=4.18,<5.0",
 ]
 
 [project.urls]
@@ -37,20 +47,39 @@ Repository = "https://github.com/TadMSTR/scoped-mcp"
 Issues = "https://github.com/TadMSTR/scoped-mcp/issues"
 
 [project.optional-dependencies]
-http = ["httpx"]       # enables grafana, influxdb, ntfy, slack, discord, matrix, http_proxy
-smtp = ["aiosmtplib"]  # enables smtp module
-sqlite = ["aiosqlite"] # enables sqlite module
+# Bounded on both sides, for the reason stated above the runtime dependencies. Extras are the
+# published surface too — `pip install scoped-mcp[vault]` resolves against these ranges.
+http = ["httpx>=0.27,<1.0"]         # enables grafana, influxdb, ntfy, slack, discord, matrix, http_proxy
+# Floor raised past CVE-2026-55558 (fixed in 5.1.2), found by this repo's own audit gate on
+# 2026-09-08 while it was still pinned at 5.1.1 in a stale lock. A package whose purpose is
+# enforcing an authorisation boundary should not ship a range that permits a known-vulnerable
+# dependency, even though a resolver would normally pick something newer anyway.
+smtp = ["aiosmtplib>=5.1.2,<6.0"]   # enables smtp module
+sqlite = ["aiosqlite>=0.20,<1.0"]   # enables sqlite module
 otel = [
-    "opentelemetry-api>=1.20",
-    "opentelemetry-sdk>=1.20",
-    "opentelemetry-exporter-otlp-proto-grpc>=1.20",
-    "opentelemetry-exporter-otlp-proto-http>=1.20",
+    "opentelemetry-api>=1.20,<2.0",
+    "opentelemetry-sdk>=1.20,<2.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.20,<2.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.20,<2.0",
 ]
 dragonfly = ["redis>=5.0,<6"]  # enables DragonflyBackend (rate limiting + HITL shared state)
-postgres = ["asyncpg>=0.29"]  # enables the agent session registry DAL (registry_db.py)
-vault = ["hvac>=2.0,<3", "cryptography>=41.0"]  # Vault credential source + ed25519 signing
-all = ["httpx", "aiosmtplib", "aiosqlite"]
-dev = ["pytest", "pytest-asyncio", "pytest-cov", "ruff", "redis>=5.0,<6", "hvac>=2.0,<3", "asyncpg>=0.29"]
+postgres = ["asyncpg>=0.29,<1.0"]  # enables the agent session registry DAL (registry_db.py)
+# cryptography floor raised past PYSEC-2026-3552 (fixed in 50.0.0), same audit run as above.
+vault = ["hvac>=2.0,<3", "cryptography>=50.0,<51.0"]  # Vault credential source + ed25519 signing
+all = ["httpx>=0.27,<1.0", "aiosmtplib>=5.1.2,<6.0", "aiosqlite>=0.20,<1.0"]
+# Dev tooling is bounded too. Not ceremony: an unbounded `ruff` is how a linter minor bump
+# introduces new rules and turns CI red on code nobody touched — which happened on
+# matrix-dispatcher when ruff 0.16.6 started flagging UP042. A linter upgrade should be a
+# deliberate change with its fixes in the same commit.
+dev = [
+    "pytest>=8.0,<10.0",
+    "pytest-asyncio>=0.23,<2.0",
+    "pytest-cov>=5.0,<8.0",
+    "ruff>=0.15,<0.16",
+    "redis>=5.0,<6",
+    "hvac>=2.0,<3",
+    "asyncpg>=0.29,<1.0",
+]
 
 [project.scripts]
 scoped-mcp = "scoped_mcp.server:main"
@@ -83,8 +112,26 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.coverage.report]
-# Gate sits ~2 points under actual CI coverage (~90%) to avoid false reds from small
-# fluctuations. server.py's _run_serve async loop + signal handlers are intentionally left
-# uncovered (they need a live-transport integration harness for low value).
+# MEASURED 2026-09-08: 91.02% over 876 passing tests (3977 statements, 357 missed).
+#
+# The date is the point. An undated floor cannot be told from a stale one — a reader has no way
+# to know whether 88 is three points of deliberate headroom under a current measurement or a
+# number that was accurate two years ago and has been silently over-provisioned ever since.
+# This is vikunja#680 and it is a Flagship requirement (Gate Honesty): record what was measured,
+# with the date it was measured, beside the value it justifies.
+#
+# The previous comment here read "~2 points under actual CI coverage (~90%)" — approximate, and
+# carrying no date. It was also wrong by the time it was read: actual was 91.02, not ~90.
+#
+# Reproduce the measurement (a bare `.venv` understates it by ~8 points, because several test
+# modules `importorskip` on optional deps and the Dragonfly tests skip without a live Redis):
+#   uv pip install respx aiosqlite aiosmtplib opentelemetry-sdk \
+#       opentelemetry-exporter-otlp-proto-grpc opentelemetry-exporter-otlp-proto-http
+#   docker run -d --rm --name cov-redis -p 127.0.0.1:6379:6379 redis:7
+#   .venv/bin/python -m pytest --cov=scoped_mcp
+#
+# The gap between 88 and 91.02 is deliberate headroom against small fluctuations, not slack to
+# be spent. server.py's `_run_serve` async loop and its signal handlers are the largest
+# intentional gap (server.py sits at 60%); they need a live-transport harness for low value.
 fail_under = 88
 show_missing = true

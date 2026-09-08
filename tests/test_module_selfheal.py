@@ -155,7 +155,7 @@ def test_is_loopback_url_accepts_loopback_forms() -> None:
 def test_is_loopback_url_rejects_remote_and_non_http() -> None:
     """A remote dependency must never gate startup — claudebox-ops is optional:true
     (SMCP-31) and is powered off on purpose sometimes."""
-    assert not is_loopback_url("http://192.168.1.11:8282/mcp")
+    assert not is_loopback_url("http://192.0.2.11:8282/mcp")
     assert not is_loopback_url("http://claudebox.internal:8282/mcp")
     assert not is_loopback_url("ws://localhost:8282/mcp")
     assert not is_loopback_url("not a url at all")
@@ -276,7 +276,7 @@ def test_gate_skips_remote_dependency_without_waiting() -> None:
     """A remote URL is not polled at all — no delay, no startup gating."""
     import structlog
 
-    cfg = _gate_manifest("http://192.168.1.11:8282/mcp", dependency_wait_timeout_seconds=30)
+    cfg = _gate_manifest("http://192.0.2.11:8282/mcp", dependency_wait_timeout_seconds=30)
     budget = DependencyGateBudget(total=30.0)
     started = time.monotonic()
     _gate_local_dependency("remote", cfg, structlog.get_logger("ops"), budget)

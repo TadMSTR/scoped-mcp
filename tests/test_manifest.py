@@ -170,7 +170,7 @@ def test_module_config_optional_field_true():
         "modules": {
             "claudebox-ops": {
                 "type": "mcp_proxy",
-                "config": {"url": "http://192.168.1.11:8485/mcp"},
+                "config": {"url": "http://192.0.2.11:8485/mcp"},
                 "optional": True,
             }
         },

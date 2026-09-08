@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.0] — 2026-09-08
+
+Promotion to the **Flagship** repo tier. No runtime behaviour changes — the whole of this
+release is supply chain, dependency and gate work, plus the dependency-range tightening
+that comes with it.
+
+### Security
+
+- **`uv.lock` was stale by nearly three months and carried four known-vulnerable pins.**
+  The lock was last regenerated 2026-06-14 against a `pyproject.toml` last changed
+  2026-08-31; it recorded this project at v1.3.4, and `asyncpg` — declared in two extras —
+  was absent from it entirely. Regenerating it and auditing the result surfaced advisories
+  in `aiosmtplib` (CVE-2026-55558), `cryptography` (PYSEC-2026-3552), `mcp`
+  (PYSEC-2026-3483) and `pydantic-settings` (GHSA-4xgf-cpjx-pc3j). All four are upstream
+  advisories with published fixes and all four are now updated past them.
+
+  These were invisible because the audit gate was not reading the lock — see below.
+
+- **Dependency floors raised past two of those advisories.** `aiosmtplib` to `>=5.1.2` and
+  `cryptography` to `>=50.0`, so the published ranges cannot resolve to a version with a
+  known advisory even though a resolver would normally pick something newer.
+
+- **Three test fixtures carried an operator workstation's real LAN address.** Replaced with
+  RFC 5737 documentation addresses. Found by this release's own secret-scanning config.
+
+### Added
+
+- **`.github/ci/verify-dist.sh`** — artefact verification, called from both `ci.yml` and
+  `release.yml`. Asserts wheel layout and contents, version agreement between the wheel, the
+  sdist, `pyproject.toml` and the release tag, absence of secret-shaped filenames in either
+  artefact, presence of the package and its entry point, a clean-venv install, validation of
+  every manifest in `examples/` from the installed wheel, and that the installed wheel
+  enforces the scoping contract in both directions.
+- **`release.yml` now verifies before it publishes.** A `verify` job sits between `build` and
+  `publish-pypi`. Previously nothing between the build and the upload asserted anything about
+  what was being pushed to PyPI, and PyPI does not allow re-uploading a filename.
+- **CodeQL** (`python` and `actions`, `security-and-quality`) and **OSSF Scorecard**
+  (`publish_results: true`) workflows.
+- **`.github/dependabot.yml`** — ecosystems `uv` and `github-actions`, majors ignored. The
+  ecosystem is `uv`, not `pip`: `pip` updates `pyproject.toml` and leaves `uv.lock` frozen,
+  which is the failure this release exists to fix, wearing the appearance of coverage.
+- **`.github/CODEOWNERS`**, **`CODE_OF_CONDUCT.md`**, issue templates, a pull request
+  template, and **`.gitleaks.toml`**.
+
+### Changed
+
+- **The dependency audit no longer re-resolves.** `ci.yml` ran `pip-audit --strict .`, which
+  reads the range specs in `pyproject.toml` and resolves them fresh — reporting on what a new
+  install would get today, never on what this project pins. It was green while the lock
+  carried the four advisories above. It is now `uv export --format pylock.toml` followed by
+  `pip-audit --strict --locked`, split into separate runtime and dev gates, and preceded by
+  `uv lock --check` so a stale lock fails the build rather than being silently audited.
+  (vikunja#670)
+- **Every dependency range is bounded on both sides**, runtime, extras and dev. An unbounded
+  upper bound is an unstated assumption that every future major is compatible; vikunja#627 is
+  what that assumption costs.
+- **Least-privilege `permissions:` on every workflow.** `ci.yml` had no block at all.
+  `release.yml` declared `id-token: write` at the top level, granting the OIDC-minting
+  capability to all three of its jobs when only `publish-pypi` exchanges it; it is now scoped
+  to that job.
+- **`ci.yml`'s "Verify wheel contents" step now verifies wheel contents.** It installed the
+  wheel and imported the package — a useful install smoke, and not a contents assertion.
+- **The coverage floor records its measurement and a date.** `fail_under = 88` against a
+  measured **91.02% over 876 tests on 2026-09-08**. The previous comment said "~2 points
+  under actual CI coverage (~90%)" — approximate, undated, and by then wrong.
+- **`examples/` is exercised by CI.** All five manifests in `examples/manifests/` are
+  validated against the installed wheel; previously no workflow referenced `examples/` at all.
+- **`.pre-commit-config.yaml` ruff pin realigned** from v0.11.6 to v0.15.17, matching the
+  `ruff>=0.15,<0.16` bound CI now enforces.
+
 ## [1.14.0] — 2026-08-31
 
 ### Added
