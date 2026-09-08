@@ -6,12 +6,43 @@ from typing import ClassVar
 
 import pytest
 
+from scoped_mcp import ops_alert
 from scoped_mcp.ops_alert import (
     _format_body,
     _ntfy_config,
     alerting_configured,
     send_ops_alert,
 )
+
+# Every environment variable ops_alert reads, derived from the module's own name
+# constants rather than restated here. ops_alert reads config fresh from os.environ
+# on every call, so anything left set by the operator's shell is live config for
+# these tests — and 7 of the agent .env files export SCOPED_MCP_ALERT_NTFY_URL.
+# Sourcing one before running the suite turned two passing tests red on unmodified
+# code (vikunja#604). CI never saw it: the runner's environment is clean, so the
+# disagreement always presented as "green in CI, red locally", the shape most
+# easily dismissed as the operator's problem rather than a test bug.
+#
+# Derived, not hand-listed, so a sixth alert variable cannot be added to ops_alert
+# and silently escape isolation — the failure mode would look exactly like this one.
+_ALERT_ENV_VARS: frozenset[str] = frozenset(
+    value
+    for name, value in vars(ops_alert).items()
+    if name.endswith("_ENV") and isinstance(value, str)
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_alert_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear every alert variable before each test, so each declares what it needs.
+
+    Autouse and unconditional: the tests that assert on a variable's ABSENCE are
+    the ones that break, and those are exactly the tests that would never think to
+    ask for isolation.
+    """
+    for var in _ALERT_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
 
 _MATRIX_ENV = {
     "SCOPED_MCP_ALERT_MATRIX_HOMESERVER": "https://matrix.example.com",
@@ -293,3 +324,31 @@ async def test_ntfy_network_error_swallowed(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert await send_ops_alert("vault_credentials_degraded", {}) is False
     assert rec.calls == ["matrix", "ntfy"]
+
+
+# ── the isolation itself (vikunja#604) ──────────────────────────────────────
+
+
+def test_alert_env_roster_covers_every_variable_ops_alert_reads() -> None:
+    """The isolated set must be the complete set the module actually reads.
+
+    _ALERT_ENV_VARS is derived from ops_alert's own constants, so this asserts the
+    derivation still finds them — if the naming convention changes, isolation would
+    silently shrink to nothing and the autouse fixture would become a no-op while
+    still looking present.
+    """
+    assert _ALERT_ENV_VARS >= set(_MATRIX_ENV) | set(_NTFY_ENV)
+    assert len(_ALERT_ENV_VARS) == 5, sorted(_ALERT_ENV_VARS)
+
+
+def test_ambient_alert_env_does_not_reach_a_test(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No alert variable is visible at test start, whatever the operator's shell holds.
+
+    This is the regression guard for #604 itself. Without the autouse fixture,
+    test_alerting_configured_false_when_partial and _when_unset fail under a shell
+    that exported SCOPED_MCP_ALERT_NTFY_URL.
+    """
+    import os
+
+    leaked = sorted(v for v in _ALERT_ENV_VARS if v in os.environ)
+    assert leaked == [], f"ambient alert config reached the test: {leaked}"
