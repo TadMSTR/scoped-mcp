@@ -6,6 +6,15 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege at the workflow level. Nothing in this file writes anything back to the
+# repository — it reads the tree, runs tests, and builds a distribution that is never pushed
+# anywhere. `contents: read` is the whole requirement, and stating it explicitly is what stops
+# the default token scope (which is repository-configurable and has been permissive by default
+# on older repos) from silently applying. This is the check that scored searxng-mcp 0/10 on
+# OSSF Scorecard's Token-Permissions.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Test (Python ${{ matrix.python-version }})
@@ -50,6 +59,21 @@ jobs:
       - name: Run tests
         run: pytest --cov=scoped_mcp
 
+  # WHAT THIS JOB USED TO BE, AND WHY IT WAS NOT AN AUDIT.
+  #
+  # It was one step: `pip-audit --strict .`. That reads the RANGE specs in pyproject.toml and
+  # RE-RESOLVES them, so it reported on "what a fresh install would get today" — never on the
+  # set this project actually pins. The distinction is not academic: on the day this job was
+  # replaced, the re-resolving form was green while uv.lock carried four known-vulnerable pins
+  # (aiosmtplib, cryptography, mcp, pydantic-settings). A gate that is green because it looked
+  # somewhere else is worse than no gate, because it is reported as coverage.
+  #
+  # This is vikunja#670, fleet-wide, and part 2 of this programme fixed the same shape in
+  # webhook-doorman. Two gotchas were established there and both apply here:
+  #   - `--locked` does NOT read uv.lock. It wants a PEP 751 pylock.toml, which is what
+  #     `uv export --format pylock.toml` produces.
+  #   - `--strict` trips on the project's own entry, which uv emits as a `directory = {...}`
+  #     with no version. `--no-emit-project` is the clean way to leave it out.
   audit:
     name: Dependency audit
     runs-on: ubuntu-latest
@@ -62,11 +86,56 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install pip-audit
-        run: pip install pip-audit
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
 
-      - name: Audit dependencies
-        run: pip-audit --strict .
+      # THE GATE THAT MATTERS MOST, AND THE ONE THAT DID NOT EXIST.
+      #
+      # A committed lockfile with nothing checking its currency is not a pinned dependency set,
+      # it is a stale file that looks like one. Measured on this repo when the gate was written:
+      # uv.lock was last touched 2026-06-14 and pyproject.toml 2026-08-31, the lock recorded the
+      # project itself at v1.3.4 against a real version of 1.14.0, and `asyncpg` — declared in
+      # two extras — was absent from the lock entirely. Every check below would have audited a
+      # set that was missing a dependency, and passed.
+      #
+      # The conformance checker's lockfile requirement (F5) tests for the file's PRESENCE. This
+      # step is what makes that presence mean something.
+      - name: Lockfile is in sync with pyproject.toml
+        run: uv lock --check
+
+      # Split into two gates rather than one. They fail for different reasons and want different
+      # responses: a runtime advisory affects everyone who installs this package from PyPI, a
+      # dev-tooling advisory affects only this repository's CI. Collapsing them into a single
+      # red would make the urgent case indistinguishable from the routine one.
+      #
+      # No container gate here — unlike webhook-doorman, this repo publishes no image.
+      - name: Export runtime dependency set
+        # --all-extras --no-extra dev: every optional dependency a CONSUMER can install
+        # (http, smtp, sqlite, otel, dragonfly, postgres, vault, all), and none of the tooling.
+        run: |
+          uv export --frozen --no-emit-project \
+            --all-extras --no-extra dev \
+            --format pylock.toml -o pylock.runtime.toml
+
+      - name: Export dev dependency set
+        run: |
+          uv export --frozen --no-emit-project \
+            --extra dev \
+            --format pylock.toml -o pylock.dev.toml
+
+      # pip-audit's --locked wants the file named exactly pylock.toml in the project path it is
+      # given, so each gate runs in its own directory containing only that file. Auditing from
+      # the repo root would let pip-audit see pyproject.toml and fall back to resolving — the
+      # exact behaviour this job exists to stop.
+      - name: Audit runtime dependencies
+        run: |
+          mkdir -p .audit-runtime && cp pylock.runtime.toml .audit-runtime/pylock.toml
+          uv tool run pip-audit --strict --locked .audit-runtime
+
+      - name: Audit dev dependencies
+        run: |
+          mkdir -p .audit-dev && cp pylock.dev.toml .audit-dev/pylock.toml
+          uv tool run pip-audit --strict --locked .audit-dev
 
   build:
     name: Build distribution
@@ -87,7 +156,12 @@ jobs:
       - name: Build sdist and wheel
         run: python -m build
 
-      - name: Verify wheel contents
-        run: |
-          pip install dist/*.whl
-          python -c "import scoped_mcp; print('install ok, version:', scoped_mcp.__version__)"
+      # Same script release.yml runs before it uploads to PyPI. One definition, two call sites
+      # — the PR path and the publish path must not be able to drift apart, because the only
+      # one that matters is the one nobody watches.
+      #
+      # This replaces a step that was also called "Verify wheel contents" and did
+      # `pip install dist/*.whl` followed by an import. That asserted the wheel was
+      # installable. It asserted nothing about contents, which is what its name claimed.
+      - name: Verify distribution
+        run: .github/ci/verify-dist.sh dist

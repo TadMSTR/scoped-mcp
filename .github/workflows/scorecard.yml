@@ -1,0 +1,75 @@
+# OSSF Scorecard — supply chain risk scoring.
+#
+# TREAT THE SCORE AS A MEASUREMENT, NOT A TARGET. Several checks assess things this repository
+# deliberately does not do (signed releases, branch protection on a single-maintainer project),
+# and chasing the number would mean adopting process for the sake of a metric.
+#
+# The first result is recorded as a baseline in CHANGELOG.md once it exists — the same
+# discipline the coverage floor in pyproject.toml is under (vikunja#680): record what was
+# measured, with a date, so a later reader can tell a deliberate value from a stale one. Note
+# that this workflow has no `pull_request` trigger, so the baseline cannot come from the PR
+# that adds it; the first run is the first push to main afterwards. webhook-doorman hit exactly
+# this and it is recorded in the programme ledger — do not read the PR's green tick as a score.
+#
+# What it is genuinely good at is catching regressions in things this repo does care about: an
+# unpinned action appearing in a workflow, a dependency update path going stale, a token
+# gaining more scope than it needs. That last one is not hypothetical here — Scorecard's
+# Token-Permissions check is what scored searxng-mcp 0/10, and it is what release.yml's
+# top-level `id-token: write` would have been marked down for before this change moved it to
+# the single job that publishes.
+name: Scorecard
+
+on:
+  branch_protection_rule:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly, offset from codeql.yml so the two do not contend.
+    - cron: "41 5 * * 0"
+
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      # Upload the SARIF result to the Security tab.
+      security-events: write
+      # Needed by publish_results below: the action exchanges this for an OIDC token so the
+      # public API can attest the result came from this repository rather than being
+      # self-reported.
+      id-token: write
+      contents: read
+      actions: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Run analysis
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # Publishes to the public OpenSSF API, which is what makes the score visible to
+          # anyone evaluating this project without running Scorecard themselves. That is the
+          # entire point of enabling it — a private score answers a question nobody asked.
+          publish_results: true
+
+      # Retained separately from the SARIF upload because the Security tab keeps only the
+      # latest result, and comparing two runs is how you tell a real regression from a check
+      # whose scoring changed upstream.
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: SARIF file
+          path: results.sarif
+          retention-days: 5
+
+      - name: Upload to code-scanning
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          sarif_file: results.sarif

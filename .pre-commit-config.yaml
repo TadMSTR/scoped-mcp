@@ -8,7 +8,11 @@ repos:
       - id: check-toml
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.11.6
+    # Kept inside pyproject.toml's `ruff>=0.15,<0.16` bound. These two pins are the same tool
+    # run at two moments, and when they disagree the pre-commit hook passes code that CI then
+    # rejects — which trains people to skip the hook. This was at v0.11.6 against a CI ruff of
+    # 0.15.x until 2026-09-08; four minor versions of rule drift apart.
+    rev: v0.15.17
     hooks:
       - id: ruff
         args: [--fix]

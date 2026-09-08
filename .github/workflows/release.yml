@@ -5,8 +5,13 @@ on:
     tags:
       - "v*"
 
+# Least privilege at the workflow level. `id-token: write` used to sit here, which handed the
+# OIDC-token-minting capability to all three jobs when only `publish-pypi` exchanges it for a
+# PyPI trusted-publishing credential. `build` runs `python -m build` on the checked-out tree
+# and `create-github-release` runs `gh`; neither has any business minting an identity token for
+# this repository. Escalation is now per job, below. This is OSSF Scorecard's Token-Permissions
+# check, and it is the same finding that moved searxng-mcp's `packages: write` down a level.
 permissions:
-  id-token: write  # Required for PyPI trusted publishing
   contents: read
 
 jobs:
@@ -34,10 +39,55 @@ jobs:
           name: dist
           path: dist/
 
+  # Between build and publish, deliberately. Before this job existed the release path was
+  # build -> upload artifact -> download artifact -> publish, and nothing in it asserted
+  # anything about the thing being pushed to PyPI. ci.yml verified the artefact on every PR;
+  # the publish path, which is the one that cannot be undone, verified nothing.
+  #
+  # PyPI does not permit re-uploading a filename. A bad artefact published here is published
+  # permanently, and eight agent brokers on forge install this package.
+  verify:
+    name: Verify distribution
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      # The repo is checked out for two reasons: the verification script lives here, and it
+      # validates examples/manifests/ against the installed wheel. The publish job below needs
+      # neither and therefore does not check out.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: dist/
+
+      # The tag, with its leading `v` stripped, is passed as the expected version. This is the
+      # assertion that the publish path needs and the PR path cannot make: the job that
+      # publishes is not the job that built, and it trusts a downloaded artifact. Without this,
+      # a tag and an artefact that disagree would publish silently.
+      - name: Verify distribution against the tag
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: .github/ci/verify-dist.sh dist "${TAG_NAME#v}"
+
   publish-pypi:
     name: Publish to PyPI
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, verify]
+    permissions:
+      # The only job that needs it: gh-action-pypi-publish exchanges this OIDC token for a
+      # short-lived PyPI credential under the trusted publisher configured below. It is also
+      # what makes PyPI attach a PEP 740 attestation to the uploaded files — verified live on
+      # v1.14.0, whose provenance endpoint returns a signed in-toto bundle.
+      id-token: write
+      contents: read
     environment:
       name: pypi
       url: https://pypi.org/project/scoped-mcp/

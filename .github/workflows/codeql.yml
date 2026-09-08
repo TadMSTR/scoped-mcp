@@ -1,0 +1,71 @@
+# CodeQL static analysis.
+#
+# Free here because the repository is public — CodeQL requires a GitHub Advanced Security
+# licence only on private repositories.
+#
+# TWO languages, and the second is the one usually forgotten:
+#   python   the src/ and tests/ tree
+#   actions  the workflow files themselves. release.yml holds `id-token: write` and exchanges
+#            it for a PyPI trusted-publishing token; an injection into a `run:` block in this
+#            repo's workflows would be an injection into the publish path for a package eight
+#            agent brokers install. Adding CI without scanning CI leaves the part holding the
+#            credentials unexamined.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly. Not redundant with the push/PR triggers: CodeQL ships new queries, so code that
+    # was clean when it landed can become a finding without anyone touching it. Sunday 04:17
+    # UTC — an off-peak minute rather than :00, which is when everyone else's cron fires.
+    - cron: "17 4 * * 0"
+
+# Least privilege at the top level; the analyse job adds only what it needs.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      # Required to upload the SARIF results to the Security tab.
+      security-events: write
+      contents: read
+      actions: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, actions]
+
+    steps:
+      # SHA-pinned with a trailing version comment, matching ci.yml and release.yml. A mutable
+      # tag on a third-party action is a supply chain hole — the tag can be repointed at any
+      # commit after review, and this job holds `security-events: write`.
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          languages: ${{ matrix.language }}
+          # security-and-quality is a superset of the default suite. The extra queries are
+          # worth the runtime on a package whose whole job is enforcing an authorisation
+          # boundary.
+          queries: security-and-quality
+
+      # No build step. CodeQL analyses Python from source without one, and installing the
+      # project here would only add a way for the analysis to fail for reasons unrelated to the
+      # code. ci.yml already gates the build and the install.
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          category: /language:${{ matrix.language }}

@@ -56,6 +56,15 @@ secrets.yaml
 *.env
 .env.local
 .env.*.local
+# Key material. This repo handles ed25519 signing keys via the vault extra
+# (credentials_vault.py), so unlike most of the fleet it does have a reason for these.
+# Note that the standard's *.key rule is under review (vikunja#630) — 44 of 52 repos fail it
+# and no incident is cited. Adding it here is one repo conforming to a live rule, not an
+# argument that the rule should survive that review.
+*.key
+*.pem
+*.p12
+*.pfx
 
 # Core dumps
 core.*
