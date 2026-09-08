@@ -21,11 +21,11 @@ wheels = [
 
 [[package]]
 name = "aiosmtplib"
-version = "5.1.3"
+version = "5.1.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/9b/5c/9cabc5db6d607616e81ba6d8f1f231cd5a75955807a308c1090a59072d6d/aiosmtplib-5.1.3.tar.gz", hash = "sha256:ac2b418d3260ba62d9cfd0fe7359726e9dc009a4e8e8d9909fdfae332f522a7c", size = 77010, upload-time = "2026-09-08T02:11:20.532Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/39/ba/34f2fef90d13e21ae3f1b360da98d825c40832bb232613513be92457ff65/aiosmtplib-5.1.1.tar.gz", hash = "sha256:d9a35e9d170bc1a9f66e2fdfe7fd212f7eebb8c1581c621f79395d0bcaba7a68", size = 68123, upload-time = "2026-05-31T17:25:36.298Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9c/0a/b56ab8163d54960337fdca475d3dfd56c8badf6172e79cf2ad00d5335dc1/aiosmtplib-5.1.3-py3-none-any.whl", hash = "sha256:f7d76ce3d4995a65a178c1f11e1bd1607706b921d00cb768e7a2c7f7ef5517a8", size = 30116, upload-time = "2026-09-08T02:11:19.352Z" },
+    { url = "https://files.pythonhosted.org/packages/56/97/d1030d897e96c79cf0682ff93c11a2118085b3af4c27993675eda9e55da3/aiosmtplib-5.1.1-py3-none-any.whl", hash = "sha256:9d384f0c3d8906f745c1cf6819f073145bb2de8b10407905f5e2ee3389bfe6c7", size = 27937, upload-time = "2026-05-31T17:25:35.283Z" },
 ]
 
 [[package]]
@@ -1798,8 +1798,8 @@ vault = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiosmtplib", marker = "extra == 'all'", specifier = ">=5.1.2,<6.0" },
-    { name = "aiosmtplib", marker = "extra == 'smtp'", specifier = ">=5.1.2,<6.0" },
+    { name = "aiosmtplib", marker = "extra == 'all'", specifier = "==5.1.1" },
+    { name = "aiosmtplib", marker = "extra == 'smtp'", specifier = "==5.1.1" },
     { name = "aiosqlite", marker = "extra == 'all'", specifier = ">=0.20,<1.0" },
     { name = "aiosqlite", marker = "extra == 'sqlite'", specifier = ">=0.20,<1.0" },
     { name = "asyncpg", marker = "extra == 'dev'", specifier = ">=0.29,<1.0" },

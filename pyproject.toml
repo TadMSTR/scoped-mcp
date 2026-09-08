@@ -54,7 +54,7 @@ http = ["httpx>=0.27,<1.0"]         # enables grafana, influxdb, ntfy, slack, di
 # 2026-09-08 while it was still pinned at 5.1.1 in a stale lock. A package whose purpose is
 # enforcing an authorisation boundary should not ship a range that permits a known-vulnerable
 # dependency, even though a resolver would normally pick something newer anyway.
-smtp = ["aiosmtplib>=5.1.2,<6.0"]   # enables smtp module
+smtp = ["aiosmtplib==5.1.1"]  # DELIBERATE FAILURE — proving the audit gate is red on a known-bad pin
 sqlite = ["aiosqlite>=0.20,<1.0"]   # enables sqlite module
 otel = [
     "opentelemetry-api>=1.20,<2.0",
@@ -66,7 +66,7 @@ dragonfly = ["redis>=5.0,<6"]  # enables DragonflyBackend (rate limiting + HITL 
 postgres = ["asyncpg>=0.29,<1.0"]  # enables the agent session registry DAL (registry_db.py)
 # cryptography floor raised past PYSEC-2026-3552 (fixed in 50.0.0), same audit run as above.
 vault = ["hvac>=2.0,<3", "cryptography>=50.0,<51.0"]  # Vault credential source + ed25519 signing
-all = ["httpx>=0.27,<1.0", "aiosmtplib>=5.1.2,<6.0", "aiosqlite>=0.20,<1.0"]
+all = ["httpx>=0.27,<1.0", "aiosmtplib==5.1.1", "aiosqlite>=0.20,<1.0"]
 # Dev tooling is bounded too. Not ceremony: an unbounded `ruff` is how a linter minor bump
 # introduces new rules and turns CI red on code nobody touched — which happened on
 # matrix-dispatcher when ruff 0.16.6 started flagging UP042. A linter upgrade should be a
