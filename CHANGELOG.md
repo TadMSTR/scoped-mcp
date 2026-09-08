@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.0] — 2026-09-08
+
+Schema and config fidelity in `mcp_proxy`. The headline is that the proxy stopped
+publishing a narrower schema than its upstreams declared — a defect that had made 25
+parameters across 2 upstreams unusable for every agent, invisibly, since they were
+introduced.
+
 ### Fixed
 
 - **`mcp_proxy` silently narrowed union-typed parameters in the schema it published.**
