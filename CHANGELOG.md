@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mcp_proxy` silently narrowed union-typed parameters in the schema it published.**
+  `_signature_from_schema.py_type` took the first non-null branch of a union, for both the
+  `anyOf: [...]` and `type: [...]` spellings. FastMCP derives the advertised `inputSchema`
+  from that annotation, so the narrowing did not stay inside the proxy — it reached every
+  client, which then validated against it. It was also branch-order dependent:
+  `anyOf:[integer,string]` published `"type": "integer"` and `anyOf:[string,integer]`
+  published `"type": "string"`, so which values an agent could pass depended on the order
+  the upstream happened to emit its union rather than on anything either side declared.
+
+  The defect was invisible from the caller side, which is why it survived. `_validate_arguments`
+  re-validates against the full un-narrowed upstream schema, so the proxy itself would have
+  accepted the value — it simply never arrived, because the client rejected it first against
+  the narrower schema it had been given.
+
+  Measured across the developer manifest's 14 proxied upstreams (229 tools, 717 parameters):
+  25 parameters were affected in 2 upstreams — `vikunja-mcp` (22 params over 20 tools:
+  `task_id` ×20, `other_task_id` ×2) and `searxng-mcp` (`site: string | array` ×3). The
+  `vikunja-mcp` half means `#N` ticket references, shipped in v0.5.0 and widened in v0.11.0,
+  had never been usable through any proxy by any agent. The `searxng-mcp` half was not
+  previously reported: passing a list of sites was equally impossible.
+
+  Exactly one non-null branch remains `Optional[T]` and annotates `T`, unchanged. Two or more
+  now annotate a real union. A branch that cannot be expressed as a Python annotation widens
+  the whole property to `Any` rather than letting a lone typed sibling narrow it — never
+  narrower than upstream, with the call path still checked against the true schema. No
+  parameter in the live fleet takes that path today. (vikunja#755)
+
+- **`tests/test_ops_alert.py` read alert config from the ambient environment**, so the suite
+  passed or failed depending on the operator's shell. `SCOPED_MCP_ALERT_NTFY_URL` is exported
+  by 7 of the agent `.env` files, and sourcing one turned two passing tests red on unmodified
+  code. CI never saw it — the runner's environment is clean — so it always presented as
+  "green in CI, red locally". Now isolated by an autouse fixture whose variable roster is
+  derived from `ops_alert`'s own name constants rather than restated, so a sixth alert
+  variable cannot escape isolation the same way. (vikunja#604)
+
+### Added
+
+- **`mcp_proxy` warns when `env` is set on an HTTP module**, mirroring the existing
+  headers-on-stdio warning. It was previously accepted in silence, so the block looked
+  applied while doing nothing. Key names only, never values.
+
+### Documentation
+
+- **The `env` config key is now documented** (vikunja#738), including the two properties that
+  matter and that nothing stated before: a spawned stdio child does **not** inherit
+  scoped-mcp's environment — it gets the MCP SDK's minimal safe base (`HOME`, `LOGNAME`,
+  `PATH`, `SHELL`, `USER`) and nothing more — and `env` **extends** that base rather than
+  replacing it. Both are now asserted against a real spawned child; the existing tests
+  asserted only that `env` reached the transport spec, which cannot observe either.
+
+  This also corrects vikunja#436's diagnosis. Forwarding has worked since `be7971b`
+  (2026-06-18), two months before that ticket was filed. `agent-bus`'s child lacked its NATS
+  credential because no manifest declares an `env:` block for it — a manifest change, not a
+  code one.
+
+- **`${VAR}` substitution is described accurately.** It was documented as a feature of
+  `headers`; in fact `manifest.py` expands the whole manifest as text before YAML parsing, so
+  it applies to every field including `env`, only in the braced form, and an undefined
+  variable fails agent startup rather than yielding an empty string.
+
+- **Both `_signature_from_schema` docstrings rewritten.** The old text argued a lossy type
+  mapping was safe *because* `_validate_arguments` re-checks the call. That is true of the
+  call path and false of the advertise path, and it is the reasoning that let vikunja#755
+  through.
+
+
 ## [1.15.0] — 2026-09-08
 
 Promotion to the **Flagship** repo tier. No runtime behaviour changes — the whole of this
