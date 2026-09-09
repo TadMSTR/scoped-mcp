@@ -43,6 +43,8 @@ modules:
     config:
       command: /path/to/python3
       args: [/path/to/mcp_server.py]
+      # env:                          # optional — a stdio child inherits nothing
+      #   API_TOKEN: "${API_TOKEN}"   # from scoped-mcp; name what the child needs here
 ```
 
 | Config key | Type | Default | Description |
@@ -53,6 +55,7 @@ modules:
 | `tool_allowlist` | list[str] | `[]` | If non-empty, only these upstream tools are exposed |
 | `tool_denylist` | list[str] | `[]` | These upstream tools are always hidden (applied after allowlist) |
 | `discovery_timeout_seconds` | float | `10.0` | Timeout for connecting to the upstream server at startup |
+| `env` | dict[str,str] | `{}` | Environment variables for a spawned stdio child. Ignored on HTTP transport (warns since v1.16.0). Extends the MCP SDK's conditionally-forwarded safe base rather than replacing it — a child inherits nothing else from scoped-mcp. |
 
 > **stdio transport lifecycle:** Two subprocess spawns occur per module lifetime. A short-lived
 > subprocess runs during startup for tool discovery (`tools/list`). A persistent subprocess is

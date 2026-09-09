@@ -17,6 +17,8 @@
 | 2026-05-26 | v1.0.1 — OTel TracerProvider + mcp_proxy | 0 critical / 0 high / 0 medium / 1 low | L1 partially mitigated; fully resolved in v1.1.1 |
 | 2026-05-26 | Phase 7 — audit, hooks, response filter, loki-mcp, agent-bus | 0 critical / 0 high / 0 medium / 3 low | All 3 findings triaged and fixed |
 | 2026-05-26 | Phase 7 forge — manifests, OTel v1.1.0, Vault AppRole config | 0 critical / 0 high / 0 medium / 4 low | All 4 findings resolved |
+| 2026-09-08 | v1.15.0 — Flagship promotion: supply chain, CI gates, packaging (no `src/` changes) | 0 critical / 0 high / 0 medium / 1 low | Low accepted (see below); 4 upstream advisories found by the new lockfile gate and fixed |
+| 2026-09-08 | v1.16.0 — `mcp_proxy` schema and config fidelity (vikunja#755, #738, #604) | 0 critical / 0 high / 0 medium / 2 low | Both Low resolved before merge |
 
 ## Summary
 
@@ -37,6 +39,15 @@ The 2026-05-26 audits (v1.0.1, Phase 7, and Phase 7 forge deployment) returned 0
 triaged and fixed. The Vault per-agent scoped policies (Phase 7 forge L3) were applied as
 part of the same Phase 7 session — per-agent AppRoles (`forge-<type>`) with per-agent
 policies (`agents-<type>-policy`) scoped to `read` on `secret/data/agents/<type>` only.
+
+The 2026-09-08 audits (v1.15.0 flagship promotion and v1.16.0 mcp_proxy schema fidelity)
+returned 0 critical, 0 high, and 0 medium findings, continuing the streak. The v1.15.0 low
+finding was accepted rather than remediated (see below); separately, a new lockfile audit
+gate — added as part of the same release, replacing a `pip-audit --strict .` that re-resolved
+from `pyproject.toml` ranges rather than checking `uv.lock` — surfaced and fixed four upstream
+advisories in already-pinned dependencies before the audit ran. The v1.16.0 audit is notable
+as the first on this repo to find issues introduced by the change under review itself, rather
+than pre-existing: one of its two low findings was a defect in the fix being audited.
 
 ## Findings and Remediation
 
@@ -137,6 +148,43 @@ high, or medium findings. Four low findings:
   than the `.env` file used by other agents. Fixed by moving to `.env` with env var
   substitution in the manifest.
 
+### 2026-09-08 audit — v1.15.0 (Flagship promotion)
+
+Audit of supply chain hardening, CI gates, and packaging changes for the flagship promotion
+(no `src/` changes). Zero critical, high, or medium findings. One low finding, accepted:
+
+- **L1** — An operator workstation's RFC1918 LAN address remains in the repo's public git
+  history from an earlier commit; the current working tree is clean (fixtures now use RFC 5737
+  addresses). Accepted by Ted 2026-09-08: this is topology metadata, not a credential, and
+  already public; the only real remediation is a history rewrite (`git filter-repo` +
+  force-push) that would change every commit SHA on a public repo.
+
+Separately, the new lockfile audit gate (replacing a `pip-audit --strict .` that re-resolved
+from `pyproject.toml` ranges rather than checking the pinned `uv.lock`) surfaced four upstream
+advisories in already-pinned dependencies, fixed in this release: `aiosmtplib` CVE-2026-55558,
+`cryptography` PYSEC-2026-3552, `mcp` PYSEC-2026-3483, `pydantic-settings`
+GHSA-4xgf-cpjx-pc3j. These were caught by the build's own gate before the audit ran — they are
+not audit findings.
+
+### 2026-09-08 audit — v1.16.0 (mcp_proxy schema and config fidelity)
+
+Audit of `mcp_proxy` schema derivation and config fidelity fixes (vikunja#755, #738, #604).
+Zero critical, high, or medium findings. Two low findings, both resolved before merge:
+
+- **L1** — `_signature_from_schema`'s `py_type` raised `TypeError` on a nested `type:[...]`
+  branch inside an `anyOf`, rather than widening. `_discover_tools` has no per-tool
+  try/except, so a single malformed upstream schema aborted discovery for the whole module,
+  denying every tool from that upstream. Resolved by flattening the nested union and guarding
+  the lookup so no schema shape can raise.
+- **L2** — The `env` config key's docstring stated an inaccurate literal list of inherited
+  environment variables. Resolved by describing the SDK's forwarding mechanism and naming the
+  constant instead of inlining a snapshot of it. Documentation-only; no security control
+  affected.
+
+This is the first audit on this repo to find issues introduced by the change under review
+itself, rather than pre-existing — L1 was a defect in the fix, not the feature it audited. A
+point in favor of the audit step, not against the build.
+
 ## Scope
 
 **2026-04-16 audit:** Full source review of v0.1.0 — all 10 modules, scoping engine,
@@ -164,6 +212,12 @@ and `mode: read` improvements, example launcher templates, and `manifest.py` cha
 `server.py` and `pyproject.toml`. Separate deployment audit of the forge production
 environment: five agent manifests, Vault AppRole configuration, `.env` file permissions,
 and `agent-keys.json`.
+
+**2026-09-08 v1.15.0 audit:** Supply chain, CI gates, and packaging changes for the flagship
+promotion; no `src/` changes reviewed.
+
+**2026-09-08 v1.16.0 audit:** `mcp_proxy` schema derivation (`_signature_from_schema`,
+`_discover_tools`) and env-forwarding config fidelity fixes.
 
 ## What's Not Covered
 
