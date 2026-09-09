@@ -464,7 +464,7 @@ Notification modules are **write-only by design** — every agent needs to send 
 
 | Module | Description | Key config |
 |--------|-------------|------------|
-| `mcp_proxy` | Forward tool calls to an upstream MCP server (HTTP or stdio) | `url` or `command`, optional `tool_denylist`, `headers` |
+| `mcp_proxy` | Forward tool calls to an upstream MCP server (HTTP or stdio) | `url` or `command`, optional `tool_denylist`, `headers`, `env` |
 
 `mcp_proxy` connects to upstream MCP servers and re-exposes their tools through scoped-mcp.
 Tools are prefixed with the module name (e.g. `memsearch-mcp_search_memory`). Use `tool_denylist`
@@ -486,6 +486,38 @@ Header values support `${VAR}` substitution (same rules as all manifest fields).
 Headers are only applied to HTTP transports — configuring headers on a stdio
 transport logs a warning and ignores them. `Authorization` header values are
 automatically redacted from structured logs.
+
+**Environment variables for stdio children** — pass environment variables to a spawned
+stdio subprocess:
+
+```yaml
+modules:
+  agent-bus:
+    type: mcp_proxy
+    config:
+      command: /path/to/python3
+      args: [/path/to/mcp_server.py]
+      env:
+        API_TOKEN: "${API_TOKEN}"
+```
+
+A stdio child does **not** inherit scoped-mcp's environment — the MCP SDK forwards only a
+fixed allowlist (`mcp.client.stdio.DEFAULT_INHERITED_ENV_VARS` — HOME, LOGNAME, PATH, SHELL,
+TERM, USER on POSIX), and only for names actually set in the parent process, so the real
+inherited set is a subset of that list; Python adds `LC_CTYPE` on top, which isn't in the
+allowlist at all. `env` **extends** that base rather than replacing it — a module declaring
+one variable still gets `PATH`, and does not pick up the rest of the broker's environment.
+Anything a proxied stdio server needs must be named here explicitly.
+
+This is the actual operational trap: a child silently missing a credential is
+indistinguishable from the upstream feature being disabled. If a proxied stdio server
+reports a capability as "not configured," check for an `env:` block before concluding the
+upstream is at fault.
+
+`env` applies to stdio only and is inert on HTTP transport — configuring it there logs a
+warning (`mcp_proxy_env_ignored`, key names only) since v1.16.0, mirroring the
+headers-on-stdio warning above. `${VAR}` substitution works the same way here as in every
+other manifest field; an undefined variable is a hard startup failure, not an empty string.
 
 **Self-healing stdio upstreams** (v1.6.0) — a persistent stdio upstream call that fails
 with a dead-transport error (broken/closed pipe, subprocess exit) transparently
