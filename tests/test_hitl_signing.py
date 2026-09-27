@@ -668,7 +668,7 @@ def test_parse_approval_id():
 
 
 def _write_pem(path, key, private: bool) -> None:
-    """Write a key with safe permissions: 0600 private, 0444 public. Tests of the
+    """Write a key file owner-only (0600) — public ones too; nothing here needs more. Tests of the
     permission check fake the stat result instead (see _pretend_mode), so the suite
     never creates a group- or world-readable key file."""
     if private:
@@ -682,7 +682,7 @@ def _write_pem(path, key, private: bool) -> None:
             serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
         )
     path.write_bytes(data)
-    os.chmod(path, 0o600 if private else 0o444)
+    os.chmod(path, 0o600)
 
 
 def _pretend_mode(monkeypatch, path, mode: int) -> None:
