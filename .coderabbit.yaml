@@ -6,6 +6,19 @@
 # reviewed, and an over-configured reviewer is harder to reason about than a default one.
 # Add a key only when a default has actually cost a build something.
 
+# Inherit every key this file does not set from the organization settings.
+#
+# A repository file outranks the organization settings. Without this key, CodeRabbit uses
+# this file alone and never reads the organization settings, so the organization's
+# "automatic review off" does not reach this repo and every push is reviewed by default.
+# forge wants every review to be an explicit `@coderabbitai full review`, requested at the
+# fixed point in its build flow before the security audit is dispatched.
+#
+# To check it works, open a pull request that changes this file. CodeRabbit reads the file
+# from the PR branch, so if the organization settings are reached, the PR gets
+# "Review skipped — Auto reviews are disabled" instead of an automatic review.
+inheritance: true
+
 reviews:
   pre_merge_checks:
     docstrings:
