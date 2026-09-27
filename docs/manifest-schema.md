@@ -233,6 +233,78 @@ scoped-mcp hitl approve <id>
 scoped-mcp hitl reject <id> [reason]
 ```
 
+### signing: approvals only the operator can produce
+
+> **Why this exists.** Without signing, an approval is a pre-approval key that *exists*
+> in the state backend — its value is never checked. `enforce` above says resolution
+> comes from a channel the agent cannot write to, but that holds only if the agent
+> cannot reach the state backend, the `SCOPED_MCP_HITL_TOKEN` secret, or the CLI. When
+> the agent runs as the same OS user as its proxy, it usually can reach all three.
+
+```yaml
+hitl:
+  mode: enforce
+  approval_required: ["*_pr_merge"]
+  signing:
+    mode: enforce                              # off (default) | observe | enforce
+    public_key_path: /etc/scoped-mcp/approver.pub
+    approve_command: "sudo -u approver scoped-mcp-approve"   # shown to the agent
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `signing.mode` | `"off"`, `"observe"`, `"enforce"` | `"off"` | `off`: any pre-approval token approves (the behaviour above). `observe`: every token is verified and logged (`hitl_signature_ok` / `hitl_signature_rejected`), but unsigned tokens still approve — for rollout only. `enforce`: only a valid signed statement approves |
+| `signing.public_key_path` | str | — | Ed25519 public key, PEM. Required unless `mode: off`. A missing or non-Ed25519 key is a startup error |
+| `signing.approve_command` | str | `"scoped-mcp-approve"` | The command the rejection message tells the agent to ask the operator to run, followed by the approval id |
+
+Under `signing.mode: enforce`:
+
+- The pre-approval value must be an Ed25519 statement over
+  `{v, agent_id, approval_id, tool, args_sha256, issued_at, expires_at}`, signed by the key
+  whose public half is at `public_key_path`, for **this** agent, tool and arguments, valid
+  for at most 120 s, and not already used by this process. Anything else is logged with a
+  reason class (`malformed`, `bad_signature`, `bad_version`, `agent_mismatch`,
+  `tool_mismatch`, `args_mismatch`, `expired`, `not_yet_valid`, `lifetime_too_long`,
+  `replayed`) — never the values — and counts as **no approval**: the call is rejected as a
+  new request.
+- `scoped_mcp_hitl_confirm` is not registered, and `hitl.mode: interactive` is a manifest
+  validation error — it would be self-approval.
+- `POST /hitl/approve` is not registered. `/hitl/deny` and `/hitl/pending` remain.
+- `scoped-mcp hitl approve` refuses and prints `approve_command`. `list` and `reject`
+  still work.
+- The pending record additionally stores the call's canonical arguments, so the approver
+  can check what it signs.
+
+The operator approves with **`scoped-mcp-approve <approval_id>`**, run in a terminal as the
+account that owns the private key:
+
+```bash
+scoped-mcp-approve <approval_id>          # shows agent, tool and arguments; asks y/N; signs
+scoped-mcp-approve --deny <approval_id>
+```
+
+It recomputes the argument digest from the stored arguments and refuses on a mismatch,
+shows the arguments **untruncated and without pattern redaction** (a value under a
+secret-looking key becomes its length and a digest prefix), with control and non-ASCII
+characters escaped, reads the answer from `/dev/tty`, and refuses to run without a terminal.
+Its configuration — `~/.config/scoped-mcp/approver.yml` of the running account, resolved
+from the password database rather than `$HOME` — holds `state_url` and `private_key_path`.
+Both that file and the key must be accessible to their owner only (`0400`/`0600`), checked
+with `stat`.
+
+Generate a keypair as the approver account:
+
+```bash
+openssl genpkey -algorithm ed25519 -out approver.key && chmod 400 approver.key
+openssl pkey -in approver.key -pubout -out approver.pub
+```
+
+**Deploy order matters.** Install the key and the approver first, then `observe`, prove
+a signed approval end to end, and only then `enforce`. A proxy at `enforce` with no working
+signer leaves every gated call unapprovable.
+
+What signing does **not** stop is in [the threat model](threat-model.md#hitl-approvals).
+
 ## Complete example
 
 ```yaml

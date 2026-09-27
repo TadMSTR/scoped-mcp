@@ -19,6 +19,7 @@
 | 2026-05-26 | Phase 7 forge — manifests, OTel v1.1.0, Vault AppRole config | 0 critical / 0 high / 0 medium / 4 low | All 4 findings resolved |
 | 2026-09-08 | v1.15.0 — Flagship promotion: supply chain, CI gates, packaging (no `src/` changes) | 0 critical / 0 high / 0 medium / 1 low | Low accepted (see below); 4 upstream advisories found by the new lockfile gate and fixed |
 | 2026-09-08 | v1.16.0 — `mcp_proxy` schema and config fidelity (vikunja#755, #738, #604) | 0 critical / 0 high / 0 medium / 2 low | Both Low resolved before merge |
+| 2026-09-27 | v1.17.0 — signed HITL approvals (`hitl.signing`, `scoped-mcp-approve`) | 0 critical / 0 high / 0 medium / 0 low (3 informational) | Clean; CodeRabbit's 3 findings fixed before the audit and verified by it |
 
 ## Summary
 
@@ -184,6 +185,29 @@ Zero critical, high, or medium findings. Two low findings, both resolved before 
 This is the first audit on this repo to find issues introduced by the change under review
 itself, rather than pre-existing — L1 was a defect in the fix, not the feature it audited. A
 point in favor of the audit step, not against the build.
+
+### 2026-09-27 audit — v1.17.0 (signed HITL approvals)
+
+Audit of Ed25519-signed HITL approval statements, the `scoped-mcp-approve` signer, and the
+retirement of every unsigned approval writer under `hitl.signing.mode: enforce`. Zero
+critical, high, medium or low findings, and three informational:
+
+- **I1** — `scoped-mcp-approve` stats its config and key, then opens them separately (TOCTOU).
+  Exploiting it requires code execution as the approver account, which can already read the
+  key. Accepted, and named in `SECURITY.md`.
+- **I2** — A build-side planning note said `POST /hitl/approve` would be removed. The code
+  keeps it and omits it only under `enforce`, which is correct for a public package whose
+  default is `off`. The wording was corrected; no code change.
+- **I3** — Replay protection (`ConsumedSet`) is per process and does not survive a restart.
+  The audit confirmed this is accurately documented in `docs/threat-model.md` and
+  `SECURITY.md`, and did not find it overclaimed. Accepted as scoped.
+
+CodeRabbit reviewed the PR before the audit and raised three valid findings, all fixed before
+the audit and each re-verified against the code by it. The most significant: the statement
+first bound only a 64-bit prefix of the argument hash. A requesting agent chooses both the
+arguments it shows and the ones it runs, so it could birthday-search a colliding pair. The
+statement now binds the full SHA-256. The other two: the approver's display hid values it was
+about to sign, and a concurrent double-redemption test was missing.
 
 ## Scope
 

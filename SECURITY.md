@@ -20,6 +20,9 @@ Include as much detail as possible: the affected component, steps to reproduce, 
 - Path traversal or sandbox escape in the manifest loader or path validators
 - Input validation failures that allow injection or unintended command execution
 - Dependency vulnerabilities with a plausible exploitation path in scoped-mcp's usage
+- HITL approval forgery under `hitl.signing.mode: enforce` — a gated call proceeding
+  without a statement signed by the configured approver key, or a signed statement
+  approving a different agent, tool, argument set, or a second call
 
 **Out of scope:**
 
@@ -27,6 +30,15 @@ Include as much detail as possible: the affected component, steps to reproduce, 
 - Issues that require attacker control of the scoped-mcp config file or manifest directory
   (those are operator-controlled trust boundaries, not input attack surfaces)
 - Theoretical weaknesses without a realistic attack path
+- The documented residuals of signed HITL approvals ([threat model](docs/threat-model.md#hitl-approvals)):
+  an agent that shares an OS user with its proxy replacing or editing the proxy process,
+  and replay of a consumed statement within its 120 s lifetime after a proxy restart or into
+  a second process serving the same agent. Also accepted: `scoped-mcp-approve` checks its
+  config and private key with `stat` and then opens them separately, so there is a
+  check-then-read (TOCTOU) window. Exploiting it needs code execution as the approver account,
+  which can already read the key. These are accepted and need OS-level separation,
+  not a code fix. Without signing (`mode: off`, the default) an approval is not
+  authenticated at all; that is the documented behaviour, not a vulnerability
 
 ## Response Expectations
 

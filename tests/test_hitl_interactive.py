@@ -95,6 +95,35 @@ async def test_confirm_tool_registered_for_interactive_mode(agent_ctx: AgentCont
 
 
 @pytest.mark.asyncio
+async def test_confirm_tool_absent_under_signing_enforce_even_past_the_validator(
+    agent_ctx: AgentContext, tmp_path
+) -> None:
+    """The manifest validator refuses interactive + signing enforce. The registry
+    repeats the check where the tool is created; prove that second check on its own
+    by setting the combination after validation."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from scoped_mcp.manifest import HitlSigningConfig
+
+    pub = tmp_path / "k.pub"
+    pub.write_bytes(
+        Ed25519PrivateKey.generate()
+        .public_key()
+        .public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+    )
+    manifest = _manifest(mode="interactive", approval_required=[TOOL])
+    manifest.hitl.signing = HitlSigningConfig.model_construct(
+        mode="enforce", public_key_path=str(pub), approve_command="scoped-mcp-approve"
+    )
+    server = _build(agent_ctx, manifest, InProcessBackend())
+
+    names = [t.name for t in await server.list_tools()]
+    assert "scoped_mcp_hitl_confirm" not in names
+    assert "scoped_mcp_status" in names
+
+
+@pytest.mark.asyncio
 async def test_confirm_tool_absent_for_enforce_mode(agent_ctx: AgentContext) -> None:
     """Default enforce mode must NOT register the tool — not registered at all,
     so an unattended run can never reach it."""

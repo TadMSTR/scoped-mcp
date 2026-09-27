@@ -11,6 +11,14 @@ writes a one-time pre-approval token to state. On the agent's next call to
 the same tool, the middleware finds the token, consumes it (deletes it), and
 forwards the call upstream.
 
+With ``hitl.signing.mode: enforce`` the token's *value* must be an Ed25519
+statement signed by the approver key (``hitl_signing``), written by
+``scoped-mcp-approve`` (``hitl_approver``). Every unsigned writer — the CLI
+approve, ``POST /hitl/approve`` and ``scoped_mcp_hitl_confirm`` — is then
+refused or not registered, and a token that fails verification counts as no
+approval at all. ``observe`` verifies and logs but still accepts; ``off``
+(default) is the behaviour described above.
+
 This replaces the v1.0 suspend-and-wait design, which blocked the MCP
 connection while waiting for a pub/sub decision. In a Claude session, the
 blocked tool call prevented any other tools from running — including the
@@ -39,6 +47,8 @@ Security invariants:
 - HITL fails closed: backend errors during ``set_with_ttl`` bubble up to the
   agent as a ``HitlRejectedError`` rather than silently forwarding the call.
 - Pre-approval tokens are one-time-use: consumed on first matching retry.
+- Under signing, a signed approval_id is accepted at most once per process
+  for its lifetime, even if its bytes are written back to state (replay).
 """
 
 from __future__ import annotations
@@ -58,6 +68,7 @@ import structlog
 from .audit import _sanitize_value
 from .exceptions import HitlRejectedError
 from .hitl_notify import Notifier
+from .hitl_signing import REASON_REPLAYED, ConsumedSet, verify_statement
 from .state import StateBackend
 
 _log = structlog.get_logger("audit")
@@ -97,12 +108,16 @@ def _generate_approval_id(agent_id: str) -> str:
     return f"{agent_id}.{suffix}"
 
 
-def _canonical_args_hash(kwargs: dict[str, Any]) -> str:
-    """Stable 16-char hex hash of tool call arguments for pre-approval binding.
+_UNHASHABLE = "unhashable"
 
-    Binds the pre-approval token to the exact arguments the operator saw, so
-    approving ``run_command(command="ls")`` cannot authorize a later call with
-    different arguments during the 60-second TTL window (H-01).
+
+def _canonical_args_digest(kwargs: dict[str, Any]) -> str:
+    """Full SHA-256 (64 hex chars) of the canonical JSON of tool call arguments.
+
+    This is the one hash function; ``_canonical_args_hash`` is its prefix. The full
+    digest is what a signed approval binds to: the requesting agent chooses both the
+    arguments it shows and the ones it runs, so a truncated hash would let it search
+    for two argument sets that collide (a birthday search on 64 bits is ~2^32 work).
 
     Uses sorted keys for stability and ``default=str`` to handle non-JSON-serializable
     values deterministically. Fails to "unhashable" on serialisation error — callers
@@ -110,9 +125,41 @@ def _canonical_args_hash(kwargs: dict[str, Any]) -> str:
     """
     try:
         canonical = json.dumps(kwargs, sort_keys=True, default=str)
-        return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+        return hashlib.sha256(canonical.encode()).hexdigest()
     except Exception:
-        return "unhashable"
+        return _UNHASHABLE
+
+
+def _short_args_hash(digest: str) -> str:
+    return digest if digest == _UNHASHABLE else digest[:16]
+
+
+def _canonical_args_hash(kwargs: dict[str, Any]) -> str:
+    """Stable 16-char hex hash of tool call arguments for pre-approval binding.
+
+    Binds the pre-approval token to the exact arguments the operator saw, so
+    approving ``run_command(command="ls")`` cannot authorize a later call with
+    different arguments during the 60-second TTL window (H-01).
+
+    Only a state-key selector. It is NOT collision-resistant against an agent that
+    chooses both argument sets; anything cryptographic binds the full
+    ``_canonical_args_digest`` instead.
+    """
+    return _short_args_hash(_canonical_args_digest(kwargs))
+
+
+def _canonical_arguments(kwargs: dict[str, Any]) -> Any:
+    """The arguments exactly as ``_canonical_args_hash`` serialises them.
+
+    Round-tripping through the same ``json.dumps`` call means that hashing the
+    returned value again yields the same ``args_hash``, so an approver holding
+    only the stored record can verify the binding. ``None`` when the arguments
+    are unhashable; the approver then refuses rather than guessing.
+    """
+    try:
+        return json.loads(json.dumps(kwargs, sort_keys=True, default=str))
+    except Exception:
+        return None
 
 
 def _preapproval_key(tool_name: str, args_hash: str) -> str:
@@ -153,7 +200,14 @@ class HitlMiddleware:
         shadow: list[str],
         timeout_seconds: int,
         notifier: Notifier,
+        signing_mode: str = "off",
+        public_key: Any = None,
+        approve_hint: str | None = None,
     ) -> None:
+        if signing_mode not in ("off", "observe", "enforce"):
+            raise ValueError(f"unknown signing_mode {signing_mode!r}")
+        if signing_mode != "off" and public_key is None:
+            raise ValueError(f"signing_mode {signing_mode!r} requires a public key")
         self._state = state
         self._agent_id = agent_id
         self._agent_type = agent_type
@@ -161,6 +215,12 @@ class HitlMiddleware:
         self._shadow_patterns = list(shadow)
         self._timeout = timeout_seconds
         self._notifier = notifier
+        self._signing_mode = signing_mode
+        self._public_key = public_key
+        self._approve_hint = approve_hint
+        # One per process. The middleware is the only consumer of approvals, so
+        # this covers every entry point — see hitl_signing.ConsumedSet.
+        self._consumed = ConsumedSet()
 
     @staticmethod
     def _matches(tool_name: str, patterns: list[str]) -> bool:
@@ -193,6 +253,52 @@ class HitlMiddleware:
         )
         return _SHADOW_RESPONSE
 
+    def _accept_preapproval(
+        self, tool_name: str, args_sha256: str, raw: str
+    ) -> tuple[bool, str | None]:
+        """Decide whether a claimed pre-approval token authorises this call.
+
+        Returns ``(accepted, signed_approval_id)``. ``signed_approval_id`` is set
+        only when a valid signed statement was presented and has now been
+        consumed. Rejections log a reason class and never the values compared.
+        """
+        if self._signing_mode == "off":
+            return True, None
+
+        result = verify_statement(
+            raw,
+            public_key=self._public_key,
+            agent_id=self._agent_id,
+            tool=tool_name,
+            args_sha256=args_sha256,
+        )
+        reason = result.reason
+        if result.ok and result.approval_id is not None:
+            if self._consumed.contains(result.approval_id):
+                reason = REASON_REPLAYED
+            else:
+                assert result.expires_at is not None
+                self._consumed.add(result.approval_id, result.expires_at)
+                _log.warning(
+                    "hitl_signature_ok",
+                    agent_id=self._agent_id,
+                    tool=tool_name,
+                    approval_id=result.approval_id,
+                    signing_mode=self._signing_mode,
+                )
+                return True, result.approval_id
+
+        accepted = self._signing_mode == "observe"
+        _log.warning(
+            "hitl_signature_rejected",
+            agent_id=self._agent_id,
+            tool=tool_name,
+            reason=reason,
+            signing_mode=self._signing_mode,
+            accepted=accepted,
+        )
+        return accepted, None
+
     async def _handle_approval(
         self,
         tool_name: str,
@@ -203,12 +309,19 @@ class HitlMiddleware:
         # approving a previous rejected call for this tool.
         # The token is bound to (tool_name, args_hash) so approving one call
         # cannot authorize a different call with different arguments (H-01).
-        args_hash = _canonical_args_hash(kwargs)
+        args_digest = _canonical_args_digest(kwargs)
+        args_hash = _short_args_hash(args_digest)
         pre_key = _preapproval_key(tool_name, args_hash)
-        preapproved = await self._state.get(pre_key)
-        if preapproved is not None:
-            # Consume the token — one-time use only.
-            await self._state.delete(pre_key)
+        # Claim atomically (GETDEL) — one-time use, and no window in which a
+        # concurrent retry can read the same token before it is deleted.
+        preapproved = await self._state.get_delete(pre_key)
+        accepted, signed_approval_id = (
+            self._accept_preapproval(tool_name, args_digest, preapproved)
+            if preapproved is not None
+            else (False, None)
+        )
+        if accepted:
+            assert preapproved is not None
             _log.warning(
                 "hitl_preapproved",
                 agent_id=self._agent_id,
@@ -222,17 +335,30 @@ class HitlMiddleware:
             # (e.g. a pre-JSON-format legacy token still live from before an
             # upgrade) — that must never block the call from proceeding, only
             # skip the audit update.
-            approval_id: str | None = None
-            with contextlib.suppress(json.JSONDecodeError, AttributeError, TypeError):
-                approval_id = json.loads(preapproved).get("approval_id")
+            #
+            # A signed approval never passed through "approved": the approver has
+            # no database access, so its row goes straight from pending to
+            # consumed, and the channel is recorded here instead.
+            approval_id, signed = signed_approval_id, signed_approval_id is not None
+            if not signed:
+                with contextlib.suppress(json.JSONDecodeError, AttributeError, TypeError):
+                    approval_id = json.loads(preapproved).get("approval_id")
             if approval_id:
                 try:
                     from .registry_db import get_registry
 
                     registry = await get_registry()
-                    await registry.resolve_hitl_approval(
-                        approval_id, "consumed", expected_state="approved"
-                    )
+                    if signed:
+                        await registry.resolve_hitl_approval(
+                            approval_id,
+                            "consumed",
+                            expected_state="pending",
+                            resolved_via="signed_approver",
+                        )
+                    else:
+                        await registry.resolve_hitl_approval(
+                            approval_id, "consumed", expected_state="approved"
+                        )
                 except Exception as e:  # fail-open — audit must never block the call
                     _log.warning(
                         "hitl_consumed_resolve_failed",
@@ -247,18 +373,28 @@ class HitlMiddleware:
         approval_key = f"hitl:{approval_id}"
         summary = _build_arguments_summary(kwargs)
 
-        payload = json.dumps(
-            {
-                "tool": tool_name,
-                "agent_id": self._agent_id,
-                "agent_type": self._agent_type,
-                "arguments_summary": summary,
-                "args_hash": args_hash,
-                "approval_id": approval_id,
-                "timestamp": time.time(),
-                "timeout_seconds": self._timeout,
-            }
-        )
+        record: dict[str, Any] = {
+            "tool": tool_name,
+            "agent_id": self._agent_id,
+            "agent_type": self._agent_type,
+            "arguments_summary": summary,
+            "args_hash": args_hash,
+            "approval_id": approval_id,
+            "timestamp": time.time(),
+            "timeout_seconds": self._timeout,
+        }
+        if self._signing_mode != "off":
+            # The approver must be able to check what it signs. The agent can
+            # write this record too, so a summary beside a hash would let it pair
+            # a harmless summary with the hash of harmful arguments. The approver
+            # recomputes the digest from these canonical arguments, refuses on a
+            # mismatch, and displays what it actually hashed. The values are
+            # already in the calling agent's context, so storing them exposes
+            # nothing new to that agent. Only stored when signing is on, so
+            # deployments with signing off keep today's record exactly.
+            record["arguments"] = _canonical_arguments(kwargs)
+            record["args_sha256"] = args_digest
+        payload = json.dumps(record)
 
         # Mint the one-time approval token (OTP). It is written to the SAME
         # backend, inside the same fail-closed try, so a backend outage denies the
@@ -338,11 +474,23 @@ class HitlMiddleware:
         # Reject immediately — do not block the MCP connection waiting for
         # a pub/sub decision. The agent should surface the approval_id to the
         # operator, wait for the approval notification, then retry the call.
-        raise HitlRejectedError(
-            f"Tool call to {tool_name!r} requires operator approval "
-            f"(approval ID: {approval_id}). "
-            f"Run: scoped-mcp hitl approve {approval_id} — then retry this tool call."
+        raise HitlRejectedError(self._rejection_message(tool_name, approval_id))
+
+    def _rejection_message(self, tool_name: str, approval_id: str) -> str:
+        head = (
+            f"Tool call to {tool_name!r} requires operator approval (approval ID: {approval_id}). "
         )
+        if self._signing_mode == "enforce":
+            # The agent cannot approve this itself, and must not try: every
+            # unsigned route is refused. Tell it exactly what to ask the operator
+            # to run, so it stops and asks instead of hunting for a workaround.
+            cmd = self._approve_hint or "scoped-mcp-approve"
+            return (
+                head + "Only the operator can approve it, by running in a terminal: "
+                f"{cmd} {approval_id} — then retry this exact tool call with the same "
+                "arguments within 2 minutes. Do not try to approve it yourself."
+            )
+        return head + f"Run: scoped-mcp hitl approve {approval_id} — then retry this tool call."
 
 
 def build_hitl_middleware(
@@ -357,6 +505,19 @@ def build_hitl_middleware(
     """
     from .hitl_notify import build_notifier
 
+    signing = hitl_cfg.signing
+    public_key = None
+    if signing.mode != "off":
+        # Loaded once at startup. A missing or wrong key is a startup failure, never
+        # a silent fall back to accepting unsigned tokens.
+        from .exceptions import ConfigError
+        from .hitl_signing import SigningKeyError, load_public_key
+
+        try:
+            public_key = load_public_key(signing.public_key_path)
+        except SigningKeyError as e:
+            raise ConfigError(f"hitl.signing: {e}") from None
+
     return HitlMiddleware(
         state=state,
         agent_id=agent_id,
@@ -365,4 +526,7 @@ def build_hitl_middleware(
         shadow=hitl_cfg.shadow,
         timeout_seconds=hitl_cfg.timeout_seconds,
         notifier=build_notifier(hitl_cfg.notify),
+        signing_mode=signing.mode,
+        public_key=public_key,
+        approve_hint=signing.approve_command,
     )

@@ -782,6 +782,22 @@ guarantees. All are off by default; enable per-agent in the manifest:
   > it for an agent that is ever launched headless-auto turns this into a self-approval
   > bypass. `enforce` remains correct for any agent that might run unattended.
 
+  **Signed approvals** (`hitl.signing`, v1.17.0) — without signing, an approval
+  is a pre-approval key that *exists*; its value is never checked, so anything
+  that can write the state backend, read `SCOPED_MCP_HITL_TOKEN` or run the CLI
+  can approve. With `hitl.signing.mode: enforce` the value must be an Ed25519
+  statement over `(agent, approval id, tool, full SHA-256 of the arguments, expiry ≤ 120 s)`,
+  signed by an approver key the agent cannot read and verified against the public
+  key named in the manifest. The operator signs with **`scoped-mcp-approve <id>`**
+  in a terminal: it recomputes the argument hash from the stored arguments,
+  shows them untruncated, unredacted except secret-keyed values, and terminal-escaped, and asks `y/N`. Under `enforce`,
+  `scoped_mcp_hitl_confirm` and `POST /hitl/approve` are not registered and
+  `scoped-mcp hitl approve` refuses. `observe` verifies and logs but still
+  accepts, for rollout; `off` is the default and today's behaviour. See
+  [`docs/manifest-schema.md`](docs/manifest-schema.md#signing-approvals-only-the-operator-can-produce)
+  and, for what it does **not** stop (an agent that shares the proxy's OS user
+  can replace the proxy process), [`docs/threat-model.md`](docs/threat-model.md#hitl-approvals).
+
   **Agent session registry** (v1.9.0, optional `[postgres]` extra) — a
   fail-open `asyncpg` DAL (`registry_db.py`) over a session registry on
   `agent-postgres`, configured via `AGENT_REGISTRY_DSN`
