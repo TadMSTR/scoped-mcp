@@ -45,6 +45,7 @@ import hashlib
 import json
 import os
 import pwd
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -89,14 +90,16 @@ def load_config(path: Path) -> dict[str, str]:
     return {"state_url": str(data["state_url"]), "private_key_path": str(data["private_key_path"])}
 
 
+# ``hitl._generate_approval_id`` produces ``{agent_id}.{12 lowercase hex}``. Anything
+# else is refused before it names a state key. ASCII only (str.isalnum() would accept
+# other scripts' letters and digits), and no glob or separator characters.
+_APPROVAL_ID_RE = re.compile(r"\A([A-Za-z0-9][A-Za-z0-9_.-]{0,63})\.([0-9a-f]{12})\Z")
+
+
 def parse_approval_id(approval_id: str) -> str | None:
     """Return the agent_id encoded in ``{agent_id}.{hex}``, or None if malformed."""
-    if "." not in approval_id:
-        return None
-    agent_id, suffix = approval_id.rsplit(".", 1)
-    if not agent_id or not suffix or not suffix.isalnum():
-        return None
-    return agent_id
+    m = _APPROVAL_ID_RE.match(approval_id)
+    return m.group(1) if m else None
 
 
 def _prefix(agent_id: str) -> str:

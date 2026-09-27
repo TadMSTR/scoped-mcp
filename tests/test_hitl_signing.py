@@ -664,6 +664,23 @@ def test_parse_approval_id():
     assert hitl_approver.parse_approval_id("a.b:c") is None
 
 
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "developer.ABCDEF123456",  # uppercase hex: not what the generator emits
+        "developer.abc",  # too short
+        # Arabic-Indic digits: str.isalnum() accepts them
+        "developer." + "".join(chr(0x0661 + i % 9) for i in range(12)),
+        "*.aaaaaaaaaaaa",  # glob in the agent part
+        "dev:x.aaaaaaaaaaaa",  # key separator in the agent part
+        "developer.aaaaaaaaaaaa\n",  # trailing newline
+        " developer.aaaaaaaaaaaa",
+    ],
+)
+def test_parse_approval_id_refuses_non_generated_shapes(bad):
+    assert hitl_approver.parse_approval_id(bad) is None
+
+
 # ── key and config files ────────────────────────────────────────────────────
 
 
