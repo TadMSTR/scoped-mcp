@@ -82,8 +82,21 @@ def _check_bearer(request: Any) -> tuple[bool, int]:
     return True, 401
 
 
-def register_hitl_routes(server: FastMCP, state: StateBackend, agent_ctx: AgentContext) -> None:
-    """Attach the /hitl/* routes to the HTTP server for this agent."""
+def register_hitl_routes(
+    server: FastMCP,
+    state: StateBackend,
+    agent_ctx: AgentContext,
+    allow_unsigned_approve: bool = True,
+) -> None:
+    """Attach the /hitl/* routes to the HTTP server for this agent.
+
+    ``allow_unsigned_approve=False`` (``hitl.signing.mode: enforce``) omits
+    ``POST /hitl/approve`` entirely. That route writes an unsigned pre-approval
+    token on the strength of a bearer secret; under enforce such a token approves
+    nothing, and keeping the route would only look like an approval channel.
+    Signed approvals come from ``scoped-mcp-approve``. ``/hitl/deny`` and
+    ``/hitl/pending`` stay: a deny only deletes, and cannot approve anything.
+    """
     from starlette.requests import Request
     from starlette.responses import JSONResponse
 
@@ -106,33 +119,35 @@ def register_hitl_routes(server: FastMCP, state: StateBackend, agent_ctx: AgentC
             return JSONResponse({"error": "unauthorized"}, status_code=code)
         return None
 
-    @server.custom_route("/hitl/approve", methods=["POST"])
-    async def hitl_approve(request: Request) -> JSONResponse:
-        denied = await _authed(request)
-        if denied is not None:
-            return denied
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse({"error": "invalid_json"}, status_code=400)
-        approval_id = (body or {}).get("approval_id", "")
-        otp = (body or {}).get("otp")  # None => Phase 1 trusted-bot form
-        if not approval_id or not isinstance(approval_id, str):
-            return JSONResponse({"error": "approval_id required"}, status_code=400)
-        try:
-            # Tag the audit channel: an OTP means the Phase 2 courier form, its
-            # absence the Phase 1 trusted matrix-hitl-bot. Either way it is the
-            # real out-of-band path, distinct from interactive_self_service.
-            via = "courier" if otp else "matrix_bot"
-            result = await hitl_endpoint.approve(
-                state, agent_id, approval_id, otp=otp, resolved_via=via
-            )
-        except Exception as e:  # fail-closed — a backend error must deny, never approve
-            _log.error(
-                "hitl_approve_backend_error", approval_id=approval_id, error=type(e).__name__
-            )
-            return JSONResponse({"error": "backend_unavailable"}, status_code=503)
-        return JSONResponse(result, status_code=_STATUS_CODES.get(result["status"], 500))
+    if allow_unsigned_approve:
+
+        @server.custom_route("/hitl/approve", methods=["POST"])
+        async def hitl_approve(request: Request) -> JSONResponse:
+            denied = await _authed(request)
+            if denied is not None:
+                return denied
+            try:
+                body = await request.json()
+            except Exception:
+                return JSONResponse({"error": "invalid_json"}, status_code=400)
+            approval_id = (body or {}).get("approval_id", "")
+            otp = (body or {}).get("otp")  # None => Phase 1 trusted-bot form
+            if not approval_id or not isinstance(approval_id, str):
+                return JSONResponse({"error": "approval_id required"}, status_code=400)
+            try:
+                # Tag the audit channel: an OTP means the Phase 2 courier form, its
+                # absence the Phase 1 trusted matrix-hitl-bot. Either way it is the
+                # real out-of-band path, distinct from interactive_self_service.
+                via = "courier" if otp else "matrix_bot"
+                result = await hitl_endpoint.approve(
+                    state, agent_id, approval_id, otp=otp, resolved_via=via
+                )
+            except Exception as e:  # fail-closed — a backend error must deny, never approve
+                _log.error(
+                    "hitl_approve_backend_error", approval_id=approval_id, error=type(e).__name__
+                )
+                return JSONResponse({"error": "backend_unavailable"}, status_code=503)
+            return JSONResponse(result, status_code=_STATUS_CODES.get(result["status"], 500))
 
     @server.custom_route("/hitl/deny", methods=["POST"])
     async def hitl_deny(request: Request) -> JSONResponse:
@@ -174,11 +189,10 @@ def register_hitl_routes(server: FastMCP, state: StateBackend, agent_ctx: AgentC
             return JSONResponse({"error": "backend_unavailable"}, status_code=503)
         return JSONResponse({"agent_id": agent_id, "pending": pending}, status_code=200)
 
-    _log.info(
-        "hitl_endpoint_registered",
-        agent_id=agent_id,
-        routes=["/hitl/approve", "/hitl/deny", "/hitl/pending"],
-    )
+    routes = ["/hitl/deny", "/hitl/pending"]
+    if allow_unsigned_approve:
+        routes.insert(0, "/hitl/approve")
+    _log.info("hitl_endpoint_registered", agent_id=agent_id, routes=routes)
 
 
 __all__ = ["register_hitl_routes"]

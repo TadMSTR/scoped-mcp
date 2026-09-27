@@ -156,23 +156,17 @@ async def _decide(redis_url: str, approval_id: str, decision: str, _client=None)
             # token is actually used (SMCP-39).
             token_value = json.dumps({"status": "approved", "approval_id": approval_id})
 
+            # No fallback for a payload without args_hash. The old tool-name-only
+            # key it used to write is one the middleware never reads (it only
+            # looks up the args-bound key), so it approved nothing and only left
+            # a stray token behind.
             if tool_name and args_hash:
                 pre_key = _preapproval_key_for(agent_id, tool_name, args_hash)
                 await client.set(pre_key, token_value, ex=PREAPPROVAL_TTL_SECONDS)
-            elif tool_name:
-                # Legacy payload without args_hash (pre-H-01 fix): fall back to
-                # tool-name-only key so old pending approvals still work after upgrade.
-                pre_key = f"scoped-mcp:{agent_id}:hitl:preapproved:{tool_name}"
-                await client.set(pre_key, token_value, ex=PREAPPROVAL_TTL_SECONDS)
-                print(
-                    "warning: stored payload has no args_hash — writing tool-name-only "
-                    "pre-approval token (upgrade scoped-mcp to get argument binding)",
-                    file=sys.stderr,
-                )
             else:
                 print(
-                    "warning: could not extract tool name from payload — "
-                    "pre-approval token not written; retry may not proceed",
+                    "warning: pending payload has no tool/args binding — "
+                    "pre-approval token not written; the agent must re-trigger the call",
                     file=sys.stderr,
                 )
 
@@ -209,6 +203,18 @@ def run_hitl_command(args: argparse.Namespace) -> int:
     if cmd == "list":
         return asyncio.run(_list_pending(redis_url))
     if cmd == "approve":
+        signing = manifest.hitl.signing if manifest.hitl is not None else None
+        if signing is not None and signing.mode == "enforce":
+            # This command writes an unsigned token, which an enforcing proxy
+            # treats as no approval. Refuse instead of appearing to succeed. The
+            # refusal is for clarity, not the control — the verifier is.
+            print(
+                "error: this agent requires signed approvals (hitl.signing.mode: enforce); "
+                "'scoped-mcp hitl approve' cannot approve it. The operator approves with: "
+                f"{signing.approve_command} {args.approval_id}",
+                file=sys.stderr,
+            )
+            return 4
         return asyncio.run(_decide(redis_url, args.approval_id, "approve"))
     if cmd == "reject":
         reason = getattr(args, "reason", None)

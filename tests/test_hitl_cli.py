@@ -15,6 +15,7 @@ from scoped_mcp.hitl_cli import (
     _preapproval_key_for,
     run_hitl_command,
 )
+from scoped_mcp.manifest import load_manifest
 
 # ── Pure unit tests (no Redis) ─────────────────────────────────────────────────
 
@@ -53,6 +54,12 @@ class TestPreapprovalKeyFor:
         assert key == "scoped-mcp:agent-1:hitl:preapproved:githost-mcp_git_push:abc123def45678"
 
 
+_VALID_MODULES = (
+    "agent_type: research\nmodules:\n  filesystem:\n    mode: read\n"
+    "    config:\n      base_path: /tmp/x\n"
+)
+
+
 class TestRunHitlCommandNoRedis:
     def _make_args(self, tmp_path, manifest_yaml, hitl_command="list", **extra):
         p = tmp_path / "manifest.yaml"
@@ -67,20 +74,21 @@ class TestRunHitlCommandNoRedis:
         assert run_hitl_command(ns) == 1
 
     def test_in_process_backend_returns_1(self, tmp_path):
-        yaml = (
-            "agent_id: test-agent\nagent_type: research\n"
-            "credential_source:\n  type: env\nmodules: []\n"
-        )
+        # A manifest that LOADS, so the 1 is the in-process refusal and not a
+        # validation failure. The old fixture used fields the schema forbids, so it
+        # returned 1 for the wrong reason.
+        yaml = _VALID_MODULES
         ns = self._make_args(tmp_path, yaml)
+        assert load_manifest(ns.manifest).state_backend.type == "in_process"
         assert run_hitl_command(ns) == 1
 
     def test_unknown_subcommand_returns_1(self, tmp_path):
         yaml = (
-            "agent_id: test-agent\nagent_type: research\n"
-            "credential_source:\n  type: env\nmodules: []\n"
-            "state_backend:\n  type: dragonfly\n  url: 'redis://localhost:6379/15'\n"
+            _VALID_MODULES
+            + "state_backend:\n  type: dragonfly\n  url: 'redis://localhost:6379/15'\n"
         )
         ns = self._make_args(tmp_path, yaml, hitl_command="bogus-command")
+        load_manifest(ns.manifest)  # loads — the 1 must come from the subcommand
         assert run_hitl_command(ns) == 1
 
 

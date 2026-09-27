@@ -1299,9 +1299,14 @@ def build_server(
     # enforce-mode agent the tool is never registered — an unattended run cannot
     # reach it, so gating still requires the out-of-band Matrix/CLI path. Not gated
     # on transport: it dispatches over the same channel as every other tool.
+    #
+    # Never under hitl.signing.mode: enforce. The manifest validator already refuses
+    # interactive + enforce; this repeats the condition at the one place the tool is
+    # created, so no future path around the validator can re-open self-approval.
     if (
         manifest.hitl is not None
         and manifest.hitl.mode == "interactive"
+        and manifest.hitl.signing.mode != "enforce"
         and manifest.hitl.approval_required
         and state is not None
     ):
@@ -1327,7 +1332,12 @@ def build_server(
         if manifest.hitl is not None and manifest.hitl.approval_required and state is not None:
             from .hitl_http import register_hitl_routes
 
-            register_hitl_routes(server, state, agent_ctx)
+            register_hitl_routes(
+                server,
+                state,
+                agent_ctx,
+                allow_unsigned_approve=manifest.hitl.signing.mode != "enforce",
+            )
 
     # L4: OTel credential-health metrics for SigNoz (opt-in). No-op unless a Vault
     # source is present and an OTLP endpoint is configured; the otel extra being

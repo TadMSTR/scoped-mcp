@@ -25,7 +25,38 @@ Requests to RFC1918 addresses, loopback, link-local, and known cloud metadata en
 **Bucket/namespace pollution**
 InfluxDB bucket names and other namespaced resources are validated against a per-agent allowlist. Bucket creation adds the agent ID as a prefix.
 
+**HITL self-approval (with `hitl.signing.mode: enforce`)**
+A gated call runs only if the pre-approval token carries an Ed25519 statement signed by an
+approver key the agent cannot read, bound to this agent, tool, argument hash and approval
+id, valid for at most 120 s, and not already used. Writing the state backend, reading
+`SCOPED_MCP_HITL_TOKEN`, running `scoped-mcp hitl approve`, or calling
+`scoped_mcp_hitl_confirm` produces nothing the proxy accepts. The approver recomputes the
+argument hash from the stored arguments before it shows them, so a pending record that
+pairs a harmless summary with harmful arguments is refused rather than signed.
+
 ## Not protected
+
+### HITL approvals
+
+Signing closes every approval route that only needs *write access to something the agent
+can reach*. It does **not** make HITL tamper-proof when the agent shares an OS user with
+its proxy:
+
+- **Process substitution.** An agent that can stop the proxy and start a modified copy on
+  the same port — with the credentials in an environment file it can read — has no HITL at
+  all. Signing cannot help: the verifier is in the process being replaced. The mitigations
+  are OS-level: run the proxy under a user the agent is not, from a root-owned install,
+  with credentials the agent cannot read.
+- **Editable verifier.** If the agent can write the installed package, it can delete the
+  check. Install scoped-mcp root-owned (not writable by the agent's user).
+- **Replay across processes and restarts.** Replay protection is an in-process set of used
+  approval ids, held for the statement's lifetime. A restart clears it, and two processes
+  serving the same `agent_id` (for example several stdio sessions) do not share it. Within
+  the 120 s lifetime, a consumed statement written back after a restart, or into another
+  process for the same agent, approves the same call — same tool, same arguments — once
+  more. Restarting the proxy is itself the process-substitution route above.
+- **`signing.mode: observe`** accepts unsigned tokens by design. It is a rollout step, not
+  a security setting.
 
 **Prompt injection**
 If an agent reads malicious content from a tool response (e.g., a file containing `Ignore previous instructions`) and acts on it, scoped-mcp does not prevent this. Use a prompt injection detection layer separately.
@@ -72,3 +103,4 @@ A malicious or misconfigured upstream can also serve a permissive `inputSchema` 
 | SQL injection prevention | sqlglot AST validation in sqlite module |
 | SSRF prevention | _is_ssrf_target() in http_proxy module |
 | Audit trail | @audited decorator (always applied by registry) |
+| HITL approval authenticity | Ed25519 statement verified in HitlMiddleware (`hitl.signing.mode: enforce`) |

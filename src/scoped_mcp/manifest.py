@@ -225,6 +225,36 @@ class NotifyConfig(BaseModel):
         return self
 
 
+class HitlSigningConfig(BaseModel):
+    """Signed approval statements (see ``hitl_signing``).
+
+    off     — (default) today's behaviour: a pre-approval token is accepted if it
+              exists. Kept as the default so existing deployments do not break.
+    observe — every token is verified and the result logged
+              (``hitl_signature_ok`` / ``hitl_signature_rejected``), but an
+              unsigned or invalid token is still accepted. For rollout only:
+              it proves the signer works before anything depends on it.
+    enforce — only a token carrying a valid statement signed by the key at
+              ``public_key_path`` approves a call. Anything else is treated as
+              no approval, and the call is rejected as a new request.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["off", "observe", "enforce"] = "off"
+    public_key_path: str | None = None
+    # What the agent is told to ask the operator to run, followed by the approval
+    # id, in the rejection message under enforce. Deployment-specific (it usually
+    # names a sudo target), so it is configuration, not code.
+    approve_command: str = "scoped-mcp-approve"
+
+    @model_validator(mode="after")
+    def _key_required(self) -> HitlSigningConfig:
+        if self.mode != "off" and not self.public_key_path:
+            raise ValueError(f"hitl.signing.public_key_path is required when mode is {self.mode!r}")
+        return self
+
+
 class HitlConfig(BaseModel):
     """Human-in-the-loop approval config (v1.0)."""
 
@@ -251,6 +281,7 @@ class HitlConfig(BaseModel):
     # Auto-reject after this many seconds with no decision
     timeout_seconds: int = 300
     notify: NotifyConfig = NotifyConfig()
+    signing: HitlSigningConfig = HitlSigningConfig()
 
     @field_validator("timeout_seconds")
     @classmethod
@@ -258,6 +289,19 @@ class HitlConfig(BaseModel):
         if v <= 0:
             raise ValueError(f"hitl.timeout_seconds must be positive, got {v}")
         return v
+
+    @model_validator(mode="after")
+    def _no_self_approval_under_signing(self) -> HitlConfig:
+        # interactive mode registers scoped_mcp_hitl_confirm, which approves on the
+        # requesting agent's own word. Under signing enforce that is a self-approval
+        # route beside the one signing exists to close, so the combination is refused
+        # at startup rather than quietly re-opening it.
+        if self.signing.mode == "enforce" and self.mode == "interactive":
+            raise ValueError(
+                "hitl.mode 'interactive' cannot be combined with hitl.signing.mode 'enforce': "
+                "scoped_mcp_hitl_confirm would let the agent approve its own call"
+            )
+        return self
 
 
 class AuditConfig(BaseModel):
