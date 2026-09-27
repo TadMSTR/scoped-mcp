@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.17.0] — 2026-09-27
+
 ### Security
 
 - **Signed HITL approvals (`hitl.signing`).** Until now a HITL approval was a
@@ -16,9 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scoped_mcp_hitl_confirm`, and a direct state-backend write — and wherever the agent
   shares an OS user with its proxy it can reach every one. With
   `hitl.signing.mode: enforce` the value must be an Ed25519 statement
-  `{v, agent_id, approval_id, tool, args_sha256, issued_at, expires_at}` (the
-  full SHA-256 of the canonical arguments — the 16-hex `args_hash` only names the key) signed by an
-  approver key, verified against `hitl.signing.public_key_path`, valid for at most
+  `{v, agent_id, approval_id, tool, args_sha256, issued_at, expires_at}`, where
+  `args_sha256` is the full SHA-256 of the canonical arguments (the 16-hex `args_hash`
+  only names the key). It must be signed by an approver key, verified against `hitl.signing.public_key_path`, valid for at most
   120 s and used at most once per process. Every failure is logged as
   `hitl_signature_rejected` with a reason class and treated as no approval. `observe`
   verifies and logs but accepts, for rollout. **Default `off`: no behaviour change.**
@@ -29,10 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`scoped-mcp-approve`** console script: the signer. It reads the pending record,
-  recomputes `args_hash` from the canonical arguments now stored there (only when
-  signing is on) and refuses on a mismatch, so a record pairing a harmless summary with
-  harmful arguments cannot be signed. It shows the arguments untruncated and without
+- **`scoped-mcp-approve`** console script: the signer. It accepts only an approval id of
+  the exact generated shape. It reads the pending record, recomputes the argument digest
+  from the canonical arguments now stored there (only when signing is on) and refuses on
+  a mismatch, so a record pairing a harmless summary with harmful arguments cannot be
+  signed. It shows the arguments untruncated and without
   pattern redaction (values under secret-looking keys become length + digest), with
   control and non-ASCII characters escaped, reads `y/N` from `/dev/tty`, and
   refuses without a terminal. Its config and private key must be owner-only (`stat`-checked).
@@ -54,6 +57,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in Dependabot for both version and security updates, so they cannot split again.
 - Two `hitl` CLI tests passed on a manifest that failed validation rather than for the
   reason they named. They now load a valid manifest first.
+
+### Maintenance
+
+Also in this release, merged since 1.16.0 as their own PRs: `.coderabbit.yaml` with
+`inheritance: true` (#84), sqlglot 30.19.0 (#90), astral-sh/setup-uv 10.2.0 (#92), and ruff
+0.16.8, which widens the dev bound to `<0.17` with no lint changes needed (#85).
 
 ## [1.16.0] — 2026-09-08
 

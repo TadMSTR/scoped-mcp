@@ -33,7 +33,10 @@ Include as much detail as possible: the affected component, steps to reproduce, 
 - The documented residuals of signed HITL approvals ([threat model](docs/threat-model.md#hitl-approvals)):
   an agent that shares an OS user with its proxy replacing or editing the proxy process,
   and replay of a consumed statement within its 120 s lifetime after a proxy restart or into
-  a second process serving the same agent. These are accepted and need OS-level separation,
+  a second process serving the same agent. Also accepted: `scoped-mcp-approve` checks its
+  config and private key with `stat` and then opens them separately, so there is a
+  check-then-read (TOCTOU) window. Exploiting it needs code execution as the approver account,
+  which can already read the key. These are accepted and need OS-level separation,
   not a code fix. Without signing (`mode: off`, the default) an approval is not
   authenticated at all; that is the documented behaviour, not a vulnerability
 

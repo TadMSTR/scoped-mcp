@@ -782,7 +782,7 @@ guarantees. All are off by default; enable per-agent in the manifest:
   > it for an agent that is ever launched headless-auto turns this into a self-approval
   > bypass. `enforce` remains correct for any agent that might run unattended.
 
-  **Signed approvals** (`hitl.signing`, unreleased) — without signing, an approval
+  **Signed approvals** (`hitl.signing`, v1.17.0) — without signing, an approval
   is a pre-approval key that *exists*; its value is never checked, so anything
   that can write the state backend, read `SCOPED_MCP_HITL_TOKEN` or run the CLI
   can approve. With `hitl.signing.mode: enforce` the value must be an Ed25519
