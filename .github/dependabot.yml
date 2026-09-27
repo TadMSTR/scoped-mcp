@@ -42,6 +42,33 @@ updates:
     # Actions are SHA-pinned with a trailing version comment (see .github/workflows/*.yml).
     # Dependabot understands SHA pins and bumps the SHA while updating that comment, so pinning
     # costs no update coverage.
+    #
+    # EXPLICIT, AND SIZED TO THIS REPO: the number of distinct actions across
+    # .github/workflows/, counting codeql-action's subpaths once (they are grouped below):
+    #
+    #   grep -rhoE 'uses:\s*[^@ ]+' .github/workflows/ \
+    #     | sed -E 's/uses:\s*//; s#^(github/codeql-action)/.*#\1#' | sort -u | wc -l
+    #
+    # That is the most open PRs this ecosystem can ever need, so no bump is held back. The
+    # default of 5 is not a safe floor: at the cap Dependabot does not queue the next bump, it
+    # never raises it, and nothing reports that (vikunja#932, #937). Re-count when a workflow
+    # adds an action.
+    open-pull-requests-limit: 8
+    # codeql-action is a monorepo. init, analyze and upload-sarif must move to the same SHA
+    # together, or CodeQL aborts with a `neutral` conclusion that branch protection does not
+    # block on (vikunja#930, #936). Dependabot bumps each subpath as its own dependency unless
+    # they are grouped — which is exactly how #86/#87/#88 arrived as three PRs.
+    #
+    # The group is repeated for security updates ON PURPOSE. A group without `applies-to`
+    # covers version updates only (GitHub: "When undefined, defaults to version updates"), so
+    # a single group leaves the security channel able to split the same set. Narrow, not `*`:
+    # one bad action should not hold every other bump behind it.
+    groups:
+      codeql-action:
+        patterns: ["github/codeql-action*"]
+      codeql-action-security:
+        applies-to: security-updates
+        patterns: ["github/codeql-action*"]
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
