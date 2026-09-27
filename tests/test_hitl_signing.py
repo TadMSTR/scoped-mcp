@@ -394,9 +394,7 @@ async def test_enforce_binds_full_digest_not_the_short_key_hash(key, monkeypatch
     """Simulate a collision on the 64-bit key hash: every argument set maps to the same
     state key. A statement signed for A must still not run B, because the signature
     binds the full SHA-256."""
-    import scoped_mcp.hitl as hitl_mod
-
-    monkeypatch.setattr(hitl_mod, "_short_args_hash", lambda d: "collide0collide0")
+    monkeypatch.setattr("scoped_mcp.hitl._short_args_hash", lambda d: "collide0collide0")
     state = PrefixedState(FakeRedis(), AGENT)
     mw = _mw(state, "enforce", key)
     await state.set_with_ttl(_preapproval_key(TOOL, "collide0collide0"), _signed(key), 120)
@@ -669,7 +667,10 @@ def test_parse_approval_id():
 # ── key and config files ────────────────────────────────────────────────────
 
 
-def _write_pem(path, key, private: bool, mode: int) -> None:
+def _write_pem(path, key, private: bool) -> None:
+    """Write a key with safe permissions: 0600 private, 0444 public. Tests of the
+    permission check fake the stat result instead (see _pretend_mode), so the suite
+    never creates a group- or world-readable key file."""
     if private:
         data = key.private_bytes(
             serialization.Encoding.PEM,
@@ -681,14 +682,37 @@ def _write_pem(path, key, private: bool, mode: int) -> None:
             serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
         )
     path.write_bytes(data)
-    os.chmod(path, mode)
+    os.chmod(path, 0o600 if private else 0o444)
 
 
-def test_private_key_permissions_are_checked(tmp_path, key):
+def _pretend_mode(monkeypatch, path, mode: int) -> None:
+    """Make os.stat report ``mode`` permission bits for ``path`` only.
+
+    Drives check_owner_only's refusal without creating a permissive file on disk.
+    Everything else (file type, owner, other paths) is the real stat result.
+    """
+    real_stat = os.stat
+    target = str(path)
+
+    def fake_stat(p, *a, **kw):
+        st = real_stat(p, *a, **kw)
+        if str(p) != target:
+            return st
+        fields = list(st)
+        fields[0] = (st.st_mode & ~0o7777) | mode
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(os, "stat", fake_stat)
+
+
+@pytest.mark.parametrize("mode", [0o644, 0o640, 0o604, 0o620, 0o602])
+def test_private_key_permissions_are_checked(tmp_path, key, monkeypatch, mode):
     p = tmp_path / "k.pem"
-    _write_pem(p, key, private=True, mode=0o644)
-    with pytest.raises(SigningKeyError, match="0644"):
-        load_private_key(p)
+    _write_pem(p, key, private=True)
+    with monkeypatch.context() as m:
+        _pretend_mode(m, p, mode)
+        with pytest.raises(SigningKeyError, match=f"{mode:04o}"):
+            load_private_key(p)
     os.chmod(p, 0o400)
     assert (
         load_private_key(p).public_key().public_bytes_raw() == key.public_key().public_bytes_raw()
@@ -698,21 +722,22 @@ def test_private_key_permissions_are_checked(tmp_path, key):
 def test_non_ed25519_keys_are_refused(tmp_path):
     ecd = ec.generate_private_key(ec.SECP256R1())
     priv, pub = tmp_path / "ec.pem", tmp_path / "ec.pub"
-    _write_pem(priv, ecd, private=True, mode=0o600)
-    _write_pem(pub, ecd, private=False, mode=0o644)
+    _write_pem(priv, ecd, private=True)
+    _write_pem(pub, ecd, private=False)
     with pytest.raises(SigningKeyError, match="Ed25519"):
         load_private_key(priv)
     with pytest.raises(SigningKeyError, match="Ed25519"):
         load_public_key(pub)
 
 
-def test_config_permissions_are_checked(tmp_path):
+def test_config_permissions_are_checked(tmp_path, monkeypatch):
     p = tmp_path / "approver.yml"
     p.write_text("state_url: redis://x\nprivate_key_path: /k\n")
-    os.chmod(p, 0o640)
-    with pytest.raises(SigningKeyError):
-        hitl_approver.load_config(p)
     os.chmod(p, 0o600)
+    with monkeypatch.context() as m:
+        _pretend_mode(m, p, 0o640)
+        with pytest.raises(SigningKeyError):
+            hitl_approver.load_config(p)
     assert hitl_approver.load_config(p)["state_url"] == "redis://x"
 
 
@@ -774,7 +799,7 @@ def _manifest(tmp_path, signing_mode: str, pub) -> str:
 
 def test_cli_approve_refuses_under_enforce(tmp_path, key, capsys):
     pub = tmp_path / "k.pub"
-    _write_pem(pub, key, private=False, mode=0o444)
+    _write_pem(pub, key, private=False)
     ns = argparse.Namespace(
         manifest=_manifest(tmp_path, "enforce", pub),
         hitl_command="approve",
@@ -786,14 +811,14 @@ def test_cli_approve_refuses_under_enforce(tmp_path, key, capsys):
 
 def test_manifest_file_with_signing_loads(tmp_path, key):
     pub = tmp_path / "k.pub"
-    _write_pem(pub, key, private=False, mode=0o444)
+    _write_pem(pub, key, private=False)
     m = load_manifest(_manifest(tmp_path, "observe", pub))
     assert m.hitl.signing.mode == "observe"
 
 
 def test_manifest_file_interactive_enforce_is_a_load_error(tmp_path, key):
     pub = tmp_path / "k.pub"
-    _write_pem(pub, key, private=False, mode=0o444)
+    _write_pem(pub, key, private=False)
     path = _manifest(tmp_path, "enforce", pub)
     with open(path, "a") as f:
         f.write("  mode: interactive\n")
@@ -840,7 +865,9 @@ def test_approve_route_absent_under_enforce(monkeypatch):
 
 def test_every_reason_class_has_a_test():
     """Guard: a new reason class must come with a test that produces it."""
-    src = open(__file__).read()
+    from pathlib import Path
+
+    src = Path(__file__).read_text()
     for r in ALL_REASONS:
         const = "REASON_" + r.upper()
         assert src.count(const) >= 2, f"{const} is not exercised"
