@@ -11,13 +11,16 @@ an agent with ``hitl.signing.mode: enforce`` will accept.
 What it does on approve:
 
 1. Reads the pending record for ``approval_id`` from the state backend.
-2. Recomputes ``args_hash`` from the canonical arguments stored in that record
-   and **refuses on a mismatch**. The requesting agent can write that record, so
-   a stored summary or hash proves nothing by itself; what is displayed and what
-   is signed must both be derived from the same arguments.
-3. Shows agent, tool and those arguments — secrets redacted, nothing truncated,
-   every control or non-ASCII character escaped so the text cannot redraw the
-   terminal — and asks ``Approve? [y/N]``.
+2. Recomputes the full SHA-256 of the canonical arguments stored in that record
+   and **refuses** unless both the stored digest and the stored short
+   ``args_hash`` match it. The statement it signs carries the recomputed digest.
+   The requesting agent can write that record, so a stored summary or hash
+   proves nothing by itself; what is displayed and what is signed must both be
+   derived from the same arguments.
+3. Shows agent, tool and those arguments — nothing truncated or pattern-redacted,
+   values under secret-looking keys replaced by their length and a digest prefix
+   (hidden, but still distinguishable), and every control or non-ASCII character
+   escaped so the text cannot redraw the terminal — and asks ``Approve? [y/N]``.
 4. On ``y``: claims the pending record (atomically), signs the statement and
    writes it as the pre-approval token, valid for at most 120 s.
 
@@ -38,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import pwd
@@ -47,8 +51,8 @@ from typing import Any
 
 import yaml
 
-from .audit import _key_looks_sensitive, _redact_string
-from .hitl import _canonical_args_hash, _otp_key, _preapproval_key
+from .audit import _key_looks_sensitive
+from .hitl import _canonical_args_digest, _otp_key, _preapproval_key, _short_args_hash
 from .hitl_signing import (
     MAX_LIFETIME_SECONDS,
     SigningKeyError,
@@ -100,13 +104,24 @@ def _prefix(agent_id: str) -> str:
     return f"scoped-mcp:{_sanitize_key_component(agent_id)}:"
 
 
+def _fingerprint(value: Any) -> str:
+    canonical = json.dumps(value, sort_keys=True, default=str)
+    digest = hashlib.sha256(canonical.encode()).hexdigest()[:12]
+    return f"<hidden: {len(canonical)} chars, sha256 {digest}>"
+
+
 def _display_value(value: Any, key: str = "") -> Any:
-    """Redact secrets for display. Unlike the audit sanitiser, never truncate:
-    the operator is deciding on this text, so a hidden tail is a hidden risk."""
+    """What the operator reads before signing. It must show what is signed.
+
+    Unlike the audit sanitiser, this never truncates and never pattern-redacts:
+    the requesting agent controls every value, so text rewritten to
+    ``<redacted-hex>`` (a commit SHA, say) or cut at 500 characters is text the
+    operator approves without seeing. Only a value under a secret-looking key is
+    kept off the screen, and even then it is replaced by its length and a digest
+    prefix, so two different hidden values never look identical.
+    """
     if key and _key_looks_sensitive(key):
-        return "<redacted>"
-    if isinstance(value, str):
-        return _redact_string(value)
+        return _fingerprint(value)
     if isinstance(value, dict):
         return {k: _display_value(v, k) for k, v in value.items()}
     if isinstance(value, list):
@@ -150,7 +165,10 @@ def check_record(record: Any, approval_id: str, agent_id: str) -> str | None:
         )
     if not isinstance(record["arguments"], dict):
         return "pending record arguments are not an object"
-    if _canonical_args_hash(record["arguments"]) != record.get("args_hash"):
+    digest = _canonical_args_digest(record["arguments"])
+    if record.get("args_sha256") != digest:
+        return "stored args_sha256 does not match the stored arguments"
+    if record.get("args_hash") != _short_args_hash(digest):
         return "stored args_hash does not match the stored arguments"
     return None
 
@@ -203,7 +221,7 @@ async def run(
         agent_id=agent_id,
         approval_id=approval_id,
         tool=record["tool"],
-        args_hash=record["args_hash"],
+        args_sha256=_canonical_args_digest(record["arguments"]),
     )
     value = sign_statement(private_key, statement)
 

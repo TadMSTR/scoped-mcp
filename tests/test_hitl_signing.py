@@ -23,7 +23,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from scoped_mcp import hitl_approver
 from scoped_mcp.exceptions import HitlRejectedError, ManifestError
-from scoped_mcp.hitl import HitlMiddleware, _canonical_args_hash, _preapproval_key
+from scoped_mcp.hitl import (
+    HitlMiddleware,
+    _canonical_args_digest,
+    _canonical_args_hash,
+    _preapproval_key,
+)
 from scoped_mcp.hitl_cli import run_hitl_command
 from scoped_mcp.hitl_signing import (
     ALL_REASONS,
@@ -54,6 +59,7 @@ AGENT = "developer"
 TOOL = "githost-mcp_gitea_pr_merge"
 ARGS = {"repo": "org/repo", "pr_number": 7, "merge_style": "squash"}
 HASH = _canonical_args_hash(ARGS)
+DIGEST = _canonical_args_digest(ARGS)
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────
@@ -66,14 +72,14 @@ def key() -> Ed25519PrivateKey:
 
 def _signed(key: Ed25519PrivateKey, **over: Any) -> str:
     st = build_statement(
-        agent_id=AGENT, approval_id=f"{AGENT}.aaaaaaaaaaaa", tool=TOOL, args_hash=HASH
+        agent_id=AGENT, approval_id=f"{AGENT}.aaaaaaaaaaaa", tool=TOOL, args_sha256=DIGEST
     )
     st.update(over)
     return sign_statement(key, st)
 
 
 def _verify(raw: str, key: Ed25519PrivateKey, **over: Any):
-    kw = {"public_key": key.public_key(), "agent_id": AGENT, "tool": TOOL, "args_hash": HASH}
+    kw = {"public_key": key.public_key(), "agent_id": AGENT, "tool": TOOL, "args_sha256": DIGEST}
     kw.update(over)
     return verify_statement(raw, **kw)
 
@@ -192,7 +198,7 @@ def test_wrong_key_is_bad_signature(key):
     "field,value",
     [
         ("tool", "githost-mcp_github_pr_merge"),
-        ("args_hash", "0" * 16),
+        ("args_sha256", "0" * 64),
         ("agent_id", "sysadmin"),
         ("expires_at", 2**40),
         ("approval_id", "developer.bbbbbbbbbbbb"),
@@ -207,7 +213,7 @@ def test_tampered_field_is_bad_signature(key, field, value):
 
 def test_signature_does_not_cover_a_different_domain(key):
     """A signature over the bare canonical JSON (no domain prefix) never verifies."""
-    st = build_statement(agent_id=AGENT, approval_id=f"{AGENT}.a1", tool=TOOL, args_hash=HASH)
+    st = build_statement(agent_id=AGENT, approval_id=f"{AGENT}.a1", tool=TOOL, args_sha256=DIGEST)
     import base64
 
     # Built independently of _canonical_bytes, so dropping the prefix there is caught.
@@ -230,7 +236,7 @@ def test_tool_mismatch(key):
 
 
 def test_args_mismatch(key):
-    assert _verify(_signed(key), key, args_hash="f" * 16).reason == REASON_ARGS_MISMATCH
+    assert _verify(_signed(key), key, args_sha256="f" * 64).reason == REASON_ARGS_MISMATCH
 
 
 def test_expired(key):
@@ -261,7 +267,7 @@ def test_lifetime_too_long(key):
 def test_build_statement_refuses_long_lifetime():
     with pytest.raises(ValueError):
         build_statement(
-            agent_id=AGENT, approval_id="a.b", tool=TOOL, args_hash=HASH, lifetime_seconds=121
+            agent_id=AGENT, approval_id="a.b", tool=TOOL, args_sha256=DIGEST, lifetime_seconds=121
         )
 
 
@@ -364,6 +370,49 @@ async def test_enforce_refuses_replay(key):
 
 
 @pytest.mark.asyncio
+async def test_enforce_concurrent_redemption_runs_once(key):
+    """Two retries racing on one signed token: exactly one runs. Guards the GETDEL claim
+    and the synchronous contains/add pair against a future await between them."""
+    import asyncio
+
+    state = PrefixedState(FakeRedis(), AGENT)
+    mw = _mw(state, "enforce", key)
+    await state.set_with_ttl(_preapproval_key(TOOL, HASH), _signed(key), 120)
+
+    async def attempt():
+        try:
+            return await mw(None, TOOL, dict(ARGS), _executed)
+        except HitlRejectedError:
+            return "REJECTED"
+
+    results = await asyncio.gather(attempt(), attempt())
+    assert sorted(results) == ["EXECUTED", "REJECTED"]
+
+
+@pytest.mark.asyncio
+async def test_enforce_binds_full_digest_not_the_short_key_hash(key, monkeypatch):
+    """Simulate a collision on the 64-bit key hash: every argument set maps to the same
+    state key. A statement signed for A must still not run B, because the signature
+    binds the full SHA-256."""
+    import scoped_mcp.hitl as hitl_mod
+
+    monkeypatch.setattr(hitl_mod, "_short_args_hash", lambda d: "collide0collide0")
+    state = PrefixedState(FakeRedis(), AGENT)
+    mw = _mw(state, "enforce", key)
+    await state.set_with_ttl(_preapproval_key(TOOL, "collide0collide0"), _signed(key), 120)
+    harmful = {**ARGS, "repo": "org/other"}
+    with structlog.testing.capture_logs() as logs, pytest.raises(HitlRejectedError):
+        await mw(None, TOOL, harmful, _executed)
+    rej = [e["reason"] for e in logs if e["event"] == "hitl_signature_rejected"]
+    assert rej == [REASON_ARGS_MISMATCH]
+
+
+def test_build_statement_refuses_short_digest():
+    with pytest.raises(ValueError, match="64-hex"):
+        build_statement(agent_id=AGENT, approval_id="a.b", tool=TOOL, args_sha256=HASH)
+
+
+@pytest.mark.asyncio
 async def test_enforce_signature_for_other_args_does_not_approve(key):
     """A valid statement for harmless args is useless for harmful ones: different key, and
     even if copied under the harmful key, args_hash no longer matches."""
@@ -405,6 +454,8 @@ async def test_signing_on_stores_canonical_arguments(key):
     rec = json.loads(redis.store[f"scoped-mcp:{AGENT}:hitl:{_approval_id_from(ei.value)}"])
     assert rec["arguments"] == ARGS
     assert _canonical_args_hash(rec["arguments"]) == rec["args_hash"]
+    assert _canonical_args_digest(rec["arguments"]) == rec["args_sha256"] == DIGEST
+    assert rec["args_sha256"].startswith(rec["args_hash"])
 
 
 # ── middleware: observe and off ─────────────────────────────────────────────
@@ -441,7 +492,7 @@ async def test_off_is_unchanged(key):
     with pytest.raises(HitlRejectedError) as ei:
         await mw(None, TOOL, dict(ARGS), _executed)
     rec = json.loads(redis.store[f"scoped-mcp:{AGENT}:hitl:{_approval_id_from(ei.value)}"])
-    assert "arguments" not in rec
+    assert "arguments" not in rec and "args_sha256" not in rec
     assert "scoped-mcp hitl approve" in str(ei.value)
     await state.set_with_ttl(_preapproval_key(TOOL, HASH), "anything", 300)
     with structlog.testing.capture_logs() as logs:
@@ -465,14 +516,17 @@ async def _pending(redis: FakeRedis, key: Ed25519PrivateKey, args: dict | None =
 
 
 @pytest.mark.asyncio
-async def test_approver_refuses_summary_hash_swap(key):
+@pytest.mark.parametrize(
+    "field,fn", [("args_hash", _canonical_args_hash), ("args_sha256", _canonical_args_digest)]
+)
+async def test_approver_refuses_summary_hash_swap(key, field, fn):
     """The agent writes a pending record pairing harmless arguments with the hash of
-    harmful ones. The approver recomputes the hash and refuses to sign."""
+    harmful ones. The approver recomputes both hashes and refuses to sign."""
     redis = FakeRedis()
     aid = await _pending(redis, key)
     k = f"scoped-mcp:{AGENT}:hitl:{aid}"
     rec = json.loads(redis.store[k])
-    rec["args_hash"] = _canonical_args_hash({**ARGS, "repo": "org/other"})
+    rec[field] = fn({**ARGS, "repo": "org/other"})
     redis.store[k] = json.dumps(rec)
 
     rc = await hitl_approver.run(
@@ -570,7 +624,28 @@ def test_render_escapes_terminal_control_and_bidi():
     out = hitl_approver.render_request(rec)
     assert "\x1b" not in out and "\r" not in out and "‮" not in out
     assert "rm -rf /" in out  # shown, not hidden
-    assert "s3cret" not in out  # sensitive key redacted
+    assert "s3cret" not in out  # sensitive key hidden
+
+
+def test_render_shows_what_the_audit_sanitiser_would_redact():
+    """A commit SHA or a long hex id is exactly what an operator approving a merge or
+    reset needs to read. Pattern redaction would hide it; the approver must not."""
+    sha = "a3f9c2e1" * 5
+    rec = {"agent_id": AGENT, "tool": TOOL, "approval_id": "a.b", "arguments": {"ref": sha}}
+    assert sha in hitl_approver.render_request(rec)
+
+
+def test_render_hidden_values_are_distinguishable():
+    """A value under a secret-looking key stays off screen, but as length + digest, so
+    the operator can tell two requests apart and cannot be shown one while signing another."""
+
+    def show(v):
+        rec = {"agent_id": AGENT, "tool": TOOL, "approval_id": "a.b", "arguments": {"password": v}}
+        return hitl_approver.render_request(rec)
+
+    a, b = show("hunter2"), show("rm -rf / #")
+    assert "hunter2" not in a and "rm -rf" not in b
+    assert "<hidden: " in a and a != b
 
 
 def test_render_does_not_truncate():

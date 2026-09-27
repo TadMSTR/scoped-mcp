@@ -12,10 +12,13 @@ agent cannot read, so writing the key forges nothing.
 
 Statement (canonical JSON, signed with Ed25519)::
 
-    {v, agent_id, approval_id, tool, args_hash, issued_at, expires_at}
+    {v, agent_id, approval_id, tool, args_sha256, issued_at, expires_at}
 
-``args_hash`` is ``hitl._canonical_args_hash`` — the one hash function; there is
-no second. Stored value::
+``args_sha256`` is ``hitl._canonical_args_digest`` — the FULL SHA-256 of the
+canonical arguments. The 16-hex ``args_hash`` that names the state key is a
+prefix of the same digest and is never what a signature binds: the requesting
+agent picks both the arguments it shows and the ones it runs, so 64 bits would
+let it birthday-search a colliding pair (~2^32 work). Stored value::
 
     {"statement": {...}, "sig": "<base64>", "approval_id": "<id>"}
 
@@ -53,7 +56,7 @@ CLOCK_SKEW_SECONDS = 5
 
 _DOMAIN = b"scoped-mcp/hitl-approval/v1\n"
 
-_FIELDS = ("v", "agent_id", "approval_id", "tool", "args_hash", "issued_at", "expires_at")
+_FIELDS = ("v", "agent_id", "approval_id", "tool", "args_sha256", "issued_at", "expires_at")
 
 # Rejection reason classes. Logged as-is; never accompanied by the values that
 # failed, so a rejection log line cannot be used to learn what would pass.
@@ -96,19 +99,21 @@ def build_statement(
     agent_id: str,
     approval_id: str,
     tool: str,
-    args_hash: str,
+    args_sha256: str,
     lifetime_seconds: int = MAX_LIFETIME_SECONDS,
     now: float | None = None,
 ) -> dict[str, Any]:
     if not 0 < lifetime_seconds <= MAX_LIFETIME_SECONDS:
         raise ValueError(f"lifetime_seconds must be in 1..{MAX_LIFETIME_SECONDS}")
+    if len(args_sha256) != 64:
+        raise ValueError("args_sha256 must be a full 64-hex SHA-256 digest")
     issued = int(time.time() if now is None else now)
     return {
         "v": STATEMENT_VERSION,
         "agent_id": agent_id,
         "approval_id": approval_id,
         "tool": tool,
-        "args_hash": args_hash,
+        "args_sha256": args_sha256,
         "issued_at": issued,
         "expires_at": issued + lifetime_seconds,
     }
@@ -141,7 +146,7 @@ def verify_statement(
     public_key: Any,
     agent_id: str,
     tool: str,
-    args_hash: str,
+    args_sha256: str,
     now: float | None = None,
 ) -> VerifyResult:
     """Check a stored pre-approval value against the call it is meant to authorise.
@@ -177,7 +182,7 @@ def verify_statement(
         return VerifyResult(False, REASON_AGENT_MISMATCH)
     if statement["tool"] != tool:
         return VerifyResult(False, REASON_TOOL_MISMATCH)
-    if statement["args_hash"] != args_hash:
+    if statement["args_sha256"] != args_sha256:
         return VerifyResult(False, REASON_ARGS_MISMATCH)
     if expires - issued > MAX_LIFETIME_SECONDS:
         return VerifyResult(False, REASON_LIFETIME_TOO_LONG)

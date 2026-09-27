@@ -786,11 +786,11 @@ guarantees. All are off by default; enable per-agent in the manifest:
   is a pre-approval key that *exists*; its value is never checked, so anything
   that can write the state backend, read `SCOPED_MCP_HITL_TOKEN` or run the CLI
   can approve. With `hitl.signing.mode: enforce` the value must be an Ed25519
-  statement over `(agent, approval id, tool, argument hash, expiry ≤ 120 s)`,
+  statement over `(agent, approval id, tool, full SHA-256 of the arguments, expiry ≤ 120 s)`,
   signed by an approver key the agent cannot read and verified against the public
   key named in the manifest. The operator signs with **`scoped-mcp-approve <id>`**
   in a terminal: it recomputes the argument hash from the stored arguments,
-  shows them untruncated and terminal-escaped, and asks `y/N`. Under `enforce`,
+  shows them untruncated, unredacted except secret-keyed values, and terminal-escaped, and asks `y/N`. Under `enforce`,
   `scoped_mcp_hitl_confirm` and `POST /hitl/approve` are not registered and
   `scoped-mcp hitl approve` refuses. `observe` verifies and logs but still
   accepts, for rollout; `off` is the default and today's behaviour. See

@@ -260,7 +260,7 @@ hitl:
 Under `signing.mode: enforce`:
 
 - The pre-approval value must be an Ed25519 statement over
-  `{v, agent_id, approval_id, tool, args_hash, issued_at, expires_at}`, signed by the key
+  `{v, agent_id, approval_id, tool, args_sha256, issued_at, expires_at}`, signed by the key
   whose public half is at `public_key_path`, for **this** agent, tool and arguments, valid
   for at most 120 s, and not already used by this process. Anything else is logged with a
   reason class (`malformed`, `bad_signature`, `bad_version`, `agent_mismatch`,
@@ -283,8 +283,9 @@ scoped-mcp-approve <approval_id>          # shows agent, tool and arguments; ask
 scoped-mcp-approve --deny <approval_id>
 ```
 
-It recomputes `args_hash` from the stored arguments and refuses on a mismatch, shows the
-arguments with secrets redacted but **nothing truncated**, with control and non-ASCII
+It recomputes the argument digest from the stored arguments and refuses on a mismatch,
+shows the arguments **untruncated and without pattern redaction** (a value under a
+secret-looking key becomes its length and a digest prefix), with control and non-ASCII
 characters escaped, reads the answer from `/dev/tty`, and refuses to run without a terminal.
 Its configuration — `~/.config/scoped-mcp/approver.yml` of the running account, resolved
 from the password database rather than `$HOME` — holds `state_url` and `private_key_path`.

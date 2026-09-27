@@ -27,8 +27,8 @@ InfluxDB bucket names and other namespaced resources are validated against a per
 
 **HITL self-approval (with `hitl.signing.mode: enforce`)**
 A gated call runs only if the pre-approval token carries an Ed25519 statement signed by an
-approver key the agent cannot read, bound to this agent, tool, argument hash and approval
-id, valid for at most 120 s, and not already used. Writing the state backend, reading
+approver key the agent cannot read, bound to this agent, tool, full SHA-256 of the canonical
+arguments and approval id, valid for at most 120 s, and not already used. Writing the state backend, reading
 `SCOPED_MCP_HITL_TOKEN`, running `scoped-mcp hitl approve`, or calling
 `scoped_mcp_hitl_confirm` produces nothing the proxy accepts. The approver recomputes the
 argument hash from the stored arguments before it shows them, so a pending record that

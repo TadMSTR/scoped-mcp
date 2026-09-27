@@ -108,12 +108,16 @@ def _generate_approval_id(agent_id: str) -> str:
     return f"{agent_id}.{suffix}"
 
 
-def _canonical_args_hash(kwargs: dict[str, Any]) -> str:
-    """Stable 16-char hex hash of tool call arguments for pre-approval binding.
+_UNHASHABLE = "unhashable"
 
-    Binds the pre-approval token to the exact arguments the operator saw, so
-    approving ``run_command(command="ls")`` cannot authorize a later call with
-    different arguments during the 60-second TTL window (H-01).
+
+def _canonical_args_digest(kwargs: dict[str, Any]) -> str:
+    """Full SHA-256 (64 hex chars) of the canonical JSON of tool call arguments.
+
+    This is the one hash function; ``_canonical_args_hash`` is its prefix. The full
+    digest is what a signed approval binds to: the requesting agent chooses both the
+    arguments it shows and the ones it runs, so a truncated hash would let it search
+    for two argument sets that collide (a birthday search on 64 bits is ~2^32 work).
 
     Uses sorted keys for stability and ``default=str`` to handle non-JSON-serializable
     values deterministically. Fails to "unhashable" on serialisation error — callers
@@ -121,9 +125,27 @@ def _canonical_args_hash(kwargs: dict[str, Any]) -> str:
     """
     try:
         canonical = json.dumps(kwargs, sort_keys=True, default=str)
-        return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+        return hashlib.sha256(canonical.encode()).hexdigest()
     except Exception:
-        return "unhashable"
+        return _UNHASHABLE
+
+
+def _short_args_hash(digest: str) -> str:
+    return digest if digest == _UNHASHABLE else digest[:16]
+
+
+def _canonical_args_hash(kwargs: dict[str, Any]) -> str:
+    """Stable 16-char hex hash of tool call arguments for pre-approval binding.
+
+    Binds the pre-approval token to the exact arguments the operator saw, so
+    approving ``run_command(command="ls")`` cannot authorize a later call with
+    different arguments during the 60-second TTL window (H-01).
+
+    Only a state-key selector. It is NOT collision-resistant against an agent that
+    chooses both argument sets; anything cryptographic binds the full
+    ``_canonical_args_digest`` instead.
+    """
+    return _short_args_hash(_canonical_args_digest(kwargs))
 
 
 def _canonical_arguments(kwargs: dict[str, Any]) -> Any:
@@ -232,7 +254,7 @@ class HitlMiddleware:
         return _SHADOW_RESPONSE
 
     def _accept_preapproval(
-        self, tool_name: str, args_hash: str, raw: str
+        self, tool_name: str, args_sha256: str, raw: str
     ) -> tuple[bool, str | None]:
         """Decide whether a claimed pre-approval token authorises this call.
 
@@ -248,7 +270,7 @@ class HitlMiddleware:
             public_key=self._public_key,
             agent_id=self._agent_id,
             tool=tool_name,
-            args_hash=args_hash,
+            args_sha256=args_sha256,
         )
         reason = result.reason
         if result.ok and result.approval_id is not None:
@@ -287,13 +309,14 @@ class HitlMiddleware:
         # approving a previous rejected call for this tool.
         # The token is bound to (tool_name, args_hash) so approving one call
         # cannot authorize a different call with different arguments (H-01).
-        args_hash = _canonical_args_hash(kwargs)
+        args_digest = _canonical_args_digest(kwargs)
+        args_hash = _short_args_hash(args_digest)
         pre_key = _preapproval_key(tool_name, args_hash)
         # Claim atomically (GETDEL) — one-time use, and no window in which a
         # concurrent retry can read the same token before it is deleted.
         preapproved = await self._state.get_delete(pre_key)
         accepted, signed_approval_id = (
-            self._accept_preapproval(tool_name, args_hash, preapproved)
+            self._accept_preapproval(tool_name, args_digest, preapproved)
             if preapproved is not None
             else (False, None)
         )
@@ -364,12 +387,13 @@ class HitlMiddleware:
             # The approver must be able to check what it signs. The agent can
             # write this record too, so a summary beside a hash would let it pair
             # a harmless summary with the hash of harmful arguments. The approver
-            # recomputes args_hash from these canonical arguments, refuses on a
+            # recomputes the digest from these canonical arguments, refuses on a
             # mismatch, and displays what it actually hashed. The values are
             # already in the calling agent's context, so storing them exposes
             # nothing new to that agent. Only stored when signing is on, so
             # deployments with signing off keep today's record exactly.
             record["arguments"] = _canonical_arguments(kwargs)
+            record["args_sha256"] = args_digest
         payload = json.dumps(record)
 
         # Mint the one-time approval token (OTP). It is written to the SAME
