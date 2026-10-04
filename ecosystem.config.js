@@ -53,6 +53,9 @@ const AGENTS = {
   jobsearch: 8476,
   "doc-health": 8477,
   "memory-sync": 8478,
+  // fleet: every host except forge (fleet-argus-2026-10). 8479 is taken by the
+  // systemd steward broker; 8480 was free 2026-10-04.
+  fleet: 8480,
 };
 
 function buildApp(agentType, httpPort) {
