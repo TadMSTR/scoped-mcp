@@ -44,6 +44,28 @@ def test_delete_in_read_mode_blocked(db_module: SqliteModule) -> None:
         db_module._validate_sql("DELETE FROM my_table WHERE id = 1", read_only=True)
 
 
+def test_with_select_passes_in_read_mode(db_module: SqliteModule) -> None:
+    db_module._validate_sql("WITH x AS (SELECT 1) SELECT * FROM x", read_only=True)
+
+
+# A write that opens with a read-looking CTE. The guard relies on sqlglot returning the
+# write's node type at the top, not a Select/With; a parser change that did otherwise
+# would turn read-only mode into read-write. Re-run on every sqlglot bump.
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "WITH x AS (SELECT 1) DELETE FROM my_table",
+        "WITH x AS (SELECT 1) INSERT INTO my_table SELECT * FROM x",
+        "WITH x AS (SELECT 1) UPDATE my_table SET col = 1",
+        "INSERT OR REPLACE INTO my_table (col) VALUES ('x')",
+        "DELETE FROM my_table RETURNING *",
+    ],
+)
+def test_write_disguised_as_read_blocked(db_module: SqliteModule, sql: str) -> None:
+    with pytest.raises(ScopeViolation, match="Read-only mode"):
+        db_module._validate_sql(sql, read_only=True)
+
+
 # ── SQL validation — write mode ───────────────────────────────────────────────
 
 
@@ -87,6 +109,29 @@ def test_multi_statement_blocked(db_module: SqliteModule) -> None:
             "SELECT * FROM t1; DROP TABLE t1",
             read_only=False,
         )
+
+
+# The separator hidden behind a comment or a string must still split. A parser that
+# swallowed the second statement into the first would pass the batch as one Select.
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT 1 /* ; */; DROP TABLE t1",
+        "SELECT ';'; DROP TABLE t1",
+        "SELECT 1 -- x\n; DELETE FROM t1",
+        "BEGIN; DELETE FROM t1; COMMIT",
+    ],
+)
+@pytest.mark.parametrize("read_only", [True, False])
+def test_multi_statement_hidden_separator_blocked(
+    db_module: SqliteModule, sql: str, read_only: bool
+) -> None:
+    with pytest.raises(ScopeViolation, match="Multi-statement"):
+        db_module._validate_sql(sql, read_only=read_only)
+
+
+def test_trailing_semicolon_is_one_statement(db_module: SqliteModule) -> None:
+    db_module._validate_sql("SELECT 1;", read_only=True)
 
 
 # ── create_table input validation (M7) ───────────────────────────────────────
