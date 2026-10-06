@@ -7,7 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.17.1] — 2026-10-06
+
+Dependency release. No application code changed.
+
 ### Changed
+- **sqlglot 30.19.0 → 30.21.0** (#102). sqlglot is the parser behind the `sqlite` module's
+  read-only and single-statement guards, so the bump went in only after
+  the guard's behaviour was pinned (#104). The new tests cover writes behind a
+  read-looking CTE, `INSERT OR REPLACE`, `DELETE … RETURNING`, and `;` hidden after a
+  comment or string. They pass on both versions, and two mutants confirm they can fail. A
+  30-statement differential parse is byte-identical across the two versions.
+- **cryptography 50.0.1 → 50.0.2** (#103), a core dependency: it verifies the Ed25519
+  signature on every HITL approval (`hitl_signing.py`).
+- **OpenTelemetry 1.44.0 → 1.45.0** (semantic-conventions 0.65b0 → 0.66b0), one group PR
+  (#100). ruff 0.16.8 → 0.16.10 (dev only).
 - **Dependabot `uv`: `opentelemetry` and `dev-tools` groups.** Every per-package OTel PR
   already moved the whole family in `uv.lock`, so they were one change filed several times.
   `dev-dependencies` never caught the tools because `dev` is an optional-dependencies extra,
