@@ -1788,7 +1788,7 @@ wheels = [
 
 [[package]]
 name = "scoped-mcp"
-version = "1.17.0"
+version = "1.17.1"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
