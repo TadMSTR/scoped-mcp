@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Dependabot `uv`: `opentelemetry` and `dev-tools` groups.** Every per-package OTel PR
+  already moved the whole family in `uv.lock`, so they were one change filed several times.
+  `dev-dependencies` never caught the tools because `dev` is an optional-dependencies extra,
+  not a `[dependency-groups]` table, so ruff arrived on its own. Both groups sit above
+  `dev-dependencies`, since a dependency joins the first group it matches (vikunja#1031).
+
+### Security
+- **pyjwt 2.13.0 → 2.15.1 and urllib3 2.7.0 → 2.8.0 in `uv.lock`** (PYSEC-2026-4140..4152,
+  CVE-2026-102275; PYSEC-2026-4175/4176/4177). Both are transitive (via `mcp` and `redis`, and
+  via `requests`), so no Dependabot PR touched them, and every PR failed `Dependency audit` on
+  what it inherited from `main`. pyjwt is not reached by scoped-mcp's own code: the bearer
+  check is a static constant-time compare, and the only `jwt.decode` in the tree is redis's
+  `JWToken`, which nothing constructs (vikunja#1017).
+
 ## [1.17.0] — 2026-09-27
 
 ### Security

@@ -28,7 +28,22 @@ updates:
     # Dev dependencies batch into one PR. They update often and none of them ship in the
     # published wheel, so one PR per bump would drown the runtime updates that actually need
     # reading.
+    #
+    # `dev-dependencies` alone does not batch the tools. Dependabot's "development" type is
+    # uv's `[dependency-groups]` and `[build-system]`, NOT a `[project.optional-dependencies]`
+    # extra, which is what `dev` is here, so ruff arrived as its own PR. `dev-tools` names the
+    # extra's members (scribe's working pattern, vikunja#964). Add a tool here when you add it
+    # to the extra.
+    #
+    # `opentelemetry` exists because the family moves as one: every per-package OTel PR
+    # carried the whole family in uv.lock, so N PRs were one change (vikunja#1031). The
+    # pattern covers the 0.x contrib packages too. A dependency joins the FIRST group it
+    # matches, so both stay above `dev-dependencies`.
     groups:
+      opentelemetry:
+        patterns: ["opentelemetry-*"]
+      dev-tools:
+        patterns: ["ruff", "pytest", "pytest-*"]
       dev-dependencies:
         dependency-type: "development"
     ignore:
