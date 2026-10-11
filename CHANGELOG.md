@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.17.2] — 2026-10-11
+
 ### Fixed
 - **`mcp_proxy` no longer drops image, audio and resource blocks from a result that also
   has text** (vikunja#1070). It joined the text blocks and returned only that string, so
@@ -20,10 +22,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a text block.
 
 ### Security
-- **`response_filters` now scan the text of MCP content blocks** (`TextContent`, and text
-  `EmbeddedResource`s). The filter only walked `str`, `dict` and `list`, so a content list
-  from the fix above would have taken its text past every `block`/`redact` rule. Image and
-  audio data and resource blobs are binary and are still not scanned.
+- **`response_filters` scan every string on an MCP content block.** The filter only walked
+  `str`, `dict` and `list`, so a content list from the fix above would have carried text past
+  every `block`/`redact` rule. Each block (text, image, audio, resource link, embedded
+  resource) is now dumped, filtered as a dict, and re-validated into its type. That covers
+  `text`, `_meta`, extra fields, URIs and resource-link `name`/`title`/`description`.
+  Image/audio `data` and resource `blob`s are taken out of the string pass, so a pattern
+  can never rewrite base64. If redaction leaves a block the model rejects (for example a
+  URI redacted whole), the response is blocked rather than forwarded unfiltered (audit
+  F-01).
+- **Text-typed blobs are decoded and scanned.** An embedded `BlobResourceContents` whose
+  `mimeType` is `text/*`, JSON, XML, `+json`/`+xml` or absent is base64-decoded and checked
+  with each rule's `decode` steps. A `block` or `redact` match blocks the response, since
+  redacting inside base64 means nothing. A blob too large to decode is logged as
+  `response_filter_blob_unscanned` (audit F-02).
+- **Structured output from model-typed upstream tools is filtered.** The FastMCP client
+  hydrates such output into a generated class, which the filter returned unscanned and
+  without logging. So for those tools the credential rule did nothing. This was the case
+  before this release too. The proxy now converts `result.data` to plain JSON types first
+  (audit F-03).
+- Deferred: no size cap on forwarded binary blocks (vikunja#1071). Accepted: images are a
+  prompt-injection channel that text filters cannot screen. Both are marked in
+  `_unwrap_result`.
 
 ## [1.17.1] — 2026-10-06
 
