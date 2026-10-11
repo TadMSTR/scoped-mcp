@@ -237,3 +237,74 @@ def test_binary_typed_blob_is_neither_scanned_nor_rewritten() -> None:
     )
     result = rf.filter_response([block], "t", "agent-1")
     assert result[0].resource.blob == blob
+
+
+# ── Round 2 (audit R2-01, R2-02) ──────────────────────────────────────────────
+
+_R2_TOKEN = "ghp_" + "B" * 36
+_R2_RULE = {
+    "name": "response-credential-leak",
+    "pattern": "ghp_[A-Za-z0-9]{36}",
+    "action": "redact",
+    "decode": ["base64"],
+}
+
+
+def _b64(text: str) -> str:
+    import base64
+
+    return base64.b64encode(text.encode()).decode()
+
+
+def test_redact_decoded_only_match_replaces_the_whole_value() -> None:
+    """R2-01: the raw string has nothing to substitute, so it used to go out unchanged."""
+    rf = _make_filter([_R2_RULE])
+    encoded = _b64(f"x {_R2_TOKEN}")
+    assert rf.filter_response(encoded, "t", "agent-1") == "[REDACTED]"
+    assert rf.filter_response({"k": encoded}, "t", "agent-1") == {"k": "[REDACTED]"}
+    block = rf.filter_response([TextContent(type="text", text=encoded)], "t", "agent-1")[0]
+    assert block.text == "[REDACTED]"
+
+
+def test_redact_raw_match_still_substitutes_in_place() -> None:
+    rf = _make_filter([_R2_RULE])
+    assert rf.filter_response(f"a {_R2_TOKEN} b", "t", "agent-1") == "a [REDACTED] b"
+
+
+def test_redact_no_match_leaves_base64_alone() -> None:
+    rf = _make_filter([_R2_RULE])
+    encoded = _b64("nothing secret here")
+    assert rf.filter_response(encoded, "t", "agent-1") == encoded
+
+
+def _text_blob(blob: str) -> EmbeddedResource:
+    from mcp.types import BlobResourceContents
+
+    return EmbeddedResource(
+        type="resource",
+        resource=BlobResourceContents(uri="file:///x.log", blob=blob, mimeType="text/plain"),
+    )
+
+
+def test_text_blob_over_64k_is_scanned() -> None:
+    """R2-02: a 70 KB text blob used to pass unscanned under the shared 64 KiB cap."""
+    rf = _make_filter([_R2_RULE])
+    with pytest.raises(ConfigError, match="blocked by response filter policy"):
+        rf.filter_response([_text_blob(_b64("a" * 70_000 + _R2_TOKEN))], "t", "agent-1")
+
+
+def test_clean_text_blob_over_64k_passes() -> None:
+    rf = _make_filter([_R2_RULE])
+    blob = _b64("a" * 70_000)
+    assert rf.filter_response([_text_blob(blob)], "t", "agent-1")[0].resource.blob == blob
+
+
+@pytest.mark.parametrize(
+    "blob",
+    [_b64("a" * (4 * 1024 * 1024 + 1)), "not base64 at all!"],
+    ids=["over-text-blob-cap", "malformed"],
+)
+def test_unscannable_text_blob_blocks(blob: str) -> None:
+    rf = _make_filter([_R2_RULE])
+    with pytest.raises(ConfigError, match="blocked by response filter policy"):
+        rf.filter_response([_text_blob(blob)], "t", "agent-1")

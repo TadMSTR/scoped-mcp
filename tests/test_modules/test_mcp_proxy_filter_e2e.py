@@ -23,6 +23,7 @@ from mcp.types import (
     ImageContent,
     ResourceLink,
     TextContent,
+    TextResourceContents,
 )
 from pydantic import BaseModel
 
@@ -47,6 +48,8 @@ _CREDENTIAL_RULE = {
 _PNG_WITH_TOKEN = base64.b64encode(
     b"\x89PNG\r\n\x1a\n" + TOKEN.encode() + bytes(range(256))
 ).decode()
+
+_B64_TOKEN = base64.b64encode(f"token {TOKEN}".encode()).decode()
 
 
 class Secret(BaseModel):
@@ -90,6 +93,23 @@ def _upstream() -> FastMCP:
                         uri="file:///report.txt",
                         mimeType="text/plain",
                         blob=base64.b64encode(f"token {TOKEN}".encode()).decode(),
+                    ),
+                ),
+            ]
+        )
+
+    @up.tool
+    def encoded() -> ToolResult:
+        # R2-01: a base64-encoded credential, as plain text and as a resource carrying both
+        # `blob` and `text` (mcp.types parses that as TextResourceContents, blob as an extra).
+        return ToolResult(
+            content=[
+                ImageContent(type="image", data=_PNG_WITH_TOKEN, mimeType="image/png"),
+                TextContent(type="text", text=_B64_TOKEN),
+                EmbeddedResource(
+                    type="resource",
+                    resource=TextResourceContents(
+                        uri="file:///dual.txt", mimeType="text/plain", text="", blob=_B64_TOKEN
                     ),
                 ),
             ]
@@ -175,7 +195,18 @@ def test_model_typed_structured_output_is_redacted():
     assert "model-typed output" in _wire(result)
 
 
-@pytest.mark.parametrize("tool", ["mixed", "text_blob", "typed"])
+def test_base64_encoded_credential_is_redacted_not_just_logged():
+    """R2-01: decode-only matches were logged as redacted and forwarded unchanged."""
+    result = _call("encoded")
+    assert not result.is_error
+    assert [type(b) for b in result.content] == [ImageContent, TextContent, EmbeddedResource]
+    assert result.content[1].text == "[REDACTED]"
+    assert result.content[2].resource.model_extra["blob"] == "[REDACTED]"
+    assert _B64_TOKEN not in _wire(result)
+    assert result.content[0].data == _PNG_WITH_TOKEN
+
+
+@pytest.mark.parametrize("tool", ["mixed", "text_blob", "typed", "encoded"])
 def test_filter_off_forwards_unchanged(tool):
     """Control: with no filter the token does reach the agent, so the tests above can fail."""
     up = _upstream()
@@ -198,7 +229,7 @@ def test_filter_off_forwards_unchanged(tool):
 
     assert not result.is_error
     wire = _wire(result).replace(_PNG_WITH_TOKEN, "")
-    if tool == "text_blob":
-        assert base64.b64encode(f"token {TOKEN}".encode()).decode() in wire
+    if tool in ("text_blob", "encoded"):
+        assert _B64_TOKEN in wire
     else:
         assert TOKEN in wire

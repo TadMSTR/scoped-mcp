@@ -34,8 +34,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Text-typed blobs are decoded and scanned.** An embedded `BlobResourceContents` whose
   `mimeType` is `text/*`, JSON, XML, `+json`/`+xml` or absent is base64-decoded and checked
   with each rule's `decode` steps. A `block` or `redact` match blocks the response, since
-  redacting inside base64 means nothing. A blob too large to decode is logged as
-  `response_filter_blob_unscanned` (audit F-02).
+  redacting inside base64 means nothing. Text blobs have their own 4 MiB decode cap, not
+  the 64 KiB cap used for nested decode candidates. A text blob over that cap, or one that
+  is not valid base64, is blocked rather than forwarded unscanned (audit F-02, R2-02).
+  Blobs labelled as binary (`application/octet-stream`, `image/*`, ...) are still not scanned,
+  even if they hold text.
+- **`redact` with `decode` now redacts.** When only a decoded candidate matched (for
+  example a base64-encoded credential), the substitution ran on the raw string, which did
+  not contain the match. The value went out unchanged and `response_filter_redacted` was
+  still logged. This has been the case since `decode` was added. Such a value is now
+  replaced whole with `[REDACTED]`. It also covers a resource that carries both `blob` and
+  `text`, which `mcp.types` parses as a text resource (audit R2-01).
 - **Structured output from model-typed upstream tools is filtered.** The FastMCP client
   hydrates such output into a generated class, which the filter returned unscanned and
   without logging. So for those tools the credential rule did nothing. This was the case
@@ -43,7 +52,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (audit F-03).
 - Deferred: no size cap on forwarded binary blocks (vikunja#1071). Accepted: images are a
   prompt-injection channel that text filters cannot screen. Both are marked in
-  `_unwrap_result`.
+  `_unwrap_result`. Also accepted: dict keys and extra-field names are not scanned, only
+  values (audit R2-03).
 
 ## [1.17.1] — 2026-10-06
 
