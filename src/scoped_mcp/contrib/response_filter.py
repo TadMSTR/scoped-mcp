@@ -40,7 +40,15 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 import structlog
-from mcp.types import EmbeddedResource, TextContent, TextResourceContents
+from mcp.types import (
+    AudioContent,
+    BlobResourceContents,
+    EmbeddedResource,
+    ImageContent,
+    ResourceLink,
+    TextContent,
+)
+from pydantic import ValidationError
 
 logger = structlog.get_logger("audit")
 
@@ -174,6 +182,100 @@ def _apply_rule_to_string(
     return value
 
 
+# MCP content blocks. mcp_proxy returns them unchanged when a result carries an image or
+# other non-text block (vikunja#1070), so every string on them must be scanned, not just
+# ``.text``: ``_meta``, extra fields (all of these models are ``extra="allow"``), URIs and
+# ResourceLink names/titles/descriptions reach the agent too.
+_CONTENT_BLOCK_TYPES = (TextContent, ImageContent, AudioContent, ResourceLink, EmbeddedResource)
+
+_TEXT_MIME_EXACT = frozenset({"application/json", "application/xml"})
+
+
+def _is_text_mime(mime: str | None) -> bool:
+    """True for blobs that may hold text: text/*, JSON, XML, or no declared type."""
+    if not mime:
+        return True
+    base = mime.split(";", 1)[0].strip().lower()
+    return base.startswith("text/") or base in _TEXT_MIME_EXACT or base.endswith(("+json", "+xml"))
+
+
+def _block_response(rule_name: str, tool_name: str, agent_id: str) -> None:
+    logger.warning(
+        "response_filter_blocked",
+        agent_id=agent_id,
+        tool=tool_name,
+        filter_name=rule_name,
+    )
+    from ..exceptions import ConfigError
+
+    raise ConfigError(f"tool response from {tool_name!r} blocked by response filter policy")
+
+
+def _scan_text_blob(
+    blob: str,
+    rules: list[_CompiledRule],
+    tool_name: str,
+    agent_id: str,
+) -> None:
+    """Scan a text-typed base64 blob. Any ``block`` or ``redact`` match blocks the response.
+
+    Redacting inside base64 is not meaningful, so ``redact`` escalates to ``block`` here.
+    """
+    decoded = _b64_decode(blob, urlsafe=False)
+    if decoded is None:
+        # Over the decode cap or not valid base64 — it cannot be scanned. Say so.
+        logger.warning("response_filter_blob_unscanned", agent_id=agent_id, tool=tool_name)
+        return
+    for rule in rules:
+        for candidate in _candidate_strings(decoded, rule.decode):
+            if rule.pattern.search(candidate) is None:
+                continue
+            if rule.action == "warn":
+                logger.warning(
+                    "response_filter_warning",
+                    agent_id=agent_id,
+                    tool=tool_name,
+                    filter_name=rule.name,
+                )
+                break
+            _block_response(rule.name, tool_name, agent_id)
+
+
+def _filter_content_block(
+    block: Any,
+    rules: list[_CompiledRule],
+    tool_name: str,
+    agent_id: str,
+) -> Any:
+    """Filter every string on an MCP content block, then re-validate it into its type.
+
+    Binary payloads (image/audio ``data``, resource ``blob``) are lifted out before the
+    string pass so a pattern can never rewrite base64. Text-typed blobs are scanned
+    decoded instead (``_scan_text_blob``). If redaction leaves a field the model rejects
+    (e.g. a URI redacted whole), the response is blocked rather than forwarded unfiltered.
+    """
+    dumped = block.model_dump(by_alias=True, mode="json", exclude_unset=True)
+    payload_holder: dict[str, Any] | None = None
+    payload_key = ""
+    if isinstance(block, ImageContent | AudioContent):
+        payload_holder, payload_key = dumped, "data"
+    elif isinstance(block, EmbeddedResource) and isinstance(block.resource, BlobResourceContents):
+        if _is_text_mime(block.resource.mimeType):
+            _scan_text_blob(block.resource.blob, rules, tool_name, agent_id)
+        payload_holder, payload_key = dumped["resource"], "blob"
+    payload = payload_holder.pop(payload_key) if payload_holder is not None else None
+
+    filtered = _filter_value(dumped, rules, tool_name, agent_id)
+
+    if payload_holder is not None:
+        target = filtered if payload_holder is dumped else filtered["resource"]
+        target[payload_key] = payload
+    try:
+        return type(block).model_validate(filtered)
+    except ValidationError:
+        _block_response("content-block-revalidation", tool_name, agent_id)
+
+
 def _filter_value(
     value: Any,
     rules: list[_CompiledRule],
@@ -182,10 +284,10 @@ def _filter_value(
 ) -> Any:
     """Recursively filter string values in a response tree.
 
-    Only string leaves are tested, plus the text of MCP ``TextContent`` blocks and
-    text ``EmbeddedResource`` blocks — dict keys, numeric values, booleans, and
+    Only string leaves are tested — dict keys, numeric values, booleans, and
     None pass through unchanged. This prevents redaction from corrupting
-    serialised JSON or structured response objects.
+    serialised JSON or structured response objects. MCP content blocks are
+    dumped, filtered as a dict, and re-validated (``_filter_content_block``).
     """
     if isinstance(value, str):
         for rule in rules:
@@ -195,18 +297,8 @@ def _filter_value(
         return {k: _filter_value(v, rules, tool_name, agent_id) for k, v in value.items()}
     if isinstance(value, list):
         return [_filter_value(item, rules, tool_name, agent_id) for item in value]
-    # MCP content blocks: mcp_proxy returns them unchanged when a result carries an image
-    # or other non-text block (vikunja#1070), so the text inside them must be scanned too.
-    # Binary payloads (image/audio data, resource blobs) are not text and are not scanned.
-    if isinstance(value, TextContent):
-        return value.model_copy(
-            update={"text": _filter_value(value.text, rules, tool_name, agent_id)}
-        )
-    if isinstance(value, EmbeddedResource) and isinstance(value.resource, TextResourceContents):
-        resource = value.resource.model_copy(
-            update={"text": _filter_value(value.resource.text, rules, tool_name, agent_id)}
-        )
-        return value.model_copy(update={"resource": resource})
+    if isinstance(value, _CONTENT_BLOCK_TYPES):
+        return _filter_content_block(value, rules, tool_name, agent_id)
     return value
 
 

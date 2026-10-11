@@ -209,3 +209,31 @@ def test_redact_inside_embedded_text_resource() -> None:
     result = rf.filter_response([block], "t", "agent-1")
     assert result[0].resource.text == "a [REDACTED]"
     assert block.resource.text == "a secret"  # original not mutated
+
+
+def test_block_when_redaction_leaves_an_invalid_block() -> None:
+    """A URI redacted whole no longer validates: block rather than forward it unfiltered."""
+    from mcp.types import ResourceLink
+
+    rf = _make_filter([{"name": "r1", "pattern": "^.*$", "action": "redact"}])
+    link = ResourceLink(type="resource_link", uri="https://x/y", name="n")
+    with pytest.raises(ConfigError, match="blocked by response filter policy"):
+        rf.filter_response([link], "t", "agent-1")
+
+
+def test_binary_typed_blob_is_neither_scanned_nor_rewritten() -> None:
+    import base64
+
+    from mcp.types import BlobResourceContents
+
+    token = "ghp_" + "A" * 36
+    blob = base64.b64encode(token.encode()).decode()
+    rf = _make_filter(
+        [{"name": "r1", "pattern": "ghp_[A-Za-z0-9]{36}", "action": "redact", "decode": ["base64"]}]
+    )
+    block = EmbeddedResource(
+        type="resource",
+        resource=BlobResourceContents(uri="file:///x.png", blob=blob, mimeType="image/png"),
+    )
+    result = rf.filter_response([block], "t", "agent-1")
+    assert result[0].resource.blob == blob
