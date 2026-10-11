@@ -50,6 +50,10 @@ _PNG_WITH_TOKEN = base64.b64encode(
 ).decode()
 
 _B64_TOKEN = base64.b64encode(f"token {TOKEN}".encode()).decode()
+_DUAL_SMALL = _B64_TOKEN
+# Decodes to ~70 KB: over the 64 KiB nested-decode cap, under the 4 MiB text-blob cap.
+_DUAL_LARGE = base64.b64encode(("a" * 70_000 + TOKEN).encode()).decode()
+_DUAL_LARGE_CLEAN = base64.b64encode(("a" * 70_000).encode()).decode()
 
 
 class Secret(BaseModel):
@@ -100,20 +104,40 @@ def _upstream() -> FastMCP:
 
     @up.tool
     def encoded() -> ToolResult:
-        # R2-01: a base64-encoded credential, as plain text and as a resource carrying both
-        # `blob` and `text` (mcp.types parses that as TextResourceContents, blob as an extra).
+        # R2-01: a base64-encoded credential as plain text.
         return ToolResult(
             content=[
                 ImageContent(type="image", data=_PNG_WITH_TOKEN, mimeType="image/png"),
                 TextContent(type="text", text=_B64_TOKEN),
+            ]
+        )
+
+    def _dual(blob: str) -> ToolResult:
+        # A resource carrying both `blob` and `text` is not valid MCP; mcp.types parses it as
+        # TextResourceContents with `blob` as an extra field (R2-01, R3-01).
+        return ToolResult(
+            content=[
+                ImageContent(type="image", data=_PNG_WITH_TOKEN, mimeType="image/png"),
                 EmbeddedResource(
                     type="resource",
                     resource=TextResourceContents(
-                        uri="file:///dual.txt", mimeType="text/plain", text="", blob=_B64_TOKEN
+                        uri="file:///dual.txt", mimeType="text/plain", text="", blob=blob
                     ),
                 ),
             ]
         )
+
+    @up.tool
+    def dual_small() -> ToolResult:
+        return _dual(_DUAL_SMALL)
+
+    @up.tool
+    def dual_large() -> ToolResult:
+        return _dual(_DUAL_LARGE)
+
+    @up.tool
+    def dual_large_clean() -> ToolResult:
+        return _dual(_DUAL_LARGE_CLEAN)
 
     @up.tool
     def typed() -> Secret:
@@ -199,14 +223,45 @@ def test_base64_encoded_credential_is_redacted_not_just_logged():
     """R2-01: decode-only matches were logged as redacted and forwarded unchanged."""
     result = _call("encoded")
     assert not result.is_error
-    assert [type(b) for b in result.content] == [ImageContent, TextContent, EmbeddedResource]
+    assert [type(b) for b in result.content] == [ImageContent, TextContent]
     assert result.content[1].text == "[REDACTED]"
-    assert result.content[2].resource.model_extra["blob"] == "[REDACTED]"
     assert _B64_TOKEN not in _wire(result)
     assert result.content[0].data == _PNG_WITH_TOKEN
 
 
-@pytest.mark.parametrize("tool", ["mixed", "text_blob", "typed", "encoded"])
+@pytest.mark.parametrize(
+    ("tool", "blob"),
+    [("dual_small", _DUAL_SMALL), ("dual_large", _DUAL_LARGE)],
+    ids=["small", "over-64k"],
+)
+def test_dual_blob_text_resource_is_scanned_like_a_blob(tool, blob):
+    """R3-01: a `blob` riding as an extra field gets the text-blob scan, at any size.
+
+    Over 64 KiB it used to skip the nested decode and go out unscanned and unlogged.
+    """
+    result = _call(tool)
+    assert result.is_error
+    assert "blocked by response filter policy" in result.content[0].text
+    assert blob not in _wire(result)
+
+
+def test_clean_large_dual_resource_passes_with_its_blob_intact():
+    result = _call("dual_large_clean")
+    assert not result.is_error
+    assert result.content[1].resource.model_extra["blob"] == _DUAL_LARGE_CLEAN
+
+
+_LEAKS = {
+    "mixed": TOKEN,
+    "text_blob": _B64_TOKEN,
+    "typed": TOKEN,
+    "encoded": _B64_TOKEN,
+    "dual_small": _DUAL_SMALL,
+    "dual_large": _DUAL_LARGE,
+}
+
+
+@pytest.mark.parametrize("tool", sorted(_LEAKS))
 def test_filter_off_forwards_unchanged(tool):
     """Control: with no filter the token does reach the agent, so the tests above can fail."""
     up = _upstream()
@@ -229,7 +284,4 @@ def test_filter_off_forwards_unchanged(tool):
 
     assert not result.is_error
     wire = _wire(result).replace(_PNG_WITH_TOKEN, "")
-    if tool in ("text_blob", "encoded"):
-        assert _B64_TOKEN in wire
-    else:
-        assert TOKEN in wire
+    assert _LEAKS[tool] in wire

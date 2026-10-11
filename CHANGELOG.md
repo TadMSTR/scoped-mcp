@@ -37,14 +37,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   redacting inside base64 means nothing. Text blobs have their own 4 MiB decode cap, not
   the 64 KiB cap used for nested decode candidates. A text blob over that cap, or one that
   is not valid base64, is blocked rather than forwarded unscanned (audit F-02, R2-02).
-  Blobs labelled as binary (`application/octet-stream`, `image/*`, ...) are still not scanned,
-  even if they hold text.
+  "Valid" means strict, padded, standard-alphabet base64. Line-wrapped, unpadded and url-safe
+  blobs are blocked as `text-blob-unscannable`. So is a binary blob that has no `mimeType`
+  and uses one of those forms. Read such a block as a format mismatch, not a detected leak
+  (audit R3-02). A resource that carries both `blob` and `text` (not valid MCP: `mcp.types`
+  parses it as a text resource with `blob` as an extra field) gets the same blob treatment
+  at any size (audit R3-01). Blobs labelled as binary (`application/octet-stream`,
+  `image/*`, ...) are still not scanned, even if they hold text.
 - **`redact` with `decode` now redacts.** When only a decoded candidate matched (for
   example a base64-encoded credential), the substitution ran on the raw string, which did
   not contain the match. The value went out unchanged and `response_filter_redacted` was
   still logged. This has been the case since `decode` was added. Such a value is now
-  replaced whole with `[REDACTED]`. It also covers a resource that carries both `blob` and
-  `text`, which `mcp.types` parses as a text resource (audit R2-01).
+  replaced whole with `[REDACTED]` (audit R2-01).
 - **Structured output from model-typed upstream tools is filtered.** The FastMCP client
   hydrates such output into a generated class, which the filter returned unscanned and
   without logging. So for those tools the credential rule did nothing. This was the case

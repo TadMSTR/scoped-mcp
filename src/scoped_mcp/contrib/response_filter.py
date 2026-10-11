@@ -42,7 +42,6 @@ from typing import Any, Literal
 import structlog
 from mcp.types import (
     AudioContent,
-    BlobResourceContents,
     EmbeddedResource,
     ImageContent,
     ResourceLink,
@@ -237,6 +236,9 @@ def _scan_text_blob(
     if decoded is None:
         # Over the text-blob cap or not valid base64: it cannot be scanned, so it does not
         # go out (audit R2-02).
+        # SECURITY[accepted]: strict decode, so line-wrapped, unpadded and url-safe blobs
+        # (incl. binary blobs with no mimeType) are blocked too — fail-closed over a lenient
+        # decoder. Audit: 2026-10-11/scoped-mcp-proxy-content-1070 R3-02.
         _block_response("text-blob-unscannable", tool_name, agent_id)
     for rule in rules:
         for candidate in _candidate_strings(decoded, rule.decode):
@@ -271,9 +273,15 @@ def _filter_content_block(
     payload_key = ""
     if isinstance(block, ImageContent | AudioContent):
         payload_holder, payload_key = dumped, "data"
-    elif isinstance(block, EmbeddedResource) and isinstance(block.resource, BlobResourceContents):
+    elif isinstance(block, EmbeddedResource) and isinstance(
+        blob := dumped["resource"].get("blob"), str
+    ):
+        # A real BlobResourceContents, or a `blob` riding as an extra field on a resource
+        # that also has `text` (not valid MCP; mcp.types parses it as TextResourceContents).
+        # Both get the blob treatment, so the extra cannot fall to the 64 KiB nested-decode
+        # path and go out unscanned (audit R3-01).
         if _is_text_mime(block.resource.mimeType):
-            _scan_text_blob(block.resource.blob, rules, tool_name, agent_id)
+            _scan_text_blob(blob, rules, tool_name, agent_id)
         payload_holder, payload_key = dumped["resource"], "blob"
     payload = payload_holder.pop(payload_key) if payload_holder is not None else None
 
