@@ -40,11 +40,22 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 import structlog
+from mcp.types import (
+    AudioContent,
+    EmbeddedResource,
+    ImageContent,
+    ResourceLink,
+    TextContent,
+)
+from pydantic import ValidationError
 
 logger = structlog.get_logger("audit")
 
 _REDACT_PLACEHOLDER = "[REDACTED]"
 _MAX_DECODED_BYTES = 64 * 1024  # 64 KiB cap, matching arg_filter.py
+# Text-typed blobs are primary content, not a speculative decode candidate, so they get a
+# larger cap. Above it the blob cannot be scanned and the response is blocked (audit R2-02).
+_MAX_TEXT_BLOB_BYTES = 4 * 1024 * 1024
 
 Action = Literal["block", "warn", "redact"]
 DecodeStep = Literal["base64", "urlsafe_base64", "url"]
@@ -81,9 +92,9 @@ def _compile_rule(rule: dict[str, Any]) -> _CompiledRule:
     return _CompiledRule(name=name, pattern=compiled, action=action, decode=decode)
 
 
-def _b64_decode(value: str, urlsafe: bool) -> str | None:
+def _b64_decode(value: str, urlsafe: bool, max_bytes: int = _MAX_DECODED_BYTES) -> str | None:
     """Decode base64 value or return None if oversized or malformed."""
-    if (len(value) * 3) // 4 > _MAX_DECODED_BYTES:
+    if (len(value) * 3) // 4 > max_bytes:
         return None
     try:
         if urlsafe:
@@ -93,7 +104,7 @@ def _b64_decode(value: str, urlsafe: bool) -> str | None:
             decoded = base64.b64decode(value, validate=True)
     except (ValueError, base64.binascii.Error):
         return None
-    if len(decoded) > _MAX_DECODED_BYTES:
+    if len(decoded) > max_bytes:
         return None
     return decoded.decode("utf-8", errors="replace")
 
@@ -132,7 +143,8 @@ def _apply_rule_to_string(
 
     For ``block`` and ``warn`` matches, the match is detected across decode
     candidates. For ``redact``, the substitution is applied to the raw (original)
-    string to avoid returning decoded content to the caller.
+    string to avoid returning decoded content to the caller; when only a decoded
+    candidate matched, the whole value is replaced.
     """
     for candidate in _candidate_strings(value, rule.decode):
         if rule.pattern.search(candidate) is None:
@@ -159,18 +171,129 @@ def _apply_rule_to_string(
             return value  # unchanged
 
         if rule.action == "redact":
+            # Redact on the original value, not the decoded candidate. If only a decoded
+            # candidate matched (e.g. a base64-encoded credential), the raw string holds
+            # nothing to substitute — replace the whole value, or the secret goes out
+            # unchanged under a log line claiming it was redacted (audit R2-01).
+            if rule.pattern.search(value) is not None:
+                redacted = rule.pattern.sub(_REDACT_PLACEHOLDER, value)
+            else:
+                redacted = _REDACT_PLACEHOLDER
             logger.warning(
                 "response_filter_redacted",
                 agent_id=agent_id,
                 tool=tool_name,
                 filter_name=rule.name,
             )
-            # Redact on the original value, not the decoded candidate.
-            return rule.pattern.sub(_REDACT_PLACEHOLDER, value)
+            return redacted
 
         break  # unreachable, but satisfies exhaustiveness
 
     return value
+
+
+# MCP content blocks. mcp_proxy returns them unchanged when a result carries an image or
+# other non-text block (vikunja#1070), so every string on them must be scanned, not just
+# ``.text``: ``_meta``, extra fields (all of these models are ``extra="allow"``), URIs and
+# ResourceLink names/titles/descriptions reach the agent too.
+_CONTENT_BLOCK_TYPES = (TextContent, ImageContent, AudioContent, ResourceLink, EmbeddedResource)
+
+_TEXT_MIME_EXACT = frozenset({"application/json", "application/xml"})
+
+
+def _is_text_mime(mime: str | None) -> bool:
+    """True for blobs that may hold text: text/*, JSON, XML, or no declared type."""
+    if not mime:
+        return True
+    base = mime.split(";", 1)[0].strip().lower()
+    return base.startswith("text/") or base in _TEXT_MIME_EXACT or base.endswith(("+json", "+xml"))
+
+
+def _block_response(rule_name: str, tool_name: str, agent_id: str) -> None:
+    logger.warning(
+        "response_filter_blocked",
+        agent_id=agent_id,
+        tool=tool_name,
+        filter_name=rule_name,
+    )
+    from ..exceptions import ConfigError
+
+    raise ConfigError(f"tool response from {tool_name!r} blocked by response filter policy")
+
+
+def _scan_text_blob(
+    blob: str,
+    rules: list[_CompiledRule],
+    tool_name: str,
+    agent_id: str,
+) -> None:
+    """Scan a text-typed base64 blob. Any ``block`` or ``redact`` match blocks the response.
+
+    Redacting inside base64 is not meaningful, so ``redact`` escalates to ``block`` here.
+    A blob that cannot be decoded (over ``_MAX_TEXT_BLOB_BYTES``, or malformed) blocks too.
+    """
+    decoded = _b64_decode(blob, urlsafe=False, max_bytes=_MAX_TEXT_BLOB_BYTES)
+    if decoded is None:
+        # Over the text-blob cap or not valid base64: it cannot be scanned, so it does not
+        # go out (audit R2-02).
+        # SECURITY[accepted]: strict decode, so line-wrapped, unpadded and url-safe blobs
+        # (incl. binary blobs with no mimeType) are blocked too — fail-closed over a lenient
+        # decoder. Audit: 2026-10-11/scoped-mcp-proxy-content-1070 R3-02.
+        _block_response("text-blob-unscannable", tool_name, agent_id)
+    for rule in rules:
+        for candidate in _candidate_strings(decoded, rule.decode):
+            if rule.pattern.search(candidate) is None:
+                continue
+            if rule.action == "warn":
+                logger.warning(
+                    "response_filter_warning",
+                    agent_id=agent_id,
+                    tool=tool_name,
+                    filter_name=rule.name,
+                )
+                break
+            _block_response(rule.name, tool_name, agent_id)
+
+
+def _filter_content_block(
+    block: Any,
+    rules: list[_CompiledRule],
+    tool_name: str,
+    agent_id: str,
+) -> Any:
+    """Filter every string on an MCP content block, then re-validate it into its type.
+
+    Binary payloads (image/audio ``data``, resource ``blob``) are lifted out before the
+    string pass so a pattern can never rewrite base64. Text-typed blobs are scanned
+    decoded instead (``_scan_text_blob``). If redaction leaves a field the model rejects
+    (e.g. a URI redacted whole), the response is blocked rather than forwarded unfiltered.
+    """
+    dumped = block.model_dump(by_alias=True, mode="json", exclude_unset=True)
+    payload_holder: dict[str, Any] | None = None
+    payload_key = ""
+    if isinstance(block, ImageContent | AudioContent):
+        payload_holder, payload_key = dumped, "data"
+    elif isinstance(block, EmbeddedResource) and isinstance(
+        blob := dumped["resource"].get("blob"), str
+    ):
+        # A real BlobResourceContents, or a `blob` riding as an extra field on a resource
+        # that also has `text` (not valid MCP; mcp.types parses it as TextResourceContents).
+        # Both get the blob treatment, so the extra cannot fall to the 64 KiB nested-decode
+        # path and go out unscanned (audit R3-01).
+        if _is_text_mime(block.resource.mimeType):
+            _scan_text_blob(blob, rules, tool_name, agent_id)
+        payload_holder, payload_key = dumped["resource"], "blob"
+    payload = payload_holder.pop(payload_key) if payload_holder is not None else None
+
+    filtered = _filter_value(dumped, rules, tool_name, agent_id)
+
+    if payload_holder is not None:
+        target = filtered if payload_holder is dumped else filtered["resource"]
+        target[payload_key] = payload
+    try:
+        return type(block).model_validate(filtered)
+    except ValidationError:
+        _block_response("content-block-revalidation", tool_name, agent_id)
 
 
 def _filter_value(
@@ -183,16 +306,23 @@ def _filter_value(
 
     Only string leaves are tested — dict keys, numeric values, booleans, and
     None pass through unchanged. This prevents redaction from corrupting
-    serialised JSON or structured response objects.
+    serialised JSON or structured response objects. MCP content blocks are
+    dumped, filtered as a dict, and re-validated (``_filter_content_block``).
     """
     if isinstance(value, str):
         for rule in rules:
             value = _apply_rule_to_string(value, rule, tool_name, agent_id)
         return value
     if isinstance(value, dict):
+        # SECURITY[accepted]: keys (and so extra-field / _meta key names) are not scanned.
+        # Reaching an agent through a key takes an upstream that structures output to do it,
+        # not an accidental leak; if keys are ever scanned, a match must block, since a
+        # redacted key can collide. Audit: 2026-10-11/scoped-mcp-proxy-content-1070 R2-03.
         return {k: _filter_value(v, rules, tool_name, agent_id) for k, v in value.items()}
     if isinstance(value, list):
         return [_filter_value(item, rules, tool_name, agent_id) for item in value]
+    if isinstance(value, _CONTENT_BLOCK_TYPES):
+        return _filter_content_block(value, rules, tool_name, agent_id)
     return value
 
 

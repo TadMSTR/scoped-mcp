@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.17.2] — 2026-10-11
+
+### Fixed
+- **`mcp_proxy` no longer drops image, audio and resource blocks from a result that also
+  has text** (vikunja#1070). It joined the text blocks and returned only that string, so
+  everything else in the result was discarded, with no log line or error. grafana-mcp's
+  `get_panel_image` returns `[image, text deeplink]`, and agents only ever got the deeplink.
+  If a result holds any non-text block, the proxy now returns the content blocks unchanged
+  and FastMCP forwards each one. Results with only text are still returned as one joined
+  string. When an upstream returns structured data *and* a non-text block, the content
+  blocks win. The proxied tool declares no output schema, so the structured data would
+  reach the agent as JSON text anyway, and upstreams that follow the spec put that JSON in
+  a text block.
+
+### Security
+- **`response_filters` scan every string on an MCP content block.** The filter only walked
+  `str`, `dict` and `list`, so a content list from the fix above would have carried text past
+  every `block`/`redact` rule. Each block (text, image, audio, resource link, embedded
+  resource) is now dumped, filtered as a dict, and re-validated into its type. That covers
+  `text`, `_meta`, extra fields, URIs and resource-link `name`/`title`/`description`.
+  Image/audio `data` and resource `blob`s are taken out of the string pass, so a pattern
+  can never rewrite base64. If redaction leaves a block the model rejects (for example a
+  URI redacted whole), the response is blocked rather than forwarded unfiltered (audit
+  F-01).
+- **Text-typed blobs are decoded and scanned.** An embedded `BlobResourceContents` whose
+  `mimeType` is `text/*`, JSON, XML, `+json`/`+xml` or absent is base64-decoded and checked
+  with each rule's `decode` steps. A `block` or `redact` match blocks the response, since
+  redacting inside base64 means nothing. Text blobs have their own 4 MiB decode cap, not
+  the 64 KiB cap used for nested decode candidates. A text blob over that cap, or one that
+  is not valid base64, is blocked rather than forwarded unscanned (audit F-02, R2-02).
+  "Valid" means strict, padded, standard-alphabet base64. Line-wrapped, unpadded and url-safe
+  blobs are blocked as `text-blob-unscannable`. So is a binary blob that has no `mimeType`
+  and uses one of those forms. Read such a block as a format mismatch, not a detected leak
+  (audit R3-02). A resource that carries both `blob` and `text` (not valid MCP: `mcp.types`
+  parses it as a text resource with `blob` as an extra field) gets the same blob treatment
+  at any size (audit R3-01). Blobs labelled as binary (`application/octet-stream`,
+  `image/*`, ...) are still not scanned, even if they hold text.
+- **`redact` with `decode` now redacts.** When only a decoded candidate matched (for
+  example a base64-encoded credential), the substitution ran on the raw string, which did
+  not contain the match. The value went out unchanged and `response_filter_redacted` was
+  still logged. This has been the case since `decode` was added. Such a value is now
+  replaced whole with `[REDACTED]` (audit R2-01).
+- **Structured output from model-typed upstream tools is filtered.** The FastMCP client
+  hydrates such output into a generated class, which the filter returned unscanned and
+  without logging. So for those tools the credential rule did nothing. This was the case
+  before this release too. The proxy now converts `result.data` to plain JSON types first
+  (audit F-03).
+- Deferred: no size cap on forwarded binary blocks (vikunja#1071). Accepted: images are a
+  prompt-injection channel that text filters cannot screen. Both are marked in
+  `_unwrap_result`. Also accepted: dict keys and extra-field names are not scanned, only
+  values (audit R2-03).
+
 ## [1.17.1] — 2026-10-06
 
 Dependency release. No application code changed.

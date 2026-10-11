@@ -107,6 +107,8 @@ import jsonschema
 import structlog
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
+from mcp.types import TextContent
+from pydantic_core import to_jsonable_python
 
 from ._base import ToolModule
 
@@ -148,6 +150,39 @@ def _coerce_schema(raw: Any) -> dict[str, Any] | None:
 
 class _ProxyValidationError(ValueError):
     """Raised when proxied arguments fail upstream inputSchema validation."""
+
+
+def _unwrap_result(result: Any) -> Any:
+    """Turn an upstream ``CallToolResult`` into the proxy tool's return value.
+
+    - Any non-text block (image, audio, embedded resource, resource link): return the
+      content blocks unchanged, so FastMCP forwards every one of them. Joining the text
+      here used to drop the rest silently — grafana-mcp's ``get_panel_image`` returns
+      ``[image, text deeplink]`` and agents only ever saw the deeplink (vikunja#1070).
+      This wins over ``result.data``: the proxied tool declares no output schema, so
+      structured data would reach the agent as JSON text and the image would be lost.
+      Upstreams that follow the spec also put that JSON in a text block.
+    - Otherwise structured data, if the upstream declared an output schema, converted to
+      plain JSON types so the response filter can scan it.
+    - Otherwise the text blocks joined with newlines (empty content passes through).
+    """
+    content = result.content or []
+    if any(not isinstance(block, TextContent) for block in content):
+        # SECURITY[deferred]: binary blocks are forwarded at whatever size the upstream
+        # sends; no max_binary_bytes cap yet. Target: vikunja#1071 (id 1154).
+        # Audit: 2026-10-11/scoped-mcp-proxy-content-1070 F-04.
+        # SECURITY[accepted]: images reach the agent and text filters cannot screen pixels
+        # (prompt injection via rendered text). Only grafana-mcp renders of forge's own
+        # dashboards produce images today; revisit before proxying an external image tool.
+        # Audit: 2026-10-11/scoped-mcp-proxy-content-1070 F-05.
+        return content
+    if result.data is not None:
+        # The FastMCP client hydrates a model-typed output into a generated class, which
+        # the response filter cannot walk, so it reached the agent unscanned. Plain JSON
+        # types only.
+        return to_jsonable_python(result.data)
+    texts = [block.text for block in content]
+    return "\n".join(texts) if texts else content
 
 
 class McpProxyModule(ToolModule):
@@ -641,10 +676,7 @@ class McpProxyModule(ToolModule):
                 # HTTP: open a connection per call (cheap, stateless)
                 async with Client(module._transport()) as client:
                     result = await client.call_tool(upstream_tool_name, arguments=kwargs)
-            if result.data is not None:
-                return result.data
-            texts = [block.text for block in result.content if hasattr(block, "text")]
-            return "\n".join(texts) if texts else result.content
+            return _unwrap_result(result)
 
         safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", upstream_tool_name)
         if safe_name and safe_name[0].isdigit():
