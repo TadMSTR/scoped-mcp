@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`mcp_proxy` no longer drops image, audio and resource blocks from a result that also
+  has text** (vikunja#1070). It joined the text blocks and returned only that string, so
+  everything else in the result was discarded, with no log line or error. grafana-mcp's
+  `get_panel_image` returns `[image, text deeplink]`, and agents only ever got the deeplink.
+  If a result holds any non-text block, the proxy now returns the content blocks unchanged
+  and FastMCP forwards each one. Results with only text are still returned as one joined
+  string. When an upstream returns structured data *and* a non-text block, the content
+  blocks win. The proxied tool declares no output schema, so the structured data would
+  reach the agent as JSON text anyway, and upstreams that follow the spec put that JSON in
+  a text block.
+
+### Security
+- **`response_filters` now scan the text of MCP content blocks** (`TextContent`, and text
+  `EmbeddedResource`s). The filter only walked `str`, `dict` and `list`, so a content list
+  from the fix above would have taken its text past every `block`/`redact` rule. Image and
+  audio data and resource blobs are binary and are still not scanned.
+
 ## [1.17.1] — 2026-10-06
 
 Dependency release. No application code changed.

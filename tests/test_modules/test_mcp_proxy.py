@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
 import sys
@@ -12,7 +13,14 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastmcp.client.transports import StreamableHttpTransport
-from mcp.types import Tool
+from mcp.types import (
+    AudioContent,
+    EmbeddedResource,
+    ImageContent,
+    TextContent,
+    TextResourceContents,
+    Tool,
+)
 
 from scoped_mcp.identity import AgentContext
 from scoped_mcp.modules.mcp_proxy import McpProxyModule
@@ -893,3 +901,141 @@ def test_env_docstring_names_the_sdk_allowlist_constant() -> None:
     # The names quoted in the docstring must still be the constant's actual contents.
     for name in DEFAULT_INHERITED_ENV_VARS:
         assert name in doc, f"{name} is in the SDK allowlist but not in the docstring"
+
+
+# ── Result unwrapping: non-text content blocks (vikunja#1070) ────────────────
+
+# 3 KiB of non-repeating bytes, so a truncated or re-encoded payload changes the base64.
+_PNG_B64 = base64.b64encode(bytes(range(256)) * 12).decode()
+
+
+def _proxy_returning(agent_ctx, fake_result):
+    """Build an HTTP proxy module whose one upstream tool returns ``fake_result``."""
+    with patch("scoped_mcp.modules.mcp_proxy.Client") as MockClient:
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_cm.list_tools = AsyncMock(return_value=[_make_tool("get_panel_image")])
+        mock_cm.call_tool = AsyncMock(return_value=fake_result)
+        MockClient.return_value = mock_cm
+        mod = McpProxyModule(
+            agent_ctx=agent_ctx,
+            credentials={},
+            config={"url": "http://127.0.0.1:8485/mcp"},
+        )
+    return mod, MockClient, mock_cm
+
+
+def _call_once(agent_ctx, fake_result):
+    # Sync: McpProxyModule.__init__ runs asyncio.run() for discovery, so it cannot be
+    # built inside a running loop.
+    mod, MockClient, _ = _proxy_returning(agent_ctx, fake_result)
+    with patch("scoped_mcp.modules.mcp_proxy.Client", MockClient):
+        return asyncio.run(mod.get_tool_methods(mode=None)[0]())
+
+
+def _image() -> ImageContent:
+    return ImageContent(type="image", data=_PNG_B64, mimeType="image/png")
+
+
+def test_image_and_text_result_keeps_the_image(agent_ctx):
+    """[image, text] must come back as both blocks — the text join dropped the image."""
+    fake = FakeCallToolResult(
+        data=None,
+        content=[_image(), TextContent(type="text", text="https://grafana/d/argus-node")],
+    )
+    result = _call_once(agent_ctx, fake)
+
+    assert [type(b) for b in result] == [ImageContent, TextContent]
+    assert result[0].mimeType == "image/png"
+    assert result[0].data == _PNG_B64
+    assert len(result[0].data) == len(_PNG_B64)
+    assert result[1].text == "https://grafana/d/argus-node"
+
+
+def test_non_text_content_wins_over_structured_data(agent_ctx):
+    """Structured output plus an image: the content blocks win, so the image survives."""
+    fake = FakeCallToolResult(
+        data={"url": "https://grafana/d/argus-node"},
+        content=[
+            TextContent(type="text", text='{"url": "https://grafana/d/argus-node"}'),
+            _image(),
+        ],
+    )
+    result = _call_once(agent_ctx, fake)
+
+    assert [type(b) for b in result] == [TextContent, ImageContent]
+    assert result[1].data == _PNG_B64
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        AudioContent(type="audio", data=_PNG_B64, mimeType="audio/wav"),
+        EmbeddedResource(
+            type="resource",
+            resource=TextResourceContents(uri="file:///x.txt", text="body", mimeType="text/plain"),
+        ),
+    ],
+    ids=["audio", "embedded-resource"],
+)
+def test_other_non_text_blocks_are_forwarded(agent_ctx, block):
+    fake = FakeCallToolResult(data=None, content=[TextContent(type="text", text="t"), block])
+    result = _call_once(agent_ctx, fake)
+    assert result == [TextContent(type="text", text="t"), block]
+
+
+def test_image_only_result_is_unchanged(agent_ctx):
+    image = _image()
+    result = _call_once(agent_ctx, FakeCallToolResult(data=None, content=[image]))
+    assert [type(b) for b in result] == [ImageContent]
+    assert result[0].data == _PNG_B64
+    assert result[0].mimeType == "image/png"
+
+
+def test_all_text_result_is_still_joined(agent_ctx):
+    """No regression for text-only proxied tools: a plain joined string, not blocks."""
+    fake = FakeCallToolResult(
+        data=None,
+        content=[TextContent(type="text", text="a"), TextContent(type="text", text="b")],
+    )
+    assert _call_once(agent_ctx, fake) == "a\nb"
+
+
+def test_all_text_with_structured_data_returns_data(agent_ctx):
+    fake = FakeCallToolResult(
+        data={"task_id": "abc"}, content=[TextContent(type="text", text='{"task_id": "abc"}')]
+    )
+    assert _call_once(agent_ctx, fake) == {"task_id": "abc"}
+
+
+def test_image_reaches_the_agent_through_fastmcp(agent_ctx):
+    """End to end: register the proxy tool on FastMCP and call it as an agent would.
+
+    Asserts what the agent receives, not what proxy_call returns, so it also covers how
+    FastMCP serialises a content list from a tool annotated ``-> Any``.
+    """
+    from fastmcp import Client as FastMCPClient
+    from fastmcp import FastMCP
+
+    fake = FakeCallToolResult(
+        data=None, content=[_image(), TextContent(type="text", text="deeplink")]
+    )
+    mod, MockClient, _ = _proxy_returning(agent_ctx, fake)
+    app = FastMCP("t")
+    app.tool(mod.get_tool_methods(mode=None)[0])
+
+    async def call():
+        async with FastMCPClient(app) as client:
+            tools = await client.list_tools()
+            return tools, await client.call_tool("get_panel_image", {})
+
+    with patch("scoped_mcp.modules.mcp_proxy.Client", MockClient):
+        tools, got = asyncio.run(call())
+
+    assert tools[0].outputSchema is None
+
+    assert [type(b) for b in got.content] == [ImageContent, TextContent]
+    assert got.content[0].mimeType == "image/png"
+    assert got.content[0].data == _PNG_B64
+    assert got.content[1].text == "deeplink"

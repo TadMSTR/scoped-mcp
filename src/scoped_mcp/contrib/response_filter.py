@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 import structlog
+from mcp.types import EmbeddedResource, TextContent, TextResourceContents
 
 logger = structlog.get_logger("audit")
 
@@ -181,7 +182,8 @@ def _filter_value(
 ) -> Any:
     """Recursively filter string values in a response tree.
 
-    Only string leaves are tested — dict keys, numeric values, booleans, and
+    Only string leaves are tested, plus the text of MCP ``TextContent`` blocks and
+    text ``EmbeddedResource`` blocks — dict keys, numeric values, booleans, and
     None pass through unchanged. This prevents redaction from corrupting
     serialised JSON or structured response objects.
     """
@@ -193,6 +195,18 @@ def _filter_value(
         return {k: _filter_value(v, rules, tool_name, agent_id) for k, v in value.items()}
     if isinstance(value, list):
         return [_filter_value(item, rules, tool_name, agent_id) for item in value]
+    # MCP content blocks: mcp_proxy returns them unchanged when a result carries an image
+    # or other non-text block (vikunja#1070), so the text inside them must be scanned too.
+    # Binary payloads (image/audio data, resource blobs) are not text and are not scanned.
+    if isinstance(value, TextContent):
+        return value.model_copy(
+            update={"text": _filter_value(value.text, rules, tool_name, agent_id)}
+        )
+    if isinstance(value, EmbeddedResource) and isinstance(value.resource, TextResourceContents):
+        resource = value.resource.model_copy(
+            update={"text": _filter_value(value.resource.text, rules, tool_name, agent_id)}
+        )
+        return value.model_copy(update={"resource": resource})
     return value
 
 

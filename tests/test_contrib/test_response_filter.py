@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from mcp.types import EmbeddedResource, ImageContent, TextContent, TextResourceContents
 
 from scoped_mcp.contrib.response_filter import ResponseFilter
 from scoped_mcp.exceptions import ConfigError
@@ -174,3 +175,37 @@ def test_malformed_base64_candidate_is_skipped() -> None:
 def test_invalid_decode_step_raises_on_construction() -> None:
     with pytest.raises(ValueError, match="decode entry must be one of"):
         _make_filter([{"name": "bad", "pattern": "x", "action": "warn", "decode": ["rot13"]}])
+
+
+# ── MCP content blocks (vikunja#1070) ─────────────────────────────────────────
+# mcp_proxy now returns content blocks unchanged when a result carries an image, so the
+# text inside those blocks must not slip past the filter.
+
+
+def test_redact_inside_text_content_block() -> None:
+    rf = _make_filter([{"name": "r1", "pattern": "ghp_[A-Za-z0-9]{36}", "action": "redact"}])
+    token = "ghp_" + "A" * 36
+    image = ImageContent(type="image", data="aGVsbG8=", mimeType="image/png")
+    result = rf.filter_response(
+        [image, TextContent(type="text", text=f"link {token}")], "get_panel_image", "agent-1"
+    )
+    assert [type(b) for b in result] == [ImageContent, TextContent]
+    assert result[0] == image
+    assert result[1].text == "link [REDACTED]"
+
+
+def test_block_inside_text_content_block() -> None:
+    rf = _make_filter([{"name": "b1", "pattern": "secret", "action": "block"}])
+    with pytest.raises(ConfigError, match="blocked by response filter policy"):
+        rf.filter_response([TextContent(type="text", text="a secret")], "t", "agent-1")
+
+
+def test_redact_inside_embedded_text_resource() -> None:
+    rf = _make_filter([{"name": "r1", "pattern": "secret", "action": "redact"}])
+    block = EmbeddedResource(
+        type="resource",
+        resource=TextResourceContents(uri="file:///x", text="a secret", mimeType="text/plain"),
+    )
+    result = rf.filter_response([block], "t", "agent-1")
+    assert result[0].resource.text == "a [REDACTED]"
+    assert block.resource.text == "a secret"  # original not mutated
