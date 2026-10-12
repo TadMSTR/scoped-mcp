@@ -185,7 +185,7 @@ argument_filters:
 | `decode` | list[str] | no | Decode steps applied before matching: `base64`, `urlsafe_base64`, `url`. Capped at 64 KiB |
 | `case_insensitive` | bool | no | Case-insensitive matching (default: false) |
 
-**Argument filters inspect top-level string arguments only — nested dicts/lists are not walked.** If a tool accepts a structured argument (e.g. `body: {...}`, `metadata: {...}`, `points: [...]`), patterns in `fields` will not match strings nested inside it. For deep inspection, write tool-specific rules targeting the exact top-level field that carries the sensitive data, or use HITL approval for tools with structured args. `response_filter` (which does recurse) is intentionally asymmetric — don't assume argument filters have equivalent depth. Block rules short-circuit on first match. The audit log records rule name, tool name, field name, and a `raw`/`decoded` label — never the matched value.
+**Argument filters inspect top-level string arguments only — nested dicts/lists are not walked.** If a tool accepts a structured argument (e.g. `body: {...}`, `metadata: {...}`, `points: [...]`), patterns in `fields` will not match strings nested inside it. For deep inspection, write tool-specific rules targeting the exact top-level field that carries the sensitive data, or use HITL approval for tools with structured args. `response_filter` (which recurses into dicts and lists and, since v1.17.2, scans every string value on MCP content blocks and decodes text-typed blobs — dict keys excepted) is intentionally asymmetric — don't assume argument filters have equivalent depth. Block rules short-circuit on first match. The audit log records rule name, tool name, field name, and a `raw`/`decoded` label — never the matched value.
 
 ## hitl
 

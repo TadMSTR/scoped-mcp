@@ -526,6 +526,21 @@ long-lived HTTP transport, where a dead pipe would otherwise persist until resta
 reconnect is serialized with a lock so concurrent callers do not race to replace the
 client; normal tool errors still propagate untouched so real outages are not masked.
 
+**Result content** (v1.17.2) — how an upstream `CallToolResult` reaches the agent:
+
+| Upstream result | What the agent gets |
+|-----------------|---------------------|
+| Any non-text block (image, audio, embedded resource, resource link) | All content blocks, unchanged — text blocks included |
+| Structured data, all-text content | The structured data, converted to plain JSON types |
+| Text blocks only | The text blocks joined with newlines |
+
+Non-text content wins over structured data: the proxied tool declares no output schema,
+so structured data would reach the agent as JSON text and the image would be lost.
+Before v1.17.2 the proxy joined the text and silently dropped every other block — an
+upstream returning `[image, text]` delivered only the text. Every path goes through
+`response_filters`; see [Response filtering](#optional-guardrails) for what that covers
+on content blocks.
+
 ### Infrastructure
 
 | Module | Scope | Read tools | Write tools |
@@ -860,11 +875,32 @@ guarantees. All are off by default; enable per-agent in the manifest:
   No API change beyond the `session_registry` status field — existing tool
   signatures are unchanged.
 
-- **Response filtering** (v1.0.2) — opt-in post-execution content scanning.
-  `block`, `warn`, or `redact` modes applied per-field via `ResponseFilterRule`
-  entries in the manifest's `audit:` section. Redaction applies to string leaves
-  in structured responses only — never to serialized dict/list blobs. See
+- **Response filtering** (v1.0.2, scope widened v1.17.2) — opt-in post-execution
+  content scanning. `block`, `warn`, or `redact` modes applied per-field via
+  `ResponseFilterRule` entries in the manifest's `audit:` section. See
   `contrib/response_filter.py`.
+  - **What is scanned.** Every string value in the response: plain strings, dict and
+    list leaves, and every string on an MCP content block — `text`, `_meta`, extra
+    fields, URIs, and resource-link `name`/`title`/`description`. Each block is
+    re-validated into its MCP type after filtering; if redaction leaves a block that no
+    longer validates (a URI redacted whole, say), the response is blocked rather than
+    forwarded unfiltered.
+  - **What is never rewritten.** Image/audio `data` and resource `blob`s are taken out of
+    the string pass, so a pattern can never corrupt base64.
+  - **Text-typed blobs.** An embedded blob whose `mimeType` is `text/*`, JSON, XML,
+    `+json`/`+xml`, or absent is base64-decoded (4 MiB cap) and checked. A `block` *or*
+    `redact` match blocks the response, since redacting inside base64 means nothing. A
+    blob over the cap, or one that is not strict padded standard-alphabet base64, is
+    blocked as `text-blob-unscannable` — read that as a format mismatch, not a detected
+    leak. Blobs labelled binary (`application/octet-stream`, `image/*`, ...) are not
+    scanned.
+  - **`redact` with `decode`.** When only a decoded candidate matches (e.g. a
+    base64-encoded credential), the whole value is replaced with `[REDACTED]`. Before
+    v1.17.2 this case only logged `response_filter_redacted` and forwarded the value
+    unchanged.
+  - **Known limits.** Dict keys and extra-field names are not scanned, only values.
+    Forwarded binary blocks have no size cap (vikunja#1071). Images can carry prompt
+    injection that text filters cannot see.
 
 ---
 
