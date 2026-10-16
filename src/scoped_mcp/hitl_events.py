@@ -259,6 +259,11 @@ class HitlReconciler:
         closed_count = 0
         for row in rows:
             approval_id = row["approval_id"]
+            # It names a state key below. Rows are written by this proxy, but the check is
+            # the approver's (IV-01): anything not of the generated shape is skipped.
+            if not (isinstance(approval_id, str) and _APPROVAL_ID_RE.match(approval_id)):
+                _log.warning("hitl_reconcile_skipped_malformed_id")
+                continue
             denied = False
             with contextlib.suppress(Exception):
                 denied = await self._state.get(deny_tombstone_key(approval_id)) is not None

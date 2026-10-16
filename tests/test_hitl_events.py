@@ -487,3 +487,24 @@ async def test_list_pending_hitl_is_scoped_to_one_agent_and_fail_open():
             raise RuntimeError("down")
 
     assert await registry_db.RegistryDB(pool=_Broken()).list_pending_hitl("d", 1) == []
+
+
+async def test_reconcile_skips_a_malformed_approval_id(outbox):
+    class _Reg:
+        enabled = True
+
+        async def list_pending_hitl(self, agent_id, grace):
+            return [{"approval_id": "x:*:../evil", "tool_name": "t", "overdue": True}]
+
+        async def resolve_hitl_approval(self, *a, **kw):
+            raise AssertionError("must not resolve a malformed id")
+
+    class _State:
+        async def get(self, k):
+            raise AssertionError("must not build a key from a malformed id")
+
+    rec = hitl_events.HitlReconciler(
+        state=_State(), agent_id=AGENT, registry_getter=lambda: _aw(_Reg())
+    )
+    assert await rec.reconcile_once() == 0
+    assert _files(outbox) == []
