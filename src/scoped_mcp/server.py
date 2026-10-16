@@ -181,6 +181,14 @@ def _run_serve(args: argparse.Namespace) -> None:
             agent_bus_comms_dir=audit_cfg.agent_bus_comms_dir if audit_cfg else None,
             response_filter=_response_filter,
         )
+        # Before the middleware is built: build_hitl_middleware attaches the reconcile
+        # only when HITL events are on.
+        from .hitl_events import configure_hitl_events
+
+        configure_hitl_events(
+            enabled=bool(audit_cfg and audit_cfg.agent_bus_hitl_emit),
+            comms_dir=audit_cfg.agent_bus_comms_dir if audit_cfg else None,
+        )
         ops.info("session_ready", session_id=SESSION_ID)
 
         middleware = _build_middleware(

@@ -34,6 +34,7 @@ from typing import Any
 
 import structlog
 
+from . import hitl_events
 from .hitl import PREAPPROVAL_TTL_SECONDS, _otp_key, _preapproval_key
 from .state import StateBackend
 
@@ -183,6 +184,11 @@ async def deny(
         agent_id=agent_id,
         tool=tool_name,
         resolved_via=resolved_via,
+    )
+    # Resolved in-process, so it is emitted here; the reconcile skips rows that are no
+    # longer pending.
+    await hitl_events.closed(
+        approval_id=approval_id, agent_id=agent_id, tool=tool_name, outcome="denied"
     )
     return {"status": "denied", "tool": tool_name, "agent_id": agent_id}
 

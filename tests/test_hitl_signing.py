@@ -580,7 +580,10 @@ async def test_approver_deny_drops_request(key):
     aid = await _pending(redis, key)
     rc = await hitl_approver.run(aid, deny=True, client=redis, private_key=None, confirm=None)
     assert rc == hitl_approver.EXIT_OK
-    assert not [x for x in redis.store if aid in x]
+    # The request and its OTP are gone. The one key left is the deny tombstone (1.18.0),
+    # which authorises nothing and only lets the broker's reconcile tell deny from expiry.
+    left = [x for x in redis.store if aid in x]
+    assert left == [f"scoped-mcp:{AGENT}:hitl:denied:{aid}"]
 
 
 @pytest.mark.asyncio

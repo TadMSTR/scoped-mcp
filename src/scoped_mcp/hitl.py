@@ -65,6 +65,7 @@ from typing import Any
 
 import structlog
 
+from . import hitl_events
 from .audit import _sanitize_value
 from .exceptions import HitlRejectedError
 from .hitl_notify import Notifier
@@ -203,6 +204,7 @@ class HitlMiddleware:
         signing_mode: str = "off",
         public_key: Any = None,
         approve_hint: str | None = None,
+        reconciler: hitl_events.HitlReconciler | None = None,
     ) -> None:
         if signing_mode not in ("off", "observe", "enforce"):
             raise ValueError(f"unknown signing_mode {signing_mode!r}")
@@ -221,6 +223,9 @@ class HitlMiddleware:
         # One per process. The middleware is the only consumer of approvals, so
         # this covers every entry point — see hitl_signing.ConsumedSet.
         self._consumed = ConsumedSet()
+        # Present only when HITL events are on. Started lazily on the first call,
+        # because that is the first moment this object is on a running event loop.
+        self._reconciler = reconciler
 
     @staticmethod
     def _matches(tool_name: str, patterns: list[str]) -> bool:
@@ -233,6 +238,8 @@ class HitlMiddleware:
         kwargs: dict[str, Any],
         call_next: Callable[[], Any],
     ) -> Any:
+        if self._reconciler is not None:
+            self._reconciler.ensure_started()
         # Shadow takes precedence — if a tool is shadowed AND in approval_required,
         # we never want to forward the call regardless of the operator decision.
         if self._matches(tool_name, self._shadow_patterns):
@@ -255,15 +262,18 @@ class HitlMiddleware:
 
     def _accept_preapproval(
         self, tool_name: str, args_sha256: str, raw: str
-    ) -> tuple[bool, str | None]:
+    ) -> tuple[bool, str | None, str | None]:
         """Decide whether a claimed pre-approval token authorises this call.
 
-        Returns ``(accepted, signed_approval_id)``. ``signed_approval_id`` is set
-        only when a valid signed statement was presented and has now been
-        consumed. Rejections log a reason class and never the values compared.
+        Returns ``(accepted, signed_approval_id, refusal_reason)``.
+        ``signed_approval_id`` is set only when a valid signed statement was
+        presented and has now been consumed. ``refusal_reason`` is the
+        hitl_signing reason constant when verification failed (even under
+        ``observe``, where the token is still accepted), else None. Rejections
+        log a reason class and never the values compared.
         """
         if self._signing_mode == "off":
-            return True, None
+            return True, None, None
 
         result = verify_statement(
             raw,
@@ -286,7 +296,7 @@ class HitlMiddleware:
                     approval_id=result.approval_id,
                     signing_mode=self._signing_mode,
                 )
-                return True, result.approval_id
+                return True, result.approval_id, None
 
         accepted = self._signing_mode == "observe"
         _log.warning(
@@ -297,7 +307,7 @@ class HitlMiddleware:
             signing_mode=self._signing_mode,
             accepted=accepted,
         )
-        return accepted, None
+        return accepted, None, reason
 
     async def _handle_approval(
         self,
@@ -315,11 +325,19 @@ class HitlMiddleware:
         # Claim atomically (GETDEL) — one-time use, and no window in which a
         # concurrent retry can read the same token before it is deleted.
         preapproved = await self._state.get_delete(pre_key)
-        accepted, signed_approval_id = (
+        accepted, signed_approval_id, refusal = (
             self._accept_preapproval(tool_name, args_digest, preapproved)
             if preapproved is not None
-            else (False, None)
+            else (False, None, None)
         )
+        if refusal is not None:
+            await hitl_events.refused(
+                agent_id=self._agent_id,
+                tool=tool_name,
+                reason=refusal,
+                accepted=accepted,
+                signing_mode=self._signing_mode,
+            )
         if accepted:
             assert preapproved is not None
             _log.warning(
@@ -366,6 +384,15 @@ class HitlMiddleware:
                         error=type(e).__name__,
                     )
 
+            # The approval is being used: this is the moment it took effect. A signed
+            # approval that is never redeemed is not "approved" in this sense; it
+            # becomes hitl.closed{expired} once the reconcile sees its row time out.
+            await hitl_events.approved(
+                approval_id=approval_id if isinstance(approval_id, str) else None,
+                agent_id=self._agent_id,
+                tool=tool_name,
+                signing_mode=self._signing_mode,
+            )
             return await call_next()
 
         # No pre-approval found — register the request and reject immediately.
@@ -452,6 +479,16 @@ class HitlMiddleware:
             arguments_summary=summary,
             timeout_seconds=self._timeout,
         )
+        # Fixed fields only: never summary, record or kwargs (see hitl_events).
+        await hitl_events.requested(
+            approval_id=approval_id,
+            agent_id=self._agent_id,
+            agent_type=self._agent_type,
+            tool=tool_name,
+            args_sha256=args_digest,
+            timeout_seconds=self._timeout,
+            signing_mode=self._signing_mode,
+        )
 
         # Notify the operator. A buggy or third-party notifier that raises must
         # not propagate out of the middleware — log and continue to the rejection.
@@ -529,4 +566,9 @@ def build_hitl_middleware(
         signing_mode=signing.mode,
         public_key=public_key,
         approve_hint=signing.approve_command,
+        reconciler=(
+            hitl_events.HitlReconciler(state=state, agent_id=agent_id)
+            if hitl_events.is_enabled()
+            else None
+        ),
     )

@@ -305,6 +305,46 @@ signer leaves every gated call unapprovable.
 
 What signing does **not** stop is in [the threat model](threat-model.md#hitl-approvals).
 
+### HITL lifecycle events (agent-bus outbox)
+
+Off by default. To turn it on:
+
+```yaml
+audit:
+  agent_bus_comms_dir: ~/.claude/comms
+  agent_bus_hitl_emit: true
+```
+
+With it on, the proxy writes one JSON file per HITL event to
+`<agent_bus_comms_dir>/outbox/scoped-mcp/` (directory `0700`, files `0600`), using agent-bus's
+producer-outbox contract. agent-bus drains the directory into its hash-chained log.
+scoped-mcp does not depend on agent-bus.
+
+| Event | When | Metadata |
+|---|---|---|
+| `hitl.requested` | a gated call is rejected and a request registered | `approval_id`, `agent_id`, `agent_type`, `tool`, `args_sha256_prefix` (12 hex), `expires_at`, `signing_mode` |
+| `hitl.approved` | an approval token is redeemed and the call runs | `approval_id`, `agent_id`, `tool`, `signing_mode` |
+| `hitl.refused` | a presented token fails signature verification (`accepted: true` under `observe`) | `agent_id`, `tool`, `reason`, `accepted`, `signing_mode` (no `approval_id`, which is unverified) |
+| `hitl.closed` | a request is denied, or expires unused | `approval_id`, `agent_id`, `tool`, `outcome` (`denied` / `expired`) |
+
+**No event carries an argument value.** Not the arguments, not the redacted summary, not
+the signed record. A test runs every path under `off`, `observe` and `enforce` with a
+sentinel value and checks that it reaches no file. **A failed emit never changes the gate's
+decision.** Every error is logged and swallowed.
+
+`hitl.closed` comes from a reconcile loop. One runs per process, scoped to that process's
+agent, every 30 s, starting after the first tool call. It needs the session registry
+(`AGENT_REGISTRY_DSN`), because the `hitl_approvals` row is the record it closes.
+- A `pending` row whose request `scoped-mcp-approve --deny` dropped is closed `denied`. The
+  approver writes a `hitl:denied:<id>` tombstone (TTL 1 h) for this.
+- A `pending` row older than `timeout_seconds` plus 120 s is closed `expired`. The extra
+  120 s is the signed-token lifetime, so a request approved at the last moment is never
+  closed while its approval is still redeemable.
+- The update is guarded on `state = 'pending'`, so a row is closed, and reported, once.
+- A deny through the HTTP endpoint is reported where it happens.
+
+Bus events are for display. Never approve, grant or launch anything from one.
+
 ## Complete example
 
 ```yaml

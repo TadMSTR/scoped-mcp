@@ -227,8 +227,13 @@ class RegistryDB:
         state: str,
         expected_state: str | None = None,
         resolved_via: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Mark an approval resolved (approved | denied | consumed | expired).
+
+        Returns True only if a row was updated. The HITL reconcile emits ``hitl.closed``
+        on True and nothing on False, which is what makes the guarded update the
+        exactly-once point when several processes serve one agent. Every other caller
+        ignores the return value, as before.
 
         ``expected_state``, when given, adds a ``WHERE state = expected_state`` guard
         so this transition only applies from that specific prior state — a caller that
@@ -248,7 +253,7 @@ class RegistryDB:
         explicitly supplies it, never clobbered back to NULL on a later transition.
         """
         if self._pool is None:
-            return
+            return False
         try:
             async with self._pool.acquire() as conn:
                 # Build the base SET/WHERE + params, then append resolved_via only
@@ -278,8 +283,49 @@ class RegistryDB:
                         target_state=state,
                         expected_state=expected_state,
                     )
+                return isinstance(result, str) and result != "UPDATE 0"
         except Exception as e:  # fail-open
             _log.warning("registry_resolve_approval_failed", error=type(e).__name__)
+            return False
+
+    async def list_pending_hitl(
+        self, agent_id: str, grace_seconds: int, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        """This agent's ``pending`` approval rows, oldest first, for the HITL reconcile.
+
+        ``overdue`` is computed by the database clock: created_at + ttl_seconds (300 when
+        unset) + grace_seconds has passed. Fail-open: any error returns [].
+        """
+        if self._pool is None:
+            return []
+        try:
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT approval_id, tool_name,
+                           created_at
+                             + make_interval(secs => COALESCE(ttl_seconds, 300) + $2)
+                             < now() AS overdue
+                      FROM hitl_approvals
+                     WHERE agent_id = $1 AND state = 'pending'
+                     ORDER BY created_at
+                     LIMIT $3
+                    """,
+                    agent_id,
+                    grace_seconds,
+                    limit,
+                )
+                return [
+                    {
+                        "approval_id": r["approval_id"],
+                        "tool_name": r["tool_name"],
+                        "overdue": bool(r["overdue"]),
+                    }
+                    for r in rows
+                ]
+        except Exception as e:  # fail-open
+            _log.warning("registry_list_pending_failed", error=type(e).__name__)
+            return []
 
     # -- P2/P3 (no writer yet; present for forward consumers) ---------------
 
