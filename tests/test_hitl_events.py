@@ -508,3 +508,23 @@ async def test_reconcile_skips_a_malformed_approval_id(outbox):
     )
     assert await rec.reconcile_once() == 0
     assert _files(outbox) == []
+
+
+async def test_an_unreadable_tombstone_leaves_the_row_pending(outbox, registry, key):
+    """CR-01 (#115): a state-backend error must not turn a deny into an expiry."""
+    redis = FakeRedis()
+    state = PrefixedState(redis, AGENT)
+    mw = _mw(state, "enforce", key, registry)
+    aid = await _request(mw, _args(1))
+    registry.rows[aid]["overdue"] = True
+
+    class _Down:
+        async def get(self, k):
+            raise ConnectionError("state backend down")
+
+    rec = hitl_events.HitlReconciler(
+        state=_Down(), agent_id=AGENT, registry_getter=lambda: _aw(registry)
+    )
+    assert await rec.reconcile_once() == 0
+    assert registry.rows[aid]["state"] == "pending"
+    assert [e["event"] for e in _events(outbox)].count("hitl.closed") == 0
