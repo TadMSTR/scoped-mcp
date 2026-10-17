@@ -335,11 +335,15 @@ decision.** Every error is logged and swallowed.
 `hitl.closed` comes from a reconcile loop. One runs per process, scoped to that process's
 agent, every 30 s, starting after the first tool call. It needs the session registry
 (`AGENT_REGISTRY_DSN`), because the `hitl_approvals` row is the record it closes.
-- A `pending` row whose request `scoped-mcp-approve --deny` dropped is closed `denied`. The
-  approver writes a `hitl:denied:<id>` tombstone (TTL 1 h) for this.
-- A `pending` row older than `timeout_seconds` plus 120 s is closed `expired`. The extra
-  120 s is the signed-token lifetime, so a request approved at the last moment is never
-  closed while its approval is still redeemable.
+- A `pending` row whose request was dropped by `scoped-mcp-approve --deny` or
+  `scoped-mcp hitl reject` is closed `denied`. Both write a `hitl:denied:<id>` tombstone
+  (TTL 1 h) for this.
+- A `pending` row older than `timeout_seconds` plus a grace period is closed `expired`. The
+  grace is the lifetime of an approval token the proxy would still accept: 120 s (signed)
+  under `signing.mode: enforce`, and 300 s (unsigned) under `off`/`observe`. So a request
+  approved at the last moment is never closed while its approval is still redeemable.
+- Each emit is bounded at 2 s, so a hung filesystem under `agent_bus_comms_dir` delays a
+  gated call by at most that long. Keep the directory on local disk anyway.
 - The update is guarded on `state = 'pending'`, so a row is closed, and reported, once.
 - A deny through the HTTP endpoint is reported where it happens.
 

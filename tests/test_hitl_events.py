@@ -528,3 +528,85 @@ async def test_an_unreadable_tombstone_leaves_the_row_pending(outbox, registry, 
     assert await rec.reconcile_once() == 0
     assert registry.rows[aid]["state"] == "pending"
     assert [e["event"] for e in _events(outbox)].count("hitl.closed") == 0
+
+
+# ── audit F-06: the unsigned CLI path ───────────────────────────────────────
+
+
+async def test_f06_cli_reject_writes_the_deny_tombstone(outbox, registry):
+    from scoped_mcp.hitl_cli import _decide
+
+    redis = FakeRedis()
+    state = PrefixedState(redis, AGENT)
+    mw = _mw(state, "off", None, registry)
+    aid = await _request(mw, _args(1))
+    assert await _decide("redis://unused", aid, "reject", _client=redis) == 0
+    assert await state.get(hitl_events.deny_tombstone_key(aid)) == "1"
+    assert await mw._reconciler.reconcile_once() == 1
+    [closed] = [e["metadata"] for e in _events(outbox) if e["event"] == "hitl.closed"]
+    assert closed["outcome"] == "denied"
+
+
+async def test_f06_a_cli_approved_consume_moves_the_pending_row_to_consumed(outbox, registry):
+    from scoped_mcp.hitl_cli import _decide
+
+    redis = FakeRedis()
+    state = PrefixedState(redis, AGENT)
+    mw = _mw(state, "off", None, registry)
+    aid = await _request(mw, _args(1))
+    assert await _decide("redis://unused", aid, "approve", _client=redis) == 0
+    assert registry.rows[aid]["state"] == "pending"  # the CLI never touches the registry
+    assert await mw(None, TOOL, _args(1), _executed) == "EXECUTED"
+    assert registry.rows[aid]["state"] == "consumed"
+    registry.rows[aid]["overdue"] = True
+    assert await mw._reconciler.reconcile_once() == 0
+    assert "hitl.closed" not in [e["event"] for e in _events(outbox)]
+
+
+@pytest.mark.parametrize("mode,grace", [("off", 300), ("observe", 300), ("enforce", 120)])
+def test_f06_grace_follows_the_token_lifetime_the_mode_accepts(tmp_path, key, mode, grace):
+    from scoped_mcp.hitl import build_hitl_middleware
+    from scoped_mcp.manifest import HitlConfig
+
+    signing = {"mode": mode}
+    if mode != "off":
+        pub = tmp_path / "approver.pub"
+        from cryptography.hazmat.primitives import serialization
+
+        pub.write_bytes(
+            key.public_key().public_bytes(
+                serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+        )
+        signing["public_key_path"] = str(pub)
+    cfg = HitlConfig(approval_required=["*"], signing=signing)
+    hitl_events.configure_hitl_events(enabled=True, comms_dir=str(tmp_path))
+    try:
+        mw = build_hitl_middleware(cfg, PrefixedState(FakeRedis(), AGENT), AGENT, "build")
+        assert mw._reconciler._grace == grace
+    finally:
+        hitl_events.configure_hitl_events(enabled=False, comms_dir=None)
+
+
+# ── audit F-08: a hung filesystem must not stall the gate ───────────────────
+
+
+async def test_f08_a_hung_write_is_abandoned_after_the_timeout(outbox, monkeypatch):
+    import threading
+    import time
+
+    release = threading.Event()
+
+    def hang(*a, **kw):
+        release.wait(5)
+
+    monkeypatch.setattr(hitl_events, "_write", hang)
+    monkeypatch.setattr(hitl_events, "EMIT_TIMEOUT_SECONDS", 0.2)
+    t0 = time.monotonic()
+    try:
+        await hitl_events.closed(
+            approval_id=f"{AGENT}.aaaaaaaaaaaa", agent_id=AGENT, tool=TOOL, outcome="expired"
+        )
+        assert time.monotonic() - t0 < 2
+    finally:
+        release.set()

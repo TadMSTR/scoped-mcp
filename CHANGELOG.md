@@ -31,6 +31,17 @@ HITL lifecycle events. Build plan `operator-panel-2026-09-p3-lifecycle-events`, 
 - `RegistryDB.list_pending_hitl()`. `RegistryDB.resolve_hitl_approval()` now returns whether
   it updated a row; existing callers ignore the value.
 
+### Security
+- Fixes from the security audit and CodeRabbit review of this release:
+  - **Unreadable tombstone (CodeRabbit CR-01 on #115):** a state-backend error reading
+    the deny tombstone leaves the row pending. Before, it was taken as "no tombstone".
+  - **Unsigned path (audit F-06):** the reconcile's grace is 300 s when unsigned tokens
+    are accepted. `scoped-mcp hitl reject` writes the deny tombstone. An unsigned consume
+    of a CLI-approved row (still `pending`) records it `consumed`. Before, such rows read
+    as `expired`.
+  - **Hung filesystem (audit F-08):** each emit is bounded at 2 s, so a hung filesystem
+    cannot stall a gated call.
+
 ### Changed
 - `HitlMiddleware._accept_preapproval` returns `(accepted, signed_approval_id,
   refusal_reason)`.

@@ -373,9 +373,18 @@ class HitlMiddleware:
                             expected_state="pending",
                             resolved_via="signed_approver",
                         )
-                    else:
+                    # The endpoint moves the row to "approved" first. The operator CLI
+                    # (`scoped-mcp hitl approve`) never touches the registry, so its row is
+                    # still "pending" here; without the fallback it stayed pending and the
+                    # reconcile later closed it as expired (audit F-06).
+                    elif not await registry.resolve_hitl_approval(
+                        approval_id, "consumed", expected_state="approved"
+                    ):
                         await registry.resolve_hitl_approval(
-                            approval_id, "consumed", expected_state="approved"
+                            approval_id,
+                            "consumed",
+                            expected_state="pending",
+                            resolved_via="unsigned_token",
                         )
                 except Exception as e:  # fail-open — audit must never block the call
                     _log.warning(
@@ -567,7 +576,17 @@ def build_hitl_middleware(
         public_key=public_key,
         approve_hint=signing.approve_command,
         reconciler=(
-            hitl_events.HitlReconciler(state=state, agent_id=agent_id)
+            hitl_events.HitlReconciler(
+                state=state,
+                agent_id=agent_id,
+                # Unsigned tokens (off/observe) live PREAPPROVAL_TTL_SECONDS, not the
+                # signed 120 s, so a request is not "expired" while one may be redeemed.
+                grace_seconds=(
+                    hitl_events.EXPIRY_GRACE_SECONDS
+                    if signing.mode == "enforce"
+                    else max(hitl_events.EXPIRY_GRACE_SECONDS, PREAPPROVAL_TTL_SECONDS)
+                ),
+            )
             if hitl_events.is_enabled()
             else None
         ),

@@ -64,6 +64,11 @@ EXPIRY_GRACE_SECONDS = 120
 
 RECONCILE_INTERVAL_SECONDS = 30
 
+# A hung filesystem under agent_bus_comms_dir (an NFS path, say) must not stall a gated
+# call (audit F-08). The write keeps running in its executor thread; the gate stops
+# waiting for it.
+EMIT_TIMEOUT_SECONDS = 2.0
+
 _outbox: Path | None = None
 _stamp_lock = threading.Lock()
 _last_stamp: datetime | None = None
@@ -130,7 +135,10 @@ async def _emit(event: str, summary: str, metadata: dict[str, Any]) -> None:
         return
     try:
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, _write, outbox, event, summary, metadata)
+        await asyncio.wait_for(
+            loop.run_in_executor(None, _write, outbox, event, summary, metadata),
+            EMIT_TIMEOUT_SECONDS,
+        )
     except Exception as e:  # never let emission touch the gate
         _log.warning("hitl_event_emit_failed", hitl_event=event, error=type(e).__name__)
 
@@ -236,10 +244,16 @@ class HitlReconciler:
         agent_id: str,
         interval: float = RECONCILE_INTERVAL_SECONDS,
         registry_getter: Any = None,
+        grace_seconds: int = EXPIRY_GRACE_SECONDS,
     ) -> None:
         self._state = state
         self._agent_id = agent_id
         self._interval = interval
+        # How long past its timeout a pending row may still be redeemed. 120 s (the
+        # signed-token lifetime) under signing enforce. When unsigned tokens are accepted
+        # (off/observe), the CLI and the endpoint write tokens that live
+        # PREAPPROVAL_TTL_SECONDS, so the caller passes that (audit F-06).
+        self._grace = grace_seconds
         self._registry_getter = registry_getter
         self._task: asyncio.Task | None = None
 
@@ -255,7 +269,7 @@ class HitlReconciler:
         registry = await self._registry()
         if not registry.enabled:
             return 0
-        rows = await registry.list_pending_hitl(self._agent_id, EXPIRY_GRACE_SECONDS)
+        rows = await registry.list_pending_hitl(self._agent_id, self._grace)
         closed_count = 0
         for row in rows:
             approval_id = row["approval_id"]
