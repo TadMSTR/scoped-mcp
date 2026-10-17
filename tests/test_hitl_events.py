@@ -610,3 +610,65 @@ async def test_f08_a_hung_write_is_abandoned_after_the_timeout(outbox, monkeypat
         assert time.monotonic() - t0 < 2
     finally:
         release.set()
+
+
+# ── round 2 R2-04: the unsigned token's approval_id is scoped to this agent ──
+
+
+async def test_r2_04_an_unsigned_token_cannot_resolve_another_agents_row(outbox, registry):
+    redis = FakeRedis()
+    state = PrefixedState(redis, AGENT)
+    mw = _mw(state, "off", None, registry)
+    registry.rows["sysadmin.aaaaaaaaaaaa"] = {
+        "agent_id": "sysadmin",
+        "tool_name": TOOL,
+        "state": "pending",
+        "overdue": False,
+    }
+    await state.set_with_ttl(
+        _preapproval_key(TOOL, mw_hash(_args(9))),
+        json.dumps({"status": "approved", "approval_id": "sysadmin.aaaaaaaaaaaa"}),
+        60,
+    )
+    assert await mw(None, TOOL, _args(9), _executed) == "EXECUTED"
+    assert registry.rows["sysadmin.aaaaaaaaaaaa"]["state"] == "pending"
+    [ap] = [e["metadata"] for e in _events(outbox) if e["event"] == "hitl.approved"]
+    assert "approval_id" not in ap
+
+
+async def test_r2_04_endpoint_writes_the_audit_row_before_the_token(registry, monkeypatch):
+    order = []
+    redis = FakeRedis()
+    state = PrefixedState(redis, AGENT)
+    mw = _mw(state, "off", None, registry)
+    aid = await _request(mw, _args(1))
+    real_set = state.set_with_ttl
+    real_resolve = registry.resolve_hitl_approval
+
+    async def set_spy(k, v, ttl):
+        order.append("token")
+        await real_set(k, v, ttl)
+
+    async def resolve_spy(approval_id, st, **kw):
+        order.append(f"row:{st}")
+        return await real_resolve(approval_id, st, **kw)
+
+    monkeypatch.setattr(state, "set_with_ttl", set_spy)
+    monkeypatch.setattr(registry, "resolve_hitl_approval", resolve_spy)
+    assert (await hitl_endpoint.approve(state, AGENT, aid))["status"] == "approved"
+    assert order == ["row:approved", "token"]
+
+
+async def test_r2_04_a_failed_token_write_moves_the_row_to_expired(registry, monkeypatch):
+    redis = FakeRedis()
+    state = PrefixedState(redis, AGENT)
+    mw = _mw(state, "off", None, registry)
+    aid = await _request(mw, _args(1))
+
+    async def boom(*a, **kw):
+        raise ConnectionError("state backend down")
+
+    monkeypatch.setattr(state, "set_with_ttl", boom)
+    with pytest.raises(ConnectionError):
+        await hitl_endpoint.approve(state, AGENT, aid)
+    assert registry.rows[aid]["state"] == "expired"

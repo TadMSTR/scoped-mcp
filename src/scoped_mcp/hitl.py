@@ -361,6 +361,16 @@ class HitlMiddleware:
             if not signed:
                 with contextlib.suppress(json.JSONDecodeError, AttributeError, TypeError):
                     approval_id = json.loads(preapproved).get("approval_id")
+                # The unsigned token's id is whatever its writer put there. Only this
+                # agent's own requests may be resolved from it (round 2 R2-04), as the
+                # endpoint's _belongs_to_agent check does: another agent's row is never
+                # touched, and a malformed id resolves nothing.
+                if not (
+                    isinstance(approval_id, str)
+                    and "." in approval_id
+                    and approval_id.rsplit(".", 1)[0] == self._agent_id
+                ):
+                    approval_id = None
             if approval_id:
                 try:
                     from .registry_db import get_registry

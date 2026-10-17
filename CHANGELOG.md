@@ -41,6 +41,10 @@ HITL lifecycle events. Build plan `operator-panel-2026-09-p3-lifecycle-events`, 
     as `expired`.
   - **Hung filesystem (audit F-08):** each emit is bounded at 2 s, so a hung filesystem
     cannot stall a gated call.
+  - **Scoped `approval_id` (re-check round 2, R2-04):** an unsigned token's
+    `approval_id` must belong to this agent before it resolves any registry row. The
+    endpoint writes the `approved` row before the token, and moves the row to
+    `expired` if the token write fails.
 
 ### Changed
 - `HitlMiddleware._accept_preapproval` returns `(accepted, signed_approval_id,
