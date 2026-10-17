@@ -56,7 +56,7 @@ jobs:
       # v0.5.0. SCOPED_MCP_REQUIRE_AGENT_BUS below turns its absence into a failure, so
       # the contract gate cannot pass by being skipped.
       - name: Install the agent-bus contract validator (test-only)
-        run: pip install "agent-bus @ git+https://github.com/TadMSTR/agent-bus@6fb5c241ae71a58fe8493fd0b4566de99609f83e"
+        run: pip install "agent-bus @ git+https://github.com/TadMSTR/agent-bus@41c1adea50d1b2cc5f9fc5849569adc4348af635"
 
       - name: Lint (ruff)
         run: ruff check src/ tests/
