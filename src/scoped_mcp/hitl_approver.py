@@ -54,6 +54,7 @@ import yaml
 
 from .audit import _key_looks_sensitive
 from .hitl import _canonical_args_digest, _otp_key, _preapproval_key, _short_args_hash
+from .hitl_events import DENY_TOMBSTONE_TTL_SECONDS, deny_tombstone_key
 from .hitl_signing import (
     MAX_LIFETIME_SECONDS,
     SigningKeyError,
@@ -199,6 +200,14 @@ async def run(
         if claimed is None:
             print("error: no pending approval with that id (expired or already decided)", file=err)
             return EXIT_NOT_FOUND
+        # The broker cannot see this deny: the keys are removed from another uid and it
+        # is not told. The tombstone is how its reconcile tells a deny from an expiry.
+        # Written only after a successful claim, so it never marks a request that was
+        # already gone. It authorises nothing; the worst a forged one does is relabel an
+        # expiry as a deny in the audit trail.
+        await client.set(
+            prefix + deny_tombstone_key(approval_id), "1", ex=DENY_TOMBSTONE_TTL_SECONDS
+        )
         print(f"denied: {approval_id}", file=out)
         return EXIT_OK
 

@@ -34,6 +34,7 @@ from typing import Any
 
 import structlog
 
+from . import hitl_events
 from .hitl import PREAPPROVAL_TTL_SECONDS, _otp_key, _preapproval_key
 from .state import StateBackend
 
@@ -139,12 +140,22 @@ async def approve(
     # the middleware can resolve the audit row to "consumed" once the token is
     # actually used (SMCP-39) — otherwise hitl_approvals.state sticks at
     # "approved" forever and a later reconcile pass re-nudges a resolved session.
-    await state.set_with_ttl(
-        _preapproval_key(tool_name, args_hash),
-        json.dumps({"status": "approved", "approval_id": approval_id}),
-        PREAPPROVAL_TTL_SECONDS,
-    )
+    #
+    # The audit row is written BEFORE the token (round 2 R2-04). In the other order, an
+    # agent redeeming the token in between had its consume recorded first, and this
+    # write then put the row back to "approved". If the token write fails, the row is
+    # moved on to "expired" so it never claims an approval that cannot be used; the
+    # exception still propagates and the HTTP layer fails closed.
     await _resolve_audit(approval_id, "approved", resolved_via=resolved_via)
+    try:
+        await state.set_with_ttl(
+            _preapproval_key(tool_name, args_hash),
+            json.dumps({"status": "approved", "approval_id": approval_id}),
+            PREAPPROVAL_TTL_SECONDS,
+        )
+    except Exception:
+        await _resolve_audit(approval_id, "expired", resolved_via=resolved_via)
+        raise
     _log.warning(
         "hitl_approved_via_endpoint",
         approval_id=approval_id,
@@ -183,6 +194,11 @@ async def deny(
         agent_id=agent_id,
         tool=tool_name,
         resolved_via=resolved_via,
+    )
+    # Resolved in-process, so it is emitted here; the reconcile skips rows that are no
+    # longer pending.
+    await hitl_events.closed(
+        approval_id=approval_id, agent_id=agent_id, tool=tool_name, outcome="denied"
     )
     return {"status": "denied", "tool": tool_name, "agent_id": agent_id}
 

@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.0] — 2026-10-16
+
+HITL lifecycle events. Build plan `operator-panel-2026-09-p3-lifecycle-events`, Phase 4.
+
+### Added
+- **`audit.agent_bus_hitl_emit`** (default `false`, requires `audit.agent_bus_comms_dir`).
+  When on, the proxy writes `hitl.requested`, `hitl.approved`, `hitl.refused` and
+  `hitl.closed` as files in `<agent_bus_comms_dir>/outbox/scoped-mcp/`, in agent-bus's
+  producer-outbox format. agent-bus drains them into its chained log. These events go to
+  the outbox, not to `audit.py`'s session-log append, which is unlocked and unchained.
+  **No event carries a tool-argument value.** A sentinel test covers request, approve,
+  consume, deny, expire and refuse under signing `off`, `observe` and `enforce`. A failed
+  emit never changes the gate's decision.
+- **The HITL reconcile.** Until now, an expired request or one denied through
+  `scoped-mcp-approve --deny` left its `hitl_approvals` row `pending` for ever. With
+  events on, each process closes its own agent's stale rows every 30 s: `denied` when the
+  approver's tombstone is present, otherwise `expired` once the timeout plus the 120 s
+  signed-token lifetime has passed. The update is guarded on `state = 'pending'`, and only
+  the process that changed the row emits `hitl.closed`.
+- `scoped-mcp-approve --deny` writes a `hitl:denied:<approval_id>` tombstone (TTL 1 h) after
+  it claims the request. The tombstone authorises nothing.
+- `RegistryDB.list_pending_hitl()`. `RegistryDB.resolve_hitl_approval()` now returns whether
+  it updated a row; existing callers ignore the value.
+
+### Security
+- Fixes from the security audit and CodeRabbit review of this release:
+  - **Unreadable tombstone (CodeRabbit CR-01 on #115):** a state-backend error reading
+    the deny tombstone leaves the row pending. Before, it was taken as "no tombstone".
+  - **Unsigned path (audit F-06):** the reconcile's grace is 300 s when unsigned tokens
+    are accepted. `scoped-mcp hitl reject` writes the deny tombstone. An unsigned consume
+    of a CLI-approved row (still `pending`) records it `consumed`. Before, such rows read
+    as `expired`.
+  - **Hung filesystem (audit F-08):** each emit is bounded at 2 s, so a hung filesystem
+    cannot stall a gated call.
+  - **Scoped `approval_id` (re-check round 2, R2-04):** an unsigned token's
+    `approval_id` must belong to this agent before it resolves any registry row. The
+    endpoint writes the `approved` row before the token, and moves the row to
+    `expired` if the token write fails.
+
+### Changed
+- `HitlMiddleware._accept_preapproval` returns `(accepted, signed_approval_id,
+  refusal_reason)`.
+
 ## [1.17.2] — 2026-10-11
 
 ### Fixed

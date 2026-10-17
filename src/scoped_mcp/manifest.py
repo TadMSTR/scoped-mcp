@@ -312,6 +312,11 @@ class AuditConfig(BaseModel):
     # Agent-bus: write tool.called events directly to the JSONL log
     agent_bus_emit: bool = False
     agent_bus_comms_dir: str | None = None
+    # Agent-bus: write hitl.requested/approved/refused/closed to
+    # <agent_bus_comms_dir>/outbox/scoped-mcp/, and run the HITL reconcile that detects
+    # expiries and approver denies. Never carries a tool-argument value. Separate from
+    # agent_bus_emit because that one is a session-scoped, per-call stream.
+    agent_bus_hitl_emit: bool = False
 
     # Argument logging: include kwargs in local JSONL (default: on)
     # Disable when the audit log is shipped off-host or stored with lower access control.
@@ -325,6 +330,10 @@ class AuditConfig(BaseModel):
     def _check_agent_bus_requirements(self) -> AuditConfig:
         if self.agent_bus_emit and not self.agent_bus_comms_dir:
             raise ValueError("audit.agent_bus_comms_dir is required when agent_bus_emit is true")
+        if self.agent_bus_hitl_emit and not self.agent_bus_comms_dir:
+            raise ValueError(
+                "audit.agent_bus_comms_dir is required when agent_bus_hitl_emit is true"
+            )
         return self
 
 

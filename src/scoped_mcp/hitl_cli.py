@@ -34,6 +34,7 @@ import json
 import sys
 
 from .hitl import PREAPPROVAL_TTL_SECONDS
+from .hitl_events import DENY_TOMBSTONE_TTL_SECONDS, deny_tombstone_key
 from .manifest import load_manifest
 
 
@@ -169,6 +170,16 @@ async def _decide(redis_url: str, approval_id: str, decision: str, _client=None)
                     "pre-approval token not written; the agent must re-trigger the call",
                     file=sys.stderr,
                 )
+
+        else:
+            # So the broker's reconcile records a reject as `denied` rather than
+            # `expired`, as scoped-mcp-approve --deny does (audit F-06). It authorises
+            # nothing.
+            await client.set(
+                f"scoped-mcp:{agent_id}:{deny_tombstone_key(approval_id)}",
+                "1",
+                ex=DENY_TOMBSTONE_TTL_SECONDS,
+            )
 
         # Delete the pending key in both approve and reject cases.
         await client.delete(key)
