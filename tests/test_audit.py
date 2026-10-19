@@ -1099,3 +1099,23 @@ def test_object_args_are_flattened_even_when_str_is_clean() -> None:
     _redact_record(rec)
     assert rec.args == ()
     assert rec.getMessage() == "got Obj"
+
+
+def test_unformattable_record_fails_closed() -> None:
+    """A %-mismatch with an object arg used to reach handleError with its raw repr."""
+    import logging
+
+    from scoped_mcp.audit import _redact_record, configure_value_redaction
+
+    configure_value_redaction(environ={"PROBE_API_TOKEN": _SHAPELESS})
+
+    class Obj:
+        def __repr__(self) -> str:
+            return f"Obj({_SHAPELESS})"
+
+    rec = _rec("two %s %s but one arg", (Obj(),))
+    _redact_record(rec)
+    assert rec.args == ()
+    out = logging.Formatter("%(message)s").format(rec)
+    assert _SHAPELESS not in out
+    assert "could not be formatted" in out

@@ -464,7 +464,10 @@ def _redact_record(record: logging.LogRecord) -> None:
                 record.msg = redacted
                 record.args = ()
     except Exception:
-        pass  # never let redaction drop a log record
+        # Fail closed: a record whose message cannot be built (a %-mismatch, say) would
+        # reach handleError, which prints the raw args. Keep the record, drop the text.
+        record.msg = "<log message dropped: it could not be formatted for redaction>"
+        record.args = ()
     try:
         if record.exc_info:
             record.exc_text = _exc_formatter.formatException(record.exc_info)
