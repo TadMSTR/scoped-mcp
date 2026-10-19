@@ -392,8 +392,11 @@ Before a record is written, every string in it is redacted twice:
   secrets file are not in the environment, so this pass does not see them.
 - **By pattern.** JWTs, bearer tokens, GitHub tokens, Vault tokens and hex runs of 32+.
 
-The same two passes run over stdlib log records on stderr, including their tracebacks
-and stack info. Tuples, sets, dict keys and other objects are scanned too; an object is
+The same two passes run over every stdlib log record when it is created, including its
+traceback and stack info, so libraries with their own handlers (FastMCP's `fastmcp.*`
+loggers do not propagate to root) are covered too. A traceback is printed as redacted plain
+text rather than a Rich traceback. Each value's `repr`- and JSON-escaped forms are matched as
+well as the literal. Tuples, sets, dict keys and other objects are scanned too; an object is
 rendered with `repr()` first. Only the number of values is
 logged (`value_redaction_configured`), never the values, their lengths or hashes.
 

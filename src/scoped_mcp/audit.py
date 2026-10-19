@@ -300,6 +300,11 @@ def configure_value_redaction(
         value = env.get(name)
         if value and _is_redactable_value(value):
             names.setdefault(value, name)
+            # The same secret as repr() and JSON escape it (doubled backslashes, escaped
+            # quotes, \xNN / \uNNNN). Either form is trivially reversed, so match it too.
+            for escaped in (repr(value)[1:-1], json.dumps(value)[1:-1]):
+                if escaped != value:
+                    names.setdefault(escaped, name)
     if not names:
         _value_redaction = None
         return 0
@@ -355,7 +360,9 @@ def _sanitize_value(value: Any, key: str = "") -> Any:
     if isinstance(value, dict):
         # Keys are scanned too: a secret used as a key is still a secret in the file.
         return {
-            (_redact_string(k) if isinstance(k, str) else k): _sanitize_value(v, k)
+            (_redact_string(k) if isinstance(k, str) else k): _sanitize_value(
+                v, k if isinstance(k, str) else ""
+            )
             for k, v in value.items()
         }
     if isinstance(value, (list, tuple, set, frozenset)):
@@ -401,28 +408,60 @@ class _RedactionFilter(logging.Filter):
     ``logger.exception``, and exception text is where a DSN or a query-string token turns up.
     """
 
-    _exc_formatter = logging.Formatter()
-
     def filter(self, record: logging.LogRecord) -> bool:
-        try:
-            record.msg = _redact_string(record.getMessage())
-            record.args = ()
-        except Exception:
-            pass  # never let redaction drop a log record
-        try:
-            if record.exc_info:
-                record.exc_text = self._exc_formatter.formatException(record.exc_info)
-                record.exc_info = None
-            if record.exc_text:
-                record.exc_text = _redact_string(record.exc_text)
-            if record.stack_info:
-                record.stack_info = _redact_string(record.stack_info)
-        except Exception:
-            # Fail closed here: an unformattable traceback is dropped, not printed raw.
-            record.exc_info = None
-            record.exc_text = "<traceback dropped: redaction failed>"
-            record.stack_info = None
+        _redact_record(record)
         return True
+
+
+_exc_formatter = logging.Formatter()
+
+
+def _redact_record(record: logging.LogRecord) -> None:
+    """Redact a stdlib record in place: message, traceback and stack info.
+
+    The raw ``exc_info`` is dropped once it has been formatted, because a handler such as
+    Rich's rebuilds the traceback from it rather than using ``exc_text``.
+    """
+    try:
+        record.msg = _redact_string(record.getMessage())
+        record.args = ()
+    except Exception:
+        pass  # never let redaction drop a log record
+    try:
+        if record.exc_info:
+            record.exc_text = _exc_formatter.formatException(record.exc_info)
+            record.exc_info = None
+        if record.exc_text:
+            record.exc_text = _redact_string(record.exc_text)
+        if record.stack_info:
+            record.stack_info = _redact_string(record.stack_info)
+    except Exception:
+        # Fail closed here: an unformattable traceback is dropped, not printed raw.
+        record.exc_info = None
+        record.exc_text = "<traceback dropped: redaction failed>"
+        record.stack_info = None
+
+
+def _install_redacting_record_factory() -> None:
+    """Redact every stdlib LogRecord when it is created, whichever logger made it.
+
+    A handler filter only covers records that reach that handler. FastMCP's ``fastmcp.*``
+    loggers have their own Rich handlers and ``propagate=False``, and it replaces those
+    handlers whenever it reconfigures, so a filter attached to them can be dropped. The
+    factory runs after the level check, for every logger, before any handler sees the
+    record. Installed once; a second call does not wrap it again.
+    """
+    current = logging.getLogRecordFactory()
+    if getattr(current, "_scoped_mcp_redacting", False):
+        return
+
+    def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = current(*args, **kwargs)
+        _redact_record(record)
+        return record
+
+    factory._scoped_mcp_redacting = True  # type: ignore[attr-defined]
+    logging.setLogRecordFactory(factory)
 
 
 class _PrivateRotatingFileHandler(logging.handlers.RotatingFileHandler):
@@ -500,6 +539,8 @@ def configure_logging(audit_log: str | None = None, ops_log: str | None = None) 
     stderr_handler = logging.StreamHandler(sys.stderr)
     stderr_handler.setFormatter(_json_fmt)
     stderr_handler.addFilter(_RedactionFilter())  # F-05: scrub stdlib/dep logs on stderr
+    # And every record, including FastMCP's, which never reaches root (vikunja#1075).
+    _install_redacting_record_factory()
     root.addHandler(stderr_handler)
 
     # Rotation knobs — bound disk for a long-lived process; no-op for tiny stdio files.

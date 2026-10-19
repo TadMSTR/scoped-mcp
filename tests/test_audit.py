@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import pathlib
 
 import pytest
@@ -866,3 +867,111 @@ def test_tuples_and_sets_keep_their_elements_as_a_list() -> None:
 
     assert _sanitize_value(("a", "b")) == ["a", "b"]
     assert _sanitize_value(frozenset({"a"})) == ["a"]
+
+
+def test_fastmcp_logger_tracebacks_are_redacted_through_real_dispatch() -> None:
+    """R2-01: fastmcp.* loggers do not propagate to root, so a root filter never sees them.
+
+    Logs through the real logger after `import fastmcp`, and reads the record from a handler
+    on the fastmcp logger whose formatter rebuilds the traceback from exc_info, the way
+    Rich does. A hand-built record passed to the filter would prove nothing here.
+    """
+    import logging
+
+    import fastmcp  # noqa: F401 — configures fastmcp's own handlers, propagate=False
+
+    from scoped_mcp.audit import _install_redacting_record_factory, configure_value_redaction
+
+    class _FromExcInfo(logging.Formatter):
+        def format(self, record: logging.LogRecord) -> str:
+            tb = self.formatException(record.exc_info) if record.exc_info else ""
+            return f"{record.getMessage()}\n{record.exc_text or ''}\n{tb}"
+
+    seen: list[str] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            seen.append(self.format(record))
+
+    configure_value_redaction(environ={"DOCKHAND_API_TOKEN": _SHAPELESS})
+    _install_redacting_record_factory()
+    fm = logging.getLogger("fastmcp")
+    assert fm.propagate is False, "premise: fastmcp does not propagate to root"
+    handler = _Capture()
+    handler.setFormatter(_FromExcInfo())
+    fm.addHandler(handler)
+    try:
+        try:
+            raise RuntimeError(f"connect failed to http://x/?t={_SHAPELESS}")
+        except RuntimeError:
+            logging.getLogger("fastmcp.server.server").exception("Error calling tool %s", "t")
+    finally:
+        fm.removeHandler(handler)
+    out = "\n".join(seen)
+    assert "RuntimeError" in out, "nothing was captured, so the test proves nothing"
+    assert _SHAPELESS not in out
+    assert "<redacted-value:DOCKHAND_API_TOKEN>" in out
+
+
+def test_record_factory_is_installed_once() -> None:
+    import logging
+
+    from scoped_mcp.audit import _install_redacting_record_factory
+
+    _install_redacting_record_factory()
+    first = logging.getLogRecordFactory()
+    _install_redacting_record_factory()
+    assert logging.getLogRecordFactory() is first
+
+
+def test_repr_escaped_secret_inside_an_object_is_redacted() -> None:
+    """R2-02: repr() doubles backslashes and escapes quotes before the value match runs."""
+    import json
+
+    from scoped_mcp.audit import _sanitize_processor, configure_value_redaction
+
+    secret = "pa'ss\\word-Q7x9-long\""
+    configure_value_redaction(environ={"PROBE_DB_PASSWORD": secret})
+
+    class M:
+        def __repr__(self) -> str:
+            return f"M(dsn={secret!r})"
+
+    out = json.dumps(_sanitize_processor(None, "info", {"event": "e", "detail": M()}))
+    assert "word-Q7x9-long" not in out
+    assert "<redacted-value:PROBE_DB_PASSWORD>" in out
+
+
+def test_json_escaped_secret_is_redacted() -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    secret = 'tok"en\\with-quotes-Q7x9'
+    configure_value_redaction(environ={"PROBE_API_TOKEN": secret})
+    rendered = json.dumps({"msg": secret})
+    assert "with-quotes-Q7x9" not in _redact_string(rendered)
+
+
+@pytest.mark.parametrize("key", [1, (1,), None])
+def test_non_str_dict_keys_do_not_break_the_sanitiser(key) -> None:
+    """R2-03: _key_looks_sensitive called .lower() on whatever the key was."""
+    from scoped_mcp.audit import _sanitize_value
+
+    assert _sanitize_value({key: "x"}) == {key: "x"}
+
+
+def test_configure_logging_installs_the_redacting_record_factory() -> None:
+    import logging
+
+    import structlog
+
+    from scoped_mcp.audit import configure_logging
+
+    saved_structlog = structlog.get_config()
+    root = logging.getLogger()
+    saved_root_handlers = list(root.handlers)
+    try:
+        configure_logging()
+        assert getattr(logging.getLogRecordFactory(), "_scoped_mcp_redacting", False)
+    finally:
+        structlog.configure(**saved_structlog)
+        root.handlers[:] = saved_root_handlers

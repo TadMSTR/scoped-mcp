@@ -11,15 +11,20 @@ from scoped_mcp.identity import AgentContext
 
 @pytest.fixture(autouse=True)
 def _no_value_redaction_leak():
-    """Reset the process-wide by-value redaction set after every test.
+    """Reset the process-wide redaction state after every test.
 
-    configure_logging() builds it from the real environment, and a set left behind by one
-    test would silently redact strings in the next.
+    configure_logging() builds the value set from the real environment and installs a
+    redacting LogRecord factory. Either, left behind by one test, would silently change
+    what the next one logs.
     """
+    import logging
+
+    factory = logging.getLogRecordFactory()
     yield
     from scoped_mcp.audit import configure_value_redaction
 
     configure_value_redaction(environ={})
+    logging.setLogRecordFactory(factory)
 
 
 @pytest.fixture

@@ -36,8 +36,10 @@ A cap on forwarded binary blocks, private audit logs and by-value redaction. Bui
   `_ROLE_ID`, `_DSN`, `_BEARER`, `_PAT`, `_WEBHOOK[_URL]`), every URL value carrying
   userinfo, `SCOPED_MCP_ALERT_NTFY_URL`, and every `${VAR}` the manifest references, and replaces them in every log string with
   `<redacted-value:NAME>`, longest value first and before the pattern pass. It covers the
-  stdlib records on stderr too, tracebacks and stack info included, and tuples, sets, dict
-  keys and object `repr()`s on the file sinks. Values under 12 characters, digit-only values and bare URL
+  stdlib records on stderr too, tracebacks and stack info included. That runs in a
+  `LogRecord` factory, so it also reaches FastMCP's own `fastmcp.*` loggers, which do not
+  propagate to root. Tuples, sets, dict keys and object `repr()`s are scanned on the file
+  sinks, and each value's `repr`- and JSON-escaped forms are matched as well. Values under 12 characters, digit-only values and bare URL
   origins are skipped. Only a count of values is logged. vikunja#1075 item 3 (audit
   2026-10-12/observability-refresh-2026-10-p4-secrets-access F-02).
 
