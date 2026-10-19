@@ -975,3 +975,127 @@ def test_configure_logging_installs_the_redacting_record_factory() -> None:
     finally:
         structlog.configure(**saved_structlog)
         root.handlers[:] = saved_root_handlers
+
+
+def test_uvicorn_access_log_still_formats_after_configure_logging(capsys) -> None:
+    """R3-01: uvicorn's AccessFormatter unpacks five record.args; emptying them broke every
+    access line into a "--- Logging error ---" block. Uses uvicorn's real LOGGING_CONFIG."""
+    import logging
+    import logging.config
+
+    import structlog
+    import uvicorn.config
+
+    from scoped_mcp.audit import configure_logging, configure_value_redaction
+
+    saved_structlog = structlog.get_config()
+    root = logging.getLogger()
+    saved_root_handlers = list(root.handlers)
+    access = logging.getLogger("uvicorn.access")
+    saved_access = (list(access.handlers), access.propagate, access.level)
+    errors: list[logging.LogRecord] = []
+    saved_handle_error = logging.Handler.handleError
+    logging.Handler.handleError = lambda self, record: errors.append(record)  # type: ignore[method-assign]
+    try:
+        configure_logging()
+        logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
+        configure_value_redaction(environ={"PROBE_API_TOKEN": _SHAPELESS})
+        access.info(
+            '%s - "%s %s HTTP/%s" %d',
+            "127.0.0.1:5555",
+            "POST",
+            f"/mcp?t={_SHAPELESS}",
+            "1.1",
+            200,
+        )
+    finally:
+        logging.Handler.handleError = saved_handle_error  # type: ignore[method-assign]
+        structlog.configure(**saved_structlog)
+        root.handlers[:] = saved_root_handlers
+        access.handlers[:], access.propagate, access.level = saved_access
+    out = capsys.readouterr()
+    text = out.out + out.err
+    assert not errors, "the access formatter raised inside logging"
+    assert '"POST /mcp?t=<redacted-value:PROBE_API_TOKEN> HTTP/1.1" 200' in text
+    assert _SHAPELESS not in text
+
+
+def _rec(msg, args):
+    import logging
+
+    return logging.LogRecord("x", logging.INFO, __file__, 1, msg, args, None)
+
+
+def test_plain_args_keep_their_shape_and_types() -> None:
+    from scoped_mcp.audit import _redact_record, configure_value_redaction
+
+    configure_value_redaction(environ={"PROBE_API_TOKEN": _SHAPELESS})
+    rec = _rec("path %s status %d", (f"/mcp?t={_SHAPELESS}", 200))
+    _redact_record(rec)
+    assert rec.args == ("/mcp?t=<redacted-value:PROBE_API_TOKEN>", 200)
+    assert rec.getMessage() == "path /mcp?t=<redacted-value:PROBE_API_TOKEN> status 200"
+
+
+def test_mapping_args_keep_their_shape() -> None:
+    from scoped_mcp.audit import _redact_record, configure_value_redaction
+
+    configure_value_redaction(environ={"PROBE_API_TOKEN": _SHAPELESS})
+    rec = _rec("t=%(t)s n=%(n)d", ({"t": _SHAPELESS, "n": 3},))
+    _redact_record(rec)
+    assert rec.args == {"t": "<redacted-value:PROBE_API_TOKEN>", "n": 3}
+
+
+def test_secret_assembled_from_two_args_is_flattened_and_redacted() -> None:
+    """Neither half matches alone; the joined message does."""
+    from scoped_mcp.audit import _redact_record, configure_value_redaction
+
+    configure_value_redaction(environ={"PROBE_API_TOKEN": _SHAPELESS})
+    half = len(_SHAPELESS) // 2
+    rec = _rec("token %s%s", (_SHAPELESS[:half], _SHAPELESS[half:]))
+    _redact_record(rec)
+    assert rec.args == ()
+    assert rec.getMessage() == "token <redacted-value:PROBE_API_TOKEN>"
+
+
+def test_object_args_are_flattened_to_a_redacted_message() -> None:
+    from scoped_mcp.audit import _redact_record, configure_value_redaction
+
+    configure_value_redaction(environ={"PROBE_API_TOKEN": _SHAPELESS})
+
+    class Obj:
+        def __repr__(self) -> str:
+            return f"Obj({_SHAPELESS})"
+
+    rec = _rec("got %r", (Obj(),))
+    _redact_record(rec)
+    assert rec.args == ()
+    assert rec.getMessage() == "got Obj(<redacted-value:PROBE_API_TOKEN>)"
+
+
+def test_secret_in_the_msg_template_is_redacted_with_args_kept() -> None:
+    from scoped_mcp.audit import _redact_record, configure_value_redaction
+
+    configure_value_redaction(environ={"PROBE_API_TOKEN": _SHAPELESS})
+    rec = _rec(f"key {_SHAPELESS} for %s", ("bob",))
+    _redact_record(rec)
+    assert rec.args == ("bob",)
+    assert rec.getMessage() == "key <redacted-value:PROBE_API_TOKEN> for bob"
+
+
+def test_object_args_are_flattened_even_when_str_is_clean() -> None:
+    """A formatter that re-renders args with %r would expose what str() hid."""
+    from scoped_mcp.audit import _redact_record, configure_value_redaction
+
+    configure_value_redaction(environ={"PROBE_API_TOKEN": _SHAPELESS})
+
+    class Obj:
+        def __str__(self) -> str:
+            return "Obj"
+
+        def __repr__(self) -> str:
+            return f"Obj({_SHAPELESS})"
+
+    rec = _rec("got %s", (Obj(),))
+    _redact_record(rec)
+    assert rec.args == ()
+    assert rec.getMessage() == "got Obj"

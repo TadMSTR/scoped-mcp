@@ -416,15 +416,53 @@ class _RedactionFilter(logging.Filter):
 _exc_formatter = logging.Formatter()
 
 
+_PLAIN_ARG_TYPES = (str, int, float, bool, type(None))
+
+
+def _redact_arg(arg: Any) -> Any:
+    return _redact_string(arg) if isinstance(arg, str) else arg
+
+
 def _redact_record(record: logging.LogRecord) -> None:
-    """Redact a stdlib record in place: message, traceback and stack info.
+    """Redact a stdlib record in place: message, args, traceback and stack info.
+
+    ``args`` keeps its shape when every element is a plain str/number: each string is
+    redacted where it stands, and so is the ``msg`` template. Formatters that unpack
+    ``record.args`` themselves (uvicorn's ``AccessFormatter`` takes five) keep working, and
+    ``%d`` still gets an int (audit R3-01). Any other arg (an object, a container) may
+    render a secret through its ``repr``, so such a record is flattened to its redacted
+    ``getMessage()`` with empty ``args``, as before. So is one whose assembled message
+    still holds a secret after the per-part pass: a DSN built from ``"%s:%s"`` exists only
+    once the parts are joined.
 
     The raw ``exc_info`` is dropped once it has been formatted, because a handler such as
     Rich's rebuilds the traceback from it rather than using ``exc_text``.
     """
     try:
-        record.msg = _redact_string(record.getMessage())
-        record.args = ()
+        args = record.args
+        if (
+            isinstance(record.msg, str)
+            and isinstance(args, tuple)
+            and all(isinstance(a, _PLAIN_ARG_TYPES) for a in args)
+        ):
+            record.msg = _redact_string(record.msg)
+            record.args = tuple(_redact_arg(a) for a in args)
+        elif (
+            isinstance(record.msg, str)
+            and isinstance(args, Mapping)
+            and all(isinstance(v, _PLAIN_ARG_TYPES) for v in args.values())
+        ):
+            record.msg = _redact_string(record.msg)
+            record.args = {k: _redact_arg(v) for k, v in args.items()}
+        else:
+            record.msg = _redact_string(record.getMessage())
+            record.args = ()
+        if record.args:
+            assembled = record.getMessage()
+            redacted = _redact_string(assembled)
+            if redacted != assembled:
+                record.msg = redacted
+                record.args = ()
     except Exception:
         pass  # never let redaction drop a log record
     try:
