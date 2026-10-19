@@ -9,6 +9,19 @@ import pytest
 from scoped_mcp.identity import AgentContext
 
 
+@pytest.fixture(autouse=True)
+def _no_value_redaction_leak():
+    """Reset the process-wide by-value redaction set after every test.
+
+    configure_logging() builds it from the real environment, and a set left behind by one
+    test would silently redact strings in the next.
+    """
+    yield
+    from scoped_mcp.audit import configure_value_redaction
+
+    configure_value_redaction(environ={})
+
+
 @pytest.fixture
 def agent_ctx() -> AgentContext:
     """A default mock AgentContext for tests."""

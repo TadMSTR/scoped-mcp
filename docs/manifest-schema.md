@@ -10,6 +10,7 @@ Manifests are YAML or JSON files passed to scoped-mcp via `--manifest`.
 | `description` | string | no | Human-readable description of this agent role |
 | `modules` | object | yes | Map of module name → module config (at least one required) |
 | `credentials` | object | no | Credential source config (defaults to `source: env`) |
+| `content_limits` | object | no | Size limits on content forwarded from upstreams. See [content_limits](#content_limits) (v1.19.0) |
 
 ## Module config
 
@@ -55,6 +56,7 @@ modules:
 | `tool_allowlist` | list[str] | `[]` | If non-empty, only these upstream tools are exposed |
 | `tool_denylist` | list[str] | `[]` | These upstream tools are always hidden (applied after allowlist) |
 | `discovery_timeout_seconds` | float | `10.0` | Timeout for connecting to the upstream server at startup |
+| `max_binary_bytes` | int | manifest `content_limits.max_binary_bytes` | Per-module override of the binary block cap. `0` disables it for this module (v1.19.0) |
 | `env` | dict[str,str] | `{}` | Environment variables for a spawned stdio child. Ignored on HTTP transport (warns since v1.16.0). Extends the MCP SDK's conditionally-forwarded safe base rather than replacing it — a child inherits nothing else from scoped-mcp. |
 
 > **stdio transport lifecycle:** Two subprocess spawns occur per module lifetime. A short-lived
@@ -65,6 +67,23 @@ modules:
 > **Note:** The `mode:` field has no effect for `mcp_proxy`. Use `tool_allowlist` or
 > `tool_denylist` to restrict which upstream tools are exposed. If no filter is set, all
 > upstream tools are registered regardless of the `mode:` value.
+
+## content_limits
+
+```yaml
+content_limits:
+  max_binary_bytes: 10485760   # default, 10 MiB; 0 disables the cap
+```
+
+`max_binary_bytes` caps each binary block an `mcp_proxy` module forwards: an image or audio
+block, or an embedded resource blob. The cap is on the **decoded** size, not on the base64
+text, which is a third larger. A block over the cap is replaced with a text block such as
+`[scoped-mcp: image image/png of 12582912 bytes dropped; cap 10485760]`, and the other
+blocks in the result are kept. The drop is logged to ops as `mcp_proxy_binary_dropped` with
+the module, tool, kind, MIME type and sizes, never the payload. An upstream MIME type that
+isn't a plain `type/subtype` is reported as `unknown`. Text blocks and embedded text
+resources are not capped. Set `config.max_binary_bytes` on one `mcp_proxy` module to
+override the value for that module only. (v1.19.0, vikunja#1071)
 
 ## Credential source config
 
@@ -348,6 +367,28 @@ agent, every 30 s, starting after the first tool call. It needs the session regi
 - A deny through the HTTP endpoint is reported where it happens.
 
 Bus events are for display. Never approve, grant or launch anything from one.
+
+### Audit log files and redaction
+
+Since v1.19.0 the audit and ops files (`--audit-log`, `--ops-log`, including rotated
+files) and the session JSONL under `agent_bus_comms_dir/logs/` are created `0600`,
+whatever the process umask. A missing log directory is created `0700`. An existing file
+or directory keeps its mode, so the shared session JSONL that agent-bus also writes is not
+re-moded.
+
+Before a record is written, every string in it is redacted twice:
+- **By value.** At startup the proxy collects the values in its own environment whose
+  names look sensitive (`*_TOKEN`, `*_KEY`, `*_SECRET`, `*_PASSWORD`, ... and names like
+  `token` or `api_key`), plus `SCOPED_MCP_ALERT_NTFY_URL`, plus every variable the manifest
+  references as `${VAR}`, whatever it is called. Each occurrence is replaced with
+  `<redacted-value:NAME>`. Values under 12 characters, digit-only values and bare URL
+  origins (`https://host:port`) are skipped. A URL with userinfo, a path or a query is
+  kept, because any of those can carry the credential. Values held only in Vault or a
+  secrets file are not in the environment, so this pass does not see them.
+- **By pattern.** JWTs, bearer tokens, GitHub tokens, Vault tokens and hex runs of 32+.
+
+The same two passes run over stdlib log records on stderr. Only the number of values is
+logged (`value_redaction_configured`), never the values, their lengths or hashes.
 
 ## Complete example
 

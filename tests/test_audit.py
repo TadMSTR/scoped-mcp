@@ -75,7 +75,9 @@ class _MockModule:
         self.agent_ctx = agent_ctx
 
 
-async def _make_tool(module: _MockModule, raise_exc: Exception | None = None) -> str:
+async def _make_tool(
+    module: _MockModule, raise_exc: Exception | None = None, value: str = "hello"
+) -> str:
     async def _tool(self: _MockModule, value: str) -> str:
         if raise_exc:
             raise raise_exc
@@ -83,7 +85,7 @@ async def _make_tool(module: _MockModule, raise_exc: Exception | None = None) ->
 
     _tool.__name__ = "test_tool"
     wrapped = audited("test_module_test_tool")(_tool)
-    return await wrapped(module, value="hello")
+    return await wrapped(module, value=value)
 
 
 @pytest.mark.asyncio
@@ -416,3 +418,336 @@ async def test_audited_emits_agent_bus_error_event(
         assert err_events[0]["metadata"]["error"] == "RuntimeError"
     finally:
         configure_audit(agent_bus_emit=False, agent_bus_comms_dir=None)
+
+
+# ── Private audit/ops/event files (vikunja#1075 item 3) ──────────────────────
+
+
+@pytest.fixture
+def permissive_umask():
+    """PM2's umask. Without it the tests would pass on a 077 workstation and prove nothing."""
+    import os
+
+    old = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(old)
+
+
+def _mode(path: pathlib.Path) -> int:
+    return path.stat().st_mode & 0o777
+
+
+def _private_handler(path: pathlib.Path, max_bytes: int = 0):
+    import logging
+
+    from scoped_mcp.audit import _PrivateRotatingFileHandler
+
+    handler = _PrivateRotatingFileHandler(str(path), maxBytes=max_bytes, backupCount=2)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    return handler
+
+
+def _record(msg: str):
+    import logging
+
+    return logging.LogRecord("audit", logging.INFO, __file__, 1, msg, None, None)
+
+
+def test_log_file_is_created_0600_under_a_permissive_umask(
+    tmp_path: pathlib.Path, permissive_umask: None
+) -> None:
+    path = tmp_path / "audit.jsonl"
+    handler = _private_handler(path)
+    try:
+        handler.emit(_record("x"))
+    finally:
+        handler.close()
+    assert _mode(path) == 0o600
+
+
+def test_rotated_and_new_log_files_stay_0600(
+    tmp_path: pathlib.Path, permissive_umask: None
+) -> None:
+    path = tmp_path / "audit.jsonl"
+    handler = _private_handler(path, max_bytes=64)
+    try:
+        for _ in range(10):
+            handler.emit(_record("y" * 40))
+    finally:
+        handler.close()
+    rotated = tmp_path / "audit.jsonl.1"
+    assert rotated.exists(), "the handler never rotated, so the test proves nothing"
+    assert _mode(rotated) == 0o600
+    assert _mode(path) == 0o600
+
+
+def test_configure_logging_creates_missing_dirs_0700_and_files_0600(
+    tmp_path: pathlib.Path, permissive_umask: None
+) -> None:
+    import logging
+
+    import structlog
+
+    from scoped_mcp.audit import configure_logging, get_audit_logger
+
+    audit_log = tmp_path / "agent" / "audit" / "audit.jsonl"
+    ops_log = tmp_path / "agent" / "ops" / "ops.jsonl"
+    saved_structlog = structlog.get_config()
+    root = logging.getLogger()
+    saved_root_handlers = list(root.handlers)
+    loggers = (logging.getLogger("audit"), logging.getLogger("ops"))
+    before = {id(h) for lg in loggers for h in lg.handlers}
+    try:
+        configure_logging(audit_log=str(audit_log), ops_log=str(ops_log))
+        get_audit_logger().info("probe")
+    finally:
+        structlog.configure(**saved_structlog)
+        root.handlers[:] = saved_root_handlers
+        for lg in loggers:
+            for h in list(lg.handlers):
+                if id(h) not in before:
+                    lg.removeHandler(h)
+                    h.close()
+    assert _mode(audit_log.parent) == 0o700
+    assert _mode(ops_log.parent) == 0o700
+    assert _mode(audit_log) == 0o600
+    assert _mode(ops_log) == 0o600
+
+
+def test_an_existing_log_dir_keeps_its_mode(tmp_path: pathlib.Path) -> None:
+    from scoped_mcp.audit import _ensure_private_dir
+
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o750)
+    _ensure_private_dir(str(shared / "audit.jsonl"))
+    assert _mode(shared) == 0o750
+
+
+def test_agent_bus_event_file_is_created_0600(
+    tmp_path: pathlib.Path, permissive_umask: None
+) -> None:
+    from scoped_mcp.audit import _sync_append_event
+
+    path = tmp_path / "2026-10-19-session.jsonl"
+    _sync_append_event(str(path), '{"a": 1}\n')
+    _sync_append_event(str(path), '{"a": 2}\n')
+    assert _mode(path) == 0o600
+    assert path.read_text() == '{"a": 1}\n{"a": 2}\n'
+
+
+def test_agent_bus_event_file_another_writer_created_keeps_its_mode(
+    tmp_path: pathlib.Path, permissive_umask: None
+) -> None:
+    """The session JSONL is shared with agent-bus. Appending must not re-mode its file."""
+    from scoped_mcp.audit import _sync_append_event
+
+    path = tmp_path / "2026-10-19-session.jsonl"
+    path.write_text("")
+    path.chmod(0o664)
+    _sync_append_event(str(path), "{}\n")
+    assert _mode(path) == 0o664
+
+
+@pytest.mark.asyncio
+async def test_agent_bus_logs_dir_is_created_0700(
+    agent_ctx: AgentContext, tmp_path: pathlib.Path, permissive_umask: None
+) -> None:
+    configure_audit(agent_bus_emit=True, agent_bus_comms_dir=str(tmp_path))
+    module = _MockModule(agent_ctx)
+    try:
+        await _make_tool(module)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0.05)
+    finally:
+        configure_audit(agent_bus_emit=False, agent_bus_comms_dir=None)
+    logs = tmp_path / "logs"
+    assert _mode(logs) == 0o700
+    assert all(_mode(f) == 0o600 for f in logs.iterdir())
+    assert list(logs.iterdir()), "no event file written"
+
+
+# ── By-value redaction (vikunja#1075 item 3) ─────────────────────────────────
+
+# Shaped like nothing the patterns know: not a JWT, bearer, PAT, Vault token or hex run.
+_SHAPELESS = "dk-Q7wLmZ2pXv9RtYc"
+_NTFY_URL = "https://ntfy.example.net/forge-alerts-3kq9vz"
+
+
+def test_shapeless_secret_passes_the_pattern_redaction() -> None:
+    """The premise: without by-value redaction this value reaches the log verbatim."""
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    configure_value_redaction(environ={})
+    assert _redact_string(f"curl -H 'X-Api-Key: {_SHAPELESS}'") == (
+        f"curl -H 'X-Api-Key: {_SHAPELESS}'"
+    )
+
+
+def test_sensitive_named_env_value_is_redacted_by_value() -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    configure_value_redaction(environ={"DOCKHAND_API_TOKEN": _SHAPELESS})
+    out = _redact_string(f"curl -H 'X-Api-Key: {_SHAPELESS}' http://dockhand")
+    assert _SHAPELESS not in out
+    assert "<redacted-value:DOCKHAND_API_TOKEN>" in out
+
+
+def test_value_is_redacted_inside_a_longer_token() -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    configure_value_redaction(environ={"DOCKHAND_API_TOKEN": _SHAPELESS})
+    assert _SHAPELESS not in _redact_string(f"x=abc{_SHAPELESS}def")
+
+
+def test_short_value_is_not_redacted() -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    assert configure_value_redaction(environ={"FOO_TOKEN": "short-val"}) == 0
+    assert _redact_string("a short-val here") == "a short-val here"
+
+
+def test_twelve_character_value_is_redacted() -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    configure_value_redaction(environ={"FOO_TOKEN": "abcdefghijkl"})
+    assert _redact_string("abcdefghijkl") == "<redacted-value:FOO_TOKEN>"
+
+
+def test_insensitive_env_names_are_not_collected() -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    configure_value_redaction(environ={"HOME": "/home/someone-long"})
+    assert _redact_string("/home/someone-long") == "/home/someone-long"
+
+
+def test_manifest_referenced_name_is_redacted_whatever_it_is_called() -> None:
+    """DOCKHAND_MCP_BEARER does not look sensitive; a manifest reference makes it count."""
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    env = {"DOCKHAND_MCP_BEARER": _SHAPELESS}
+    configure_value_redaction(environ=env)
+    assert _redact_string(_SHAPELESS) == _SHAPELESS
+    configure_value_redaction(["DOCKHAND_MCP_BEARER"], environ=env)
+    assert _redact_string(_SHAPELESS) == "<redacted-value:DOCKHAND_MCP_BEARER>"
+
+
+def test_alert_ntfy_topic_url_is_redacted_whole() -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    configure_value_redaction(environ={"SCOPED_MCP_ALERT_NTFY_URL": _NTFY_URL})
+    out = _redact_string(f"curl -d hi {_NTFY_URL}")
+    assert out == "curl -d hi <redacted-value:SCOPED_MCP_ALERT_NTFY_URL>"
+
+
+@pytest.mark.parametrize(
+    ("value", "redacted"),
+    [
+        ("https://vault.example.net:8200", False),
+        ("https://vault.example.net:8200/", False),
+        ("redis://:hunter2hunter2@127.0.0.1:6379", True),
+        ("https://hooks.example.net/T0/B0", True),
+        ("https://api.example.net/?key=abc", True),
+        ("123456789012345", False),
+    ],
+)
+def test_non_secret_values_are_skipped(value: str, redacted: bool) -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    configure_value_redaction(["SOME_REF"], environ={"SOME_REF": value})
+    assert (_redact_string(f"x {value} y") != f"x {value} y") is redacted
+
+
+def test_longest_value_wins_when_one_contains_another() -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    configure_value_redaction(
+        environ={"BASE_TOKEN": _SHAPELESS, "FULL_TOKEN": _SHAPELESS + "-extended"}
+    )
+    assert _redact_string(_SHAPELESS + "-extended") == "<redacted-value:FULL_TOKEN>"
+    assert _redact_string(_SHAPELESS) == "<redacted-value:BASE_TOKEN>"
+
+
+def test_values_are_redacted_before_patterns() -> None:
+    """A long hex run inside a known secret must not split it before the value pass."""
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    secret = "tok-" + "ab" * 20
+    configure_value_redaction(environ={"HEXY_TOKEN": secret})
+    assert _redact_string(secret) == "<redacted-value:HEXY_TOKEN>"
+
+
+def test_regex_metacharacters_in_a_value_are_literal() -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    configure_value_redaction(environ={"ODD_PASSWORD": "a.b*c+d(e)f|g"})
+    assert _redact_string("a.b*c+d(e)f|g") == "<redacted-value:ODD_PASSWORD>"
+    assert _redact_string("aXbbbcdddefg") == "aXbbbcdddefg"
+
+
+def test_value_count_is_distinct_values() -> None:
+    from scoped_mcp.audit import configure_value_redaction
+
+    env = {"A_TOKEN": _SHAPELESS, "B_TOKEN": _SHAPELESS, "C_SECRET": "another-secret-1"}
+    assert configure_value_redaction(environ=env) == 2
+
+
+def test_sanitize_processor_redacts_values_in_args_and_error_fields() -> None:
+    from scoped_mcp.audit import _sanitize_processor, configure_value_redaction
+
+    configure_value_redaction(environ={"DOCKHAND_API_TOKEN": _SHAPELESS})
+    event = {
+        "event": "tool_call",
+        "args": {"command": f"curl -H 'X-Api-Key: {_SHAPELESS}'", "argv": ["-k", _SHAPELESS]},
+        "error": f"401 for key {_SHAPELESS}",
+    }
+    out = _sanitize_processor(None, "info", event)
+    assert _SHAPELESS not in str(out)
+    assert out["args"]["argv"][1] == "<redacted-value:DOCKHAND_API_TOKEN>"
+
+
+def test_stdlib_records_are_redacted_by_value() -> None:
+    import logging
+
+    from scoped_mcp.audit import _RedactionFilter, configure_value_redaction
+
+    configure_value_redaction(environ={"DOCKHAND_API_TOKEN": _SHAPELESS})
+    record = logging.LogRecord("uvicorn", logging.INFO, __file__, 1, "hdr %s", (_SHAPELESS,), None)
+    _RedactionFilter().filter(record)
+    assert record.getMessage() == "hdr <redacted-value:DOCKHAND_API_TOKEN>"
+
+
+@pytest.mark.asyncio
+async def test_audit_file_never_holds_an_env_secret_value(
+    agent_ctx: AgentContext, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: env -> configure_logging -> @audited -> the audit file on disk."""
+    import logging
+
+    import structlog
+
+    from scoped_mcp.audit import configure_logging
+
+    monkeypatch.setenv("DOCKHAND_API_TOKEN", _SHAPELESS)
+    audit_log = tmp_path / "audit.jsonl"
+    saved_structlog = structlog.get_config()
+    root = logging.getLogger()
+    saved_root_handlers = list(root.handlers)
+    audit_logger = logging.getLogger("audit")
+    before = {id(h) for h in audit_logger.handlers}
+    try:
+        configure_logging(audit_log=str(audit_log))
+        await _make_tool(_MockModule(agent_ctx), value=f"curl -H 'X-Api-Key: {_SHAPELESS}'")
+    finally:
+        structlog.configure(**saved_structlog)
+        root.handlers[:] = saved_root_handlers
+        for h in list(audit_logger.handlers):
+            if id(h) not in before:
+                audit_logger.removeHandler(h)
+                h.close()
+    text = audit_log.read_text()
+    assert "tool_call" in text, "the tool call was not logged, so the test proves nothing"
+    assert _SHAPELESS not in text
+    assert "<redacted-value:DOCKHAND_API_TOKEN>" in text

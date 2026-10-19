@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.19.0] — 2026-10-19
+
+A cap on forwarded binary blocks, private audit logs and by-value redaction. Build plan
+`obs-followups-2026-10-p2-scoped-mcp-fixes`.
+
+### Added
+- **`content_limits.max_binary_bytes`** (manifest, default 10 MiB; `0` disables it), with a
+  per-module `config.max_binary_bytes` override on `mcp_proxy`. An image or audio block, or
+  an embedded blob, whose **decoded** size is over the cap is replaced with a text stub
+  naming its kind, MIME type and size. The other blocks are kept. The drop is logged to ops
+  as `mcp_proxy_binary_dropped`, without the payload. `scoped-mcp validate` rejects a
+  negative, boolean or non-integer cap. Closes vikunja#1071 (audit
+  2026-10-11/scoped-mcp-proxy-content-1070 F-04).
+
+### Security
+- **Audit, ops and agent-bus session files are created `0600`** whatever the umask, and
+  rotated audit/ops files stay `0600`. A missing log directory is created `0700`. Under PM2
+  (umask 022) these files were `0644`, so any local UID could read tool arguments. An
+  existing file or directory keeps its mode. vikunja#1075 item 3.
+- **By-value redaction.** Pattern redaction let a secret with no recognisable shape through
+  (a Dockhand API token, an ntfy topic URL). At startup the proxy now collects the values of
+  the sensitive-named variables in its environment, `SCOPED_MCP_ALERT_NTFY_URL`, and every
+  `${VAR}` the manifest references, and replaces them in every log string with
+  `<redacted-value:NAME>`, longest value first and before the pattern pass. It covers the
+  stdlib records on stderr too. Values under 12 characters, digit-only values and bare URL
+  origins are skipped. Only a count of values is logged. vikunja#1075 item 3 (audit
+  2026-10-12/observability-refresh-2026-10-p4-secrets-access F-02).
+
 ## [1.18.0] — 2026-10-16
 
 HITL lifecycle events. Build plan `operator-panel-2026-09-p3-lifecycle-events`, Phase 4.

@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 
 from scoped_mcp.exceptions import ManifestError
-from scoped_mcp.manifest import Manifest, _expand_env_vars, load_manifest
+from scoped_mcp.manifest import (
+    Manifest,
+    _expand_env_vars,
+    load_manifest,
+    manifest_env_var_names,
+)
 
 
 def write_manifest(tmp_path: Path, content: str) -> str:
@@ -773,3 +778,62 @@ def test_load_manifest_yaml_special_chars_safe_when_quoted(
     )
     manifest = load_manifest(path)
     assert manifest.state_backend.url == "redis://:pa:ss{word}@host:6379"
+
+
+# ── content_limits (vikunja#1071) ─────────────────────────────────────────────
+
+_PROXY = {"up": {"type": "mcp_proxy", "config": {"url": "http://127.0.0.1:1/mcp"}}}
+
+
+def test_content_limits_default_is_ten_mebibytes() -> None:
+    m = Manifest.model_validate({"agent_type": "a", "modules": _PROXY})
+    assert m.content_limits.max_binary_bytes == 10 * 1024 * 1024
+
+
+def test_content_limits_accepts_zero_to_disable() -> None:
+    m = Manifest.model_validate(
+        {"agent_type": "a", "modules": _PROXY, "content_limits": {"max_binary_bytes": 0}}
+    )
+    assert m.content_limits.max_binary_bytes == 0
+
+
+@pytest.mark.parametrize("bad", [-1, True, "10"])
+def test_content_limits_rejects_a_bad_cap(bad) -> None:
+    with pytest.raises(ValueError):
+        Manifest.model_validate(
+            {"agent_type": "a", "modules": _PROXY, "content_limits": {"max_binary_bytes": bad}}
+        )
+
+
+def test_content_limits_rejects_unknown_keys() -> None:
+    with pytest.raises(ValueError):
+        Manifest.model_validate(
+            {"agent_type": "a", "modules": _PROXY, "content_limits": {"max_bytes": 1}}
+        )
+
+
+@pytest.mark.parametrize("bad", [-1, True, "10", 1.5])
+def test_validate_rejects_a_bad_per_module_cap(bad) -> None:
+    """`scoped-mcp validate` must catch it, before a deploy restarts a broker on it."""
+    config = {"url": "http://x/mcp", "max_binary_bytes": bad}
+    modules = {"up": {"type": "mcp_proxy", "config": config}}
+    with pytest.raises(ValueError, match="max_binary_bytes"):
+        Manifest.model_validate({"agent_type": "a", "modules": modules})
+
+
+def test_manifest_env_var_names_lists_references_without_expanding(tmp_path: Path) -> None:
+    path = write_manifest(
+        tmp_path,
+        """
+        agent_type: a
+        modules:
+          up:
+            type: mcp_proxy
+            config:
+              url: "${UPSTREAM_URL}"
+              headers:
+                Authorization: "Bearer ${UPSTREAM_TOKEN}"
+        note: $BARE_IS_NOT_A_REFERENCE
+        """,
+    )
+    assert manifest_env_var_names(path) == {"UPSTREAM_URL", "UPSTREAM_TOKEN"}
