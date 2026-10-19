@@ -32,6 +32,10 @@ _AGENT_TYPE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 # Rate limit spec format: "<N>/<unit>" e.g. "100/minute", "50/hour", "10/second".
 _RATE_LIMIT_RE = re.compile(r"^\d+/(second|minute|hour)$")
 
+# Default cap on one binary content block forwarded by mcp_proxy (vikunja#1071): 10 MiB,
+# about 250x the largest grafana-mcp panel render measured on forge (41 KB).
+DEFAULT_MAX_BINARY_BYTES = 10 * 1024 * 1024
+
 # Matches ${VAR_NAME} substitution markers. Only braced form supported — $VAR without
 # braces is intentionally not expanded to reduce accidental substitution.
 _ENV_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -66,6 +70,16 @@ def _expand_env_vars(text: str) -> str:
             f"Manifest references undefined environment variable(s): {', '.join(missing)}"
         )
     return result
+
+
+def manifest_env_var_names(path: str) -> set[str]:
+    """Return the ``${VAR}`` names a manifest file references, without expanding them.
+
+    audit.py uses these to redact by value: whatever a referenced variable resolved to
+    is a value the manifest put into this process's config, so it must not reach a log
+    verbatim. Names only; the values are read from the environment by the caller.
+    """
+    return set(_ENV_VAR_RE.findall(Path(path).read_text()))
 
 
 # Module config fields that are actually required (cause an error at module __init__ if absent).
@@ -427,6 +441,18 @@ class ModuleConfig(BaseModel):
         return v
 
 
+class ContentLimitsConfig(BaseModel):
+    """Size limits on content scoped-mcp forwards from an upstream (vikunja#1071)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Largest decoded size, in bytes, of one image/audio block or embedded blob that
+    # mcp_proxy forwards. A bigger block is replaced by a text stub naming its type and
+    # size. 0 disables the cap. An mcp_proxy module can override it with
+    # ``config.max_binary_bytes``.
+    max_binary_bytes: int = Field(default=DEFAULT_MAX_BINARY_BYTES, ge=0, strict=True)
+
+
 class InteractionPermissions(BaseModel):
     """Agent interaction permission lists — consumed by the task dispatcher, not scoped-mcp."""
 
@@ -472,6 +498,7 @@ class Manifest(BaseModel):
     response_filters: list[ResponseFilterRule] | None = None
     hitl: HitlConfig | None = None
     audit: AuditConfig | None = None
+    content_limits: ContentLimitsConfig = ContentLimitsConfig()
 
     @field_validator("agent_type")
     @classmethod
@@ -524,6 +551,15 @@ class Manifest(BaseModel):
                     f"modules.{key}: mcp_proxy requires either 'url' (HTTP) or"
                     " 'command' (stdio) in config"
                 )
+            # Checked here as well as in McpProxyModule.__init__ so that `scoped-mcp
+            # validate` rejects a bad override before a deploy restarts anything.
+            if module_name == "mcp_proxy" and "max_binary_bytes" in mod_cfg.config:
+                cap = mod_cfg.config["max_binary_bytes"]
+                if isinstance(cap, bool) or not isinstance(cap, int) or cap < 0:
+                    errors.append(
+                        f"modules.{key}: max_binary_bytes must be an integer >= 0"
+                        " (0 disables the cap)"
+                    )
             # mode: read has no effect on mcp_proxy — capability restriction for proxied
             # tools requires tool_denylist, not mode filtering
             if module_name == "mcp_proxy" and mod_cfg.mode == "read":

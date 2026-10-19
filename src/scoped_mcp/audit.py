@@ -28,7 +28,7 @@ import re
 import sys
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -70,9 +70,23 @@ def configure_audit(
 # ── Agent-bus JSONL emission ─────────────────────────────────────────────────
 
 
+# Audit, ops and event files are created owner-only, whatever the process umask (PM2's
+# is 022). They record tool arguments, so a 0644 file under a traversable dir let any
+# local UID read them (vikunja#1075). An existing file keeps its mode: a shared file
+# another writer created is not ours to tighten.
+_LOG_FILE_MODE = 0o600
+_LOG_DIR_MODE = 0o700
+
+
+def _open_private_append(path: str, **kwargs: Any) -> Any:
+    """Open ``path`` for appending, creating it 0600 if it does not exist."""
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, _LOG_FILE_MODE)
+    return open(fd, "a", **kwargs)
+
+
 def _sync_append_event(log_path: str, line: str) -> None:
     """Sync JSONL append. Runs in an executor to avoid blocking the event loop."""
-    with open(log_path, "a") as f:
+    with _open_private_append(log_path) as f:
         f.write(line)
 
 
@@ -89,7 +103,7 @@ async def _emit_agent_bus_event(
         return
     try:
         logs_dir = Path(_agent_bus_comms_dir).expanduser() / "logs"
-        logs_dir.mkdir(parents=True, exist_ok=True)
+        logs_dir.mkdir(mode=_LOG_DIR_MODE, parents=True, exist_ok=True)
 
         date = datetime.now(UTC).strftime("%Y-%m-%d")
         log_path = str(logs_dir / f"{date}-session.jsonl")
@@ -192,8 +206,130 @@ _GH_PAT_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b")
 _VAULT_TOKEN_RE = re.compile(r"\b(?:hvs|hvb|hvr)\.[A-Za-z0-9_-]+|\b[sbr]\.[A-Za-z0-9]{24,}\b")
 
 
+# ── By-value redaction (vikunja#1075 item 3) ─────────────────────────────────
+# The patterns above only catch secrets with a recognisable shape. A Dockhand API token
+# or an ntfy topic URL has none, and both reached the audit log verbatim. So the broker
+# also redacts the actual secret values it holds: the values in its own environment
+# (the launcher sources the agent .env into it) whose names look sensitive, and whatever
+# the manifest's ${VAR} references resolved to.
+#
+# SECURITY: the value set is never logged, nor its size distribution or hashes. Only a
+# count goes to ops.
+
+# Shorter values are too likely to occur by chance in ordinary text.
+_MIN_REDACT_VALUE_LEN = 12
+# Secret by path, so the sensitive-name heuristic cannot see it: the topic is the
+# credential (vikunja#1075).
+_SECRET_ENV_NAMES = frozenset({"SCOPED_MCP_ALERT_NTFY_URL"})
+# Name shapes that hold a secret but are not in _SENSITIVE_SUFFIXES, measured on a live
+# broker's env (VAULT_SECRET_ID, VAULT_ROLE_ID, AGENT_REGISTRY_DSN, DOCKHAND_MCP_BEARER,
+# RENOVATE_BOT_PAT). For value collection only: widening _SENSITIVE_SUFFIXES would also
+# change which tool-argument keys are blanked.
+_VALUE_NAME_SUFFIXES = (
+    "_SECRET_ID",
+    "_ROLE_ID",
+    "_DSN",
+    "_BEARER",
+    "_PAT",
+    "_WEBHOOK",
+    "_WEBHOOK_URL",
+)
+_URL_RE = re.compile(r"(?i)^[a-z][a-z0-9+.-]*://")
+
+# (pattern, value -> name). One tuple, rebound in a single assignment, so a concurrent
+# reader never pairs a new pattern with the old names (which would raise inside the
+# substitution and, in _RedactionFilter, let the record through unredacted).
+_value_redaction: tuple[re.Pattern[str], dict[str, str]] | None = None
+
+
+def _url_has_userinfo(value: str) -> bool:
+    if not _URL_RE.match(value):
+        return False
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return False
+    return bool(parts.username or parts.password)
+
+
+def _name_holds_secret(name: str) -> bool:
+    return _key_looks_sensitive(name) or name.upper().endswith(_VALUE_NAME_SUFFIXES)
+
+
+def _is_redactable_value(value: str) -> bool:
+    """False for values that are not secrets and would only redact ordinary text."""
+    if len(value) < _MIN_REDACT_VALUE_LEN or value.isdigit():
+        return False
+    if _URL_RE.match(value):
+        # A bare origin (scheme://host[:port][/]) names a service, it does not grant
+        # access to one. Userinfo, a query or a path can carry a credential: the ntfy
+        # topic URL is secret by its path. Those are kept.
+        from urllib.parse import urlsplit
+
+        try:
+            parts = urlsplit(value)
+        except ValueError:
+            return True
+        return bool(parts.username or parts.password or parts.query or parts.path.strip("/"))
+    return True
+
+
+def configure_value_redaction(
+    extra_names: Iterable[str] = (), environ: Mapping[str, str] | None = None
+) -> int:
+    """(Re)build the by-value redaction set from the process environment.
+
+    Collects every variable whose name looks sensitive, every URL value carrying
+    userinfo (a password in a DSN, whatever the variable is called), the names in
+    ``_SECRET_ENV_NAMES``, and ``extra_names`` (the manifest's ${VAR} references,
+    whatever they are called). Rebuilt from scratch on each call. Returns how many
+    distinct values are redacted, the one thing about the set that may be logged.
+    """
+    global _value_redaction
+    env = os.environ if environ is None else environ
+    wanted = (
+        {n for n, v in env.items() if _name_holds_secret(n) or _url_has_userinfo(v)}
+        | _SECRET_ENV_NAMES
+        | set(extra_names)
+    )
+    names: dict[str, str] = {}
+    # Sorted so that two names sharing a value always report the same one.
+    for name in sorted(wanted):
+        value = env.get(name)
+        if value and _is_redactable_value(value):
+            names.setdefault(value, name)
+            # The same secret as repr() and JSON escape it (doubled backslashes, escaped
+            # quotes, \xNN / \uNNNN). Either form is trivially reversed, so match it too.
+            for escaped in (repr(value)[1:-1], json.dumps(value)[1:-1]):
+                if escaped != value:
+                    names.setdefault(escaped, name)
+    if not names:
+        _value_redaction = None
+        return 0
+    # One compiled alternation, longest value first: at any position the longest secret
+    # wins, so a value that contains another is replaced whole.
+    alternatives = sorted(names, key=len, reverse=True)
+    _value_redaction = (re.compile("|".join(re.escape(v) for v in alternatives)), names)
+    return len(names)
+
+
+def _redact_values(s: str) -> str:
+    current = _value_redaction
+    if current is None:
+        return s
+    pattern, names = current
+    return pattern.sub(lambda m: f"<redacted-value:{names[m.group(0)]}>", s)
+
+
 def _redact_string(s: str) -> str:
-    """Apply pattern-based redaction to a single string."""
+    """Apply value-based, then pattern-based, redaction to a single string.
+
+    Values first: a pattern pass could rewrite part of a known secret (a hex run inside
+    it, say) and leave the rest unmatched.
+    """
+    s = _redact_values(s)
     s = _JWT_RE.sub("<redacted-jwt>", s)
     s = _BEARER_RE.sub("<redacted-bearer>", s)
     s = _GH_PAT_RE.sub("<redacted-gh-token>", s)
@@ -222,10 +358,20 @@ def _sanitize_value(value: Any, key: str = "") -> Any:
             return redacted[:_MAX_ARG_LEN] + f"...<truncated {len(redacted.encode())} bytes>"
         return redacted
     if isinstance(value, dict):
-        return {k: _sanitize_value(v, k) for k, v in value.items()}
-    if isinstance(value, list):
+        # Keys are scanned too: a secret used as a key is still a secret in the file.
+        return {
+            (_redact_string(k) if isinstance(k, str) else k): _sanitize_value(
+                v, k if isinstance(k, str) else ""
+            )
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple, set, frozenset)):
         return [_sanitize_value(v) for v in value]
-    return value
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    # Anything else (a model, an exception, a datetime) would reach JSONRenderer and be
+    # rendered through repr() after this processor has run, unscanned. Render it here.
+    return _sanitize_value(repr(value))
 
 
 def _sanitize_processor(logger: Any, method: str, event_dict: dict[str, Any]) -> dict[str, Any]:
@@ -247,7 +393,7 @@ def _sanitize_processor(logger: Any, method: str, event_dict: dict[str, Any]) ->
 
 
 class _RedactionFilter(logging.Filter):
-    """Apply pattern-based redaction to stdlib log records on the stderr handler (F-05).
+    """Apply value and pattern redaction to stdlib log records on the stderr handler (F-05).
 
     The structlog ``_sanitize_processor`` only scrubs records emitted through structlog
     loggers. Third-party libraries (uvicorn / starlette / fastmcp) log via plain stdlib
@@ -255,15 +401,142 @@ class _RedactionFilter(logging.Filter):
     persistently by PM2. A dependency that logs an ``Authorization: Bearer <token>`` header at
     DEBUG would otherwise persist the secret. This filter runs the same pattern redaction over
     every formatted stderr record so a leaked bearer/token never reaches the log.
+
+    That includes the traceback. ``Formatter.format`` appends ``exc_info`` and
+    ``stack_info`` after the filter has run, so they are formatted and redacted here and
+    the raw exception is dropped from the record. FastMCP logs every tool exception with
+    ``logger.exception``, and exception text is where a DSN or a query-string token turns up.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        try:
+        _redact_record(record)
+        return True
+
+
+_exc_formatter = logging.Formatter()
+
+
+_PLAIN_ARG_TYPES = (str, int, float, bool, type(None))
+
+
+def _redact_arg(arg: Any) -> Any:
+    return _redact_string(arg) if isinstance(arg, str) else arg
+
+
+def _redact_record(record: logging.LogRecord) -> None:
+    """Redact a stdlib record in place: message, args, traceback and stack info.
+
+    ``args`` keeps its shape when every element is a plain str/number: each string is
+    redacted where it stands, and so is the ``msg`` template. Formatters that unpack
+    ``record.args`` themselves (uvicorn's ``AccessFormatter`` takes five) keep working, and
+    ``%d`` still gets an int (audit R3-01). Any other arg (an object, a container) may
+    render a secret through its ``repr``, so such a record is flattened to its redacted
+    ``getMessage()`` with empty ``args``, as before. So is one whose assembled message
+    still holds a secret after the per-part pass: a DSN built from ``"%s:%s"`` exists only
+    once the parts are joined.
+
+    The raw ``exc_info`` is dropped once it has been formatted, because a handler such as
+    Rich's rebuilds the traceback from it rather than using ``exc_text``.
+    """
+    try:
+        args = record.args
+        if (
+            isinstance(record.msg, str)
+            and isinstance(args, tuple)
+            and all(isinstance(a, _PLAIN_ARG_TYPES) for a in args)
+        ):
+            record.msg = _redact_string(record.msg)
+            record.args = tuple(_redact_arg(a) for a in args)
+        elif (
+            isinstance(record.msg, str)
+            and isinstance(args, Mapping)
+            and all(isinstance(v, _PLAIN_ARG_TYPES) for v in args.values())
+        ):
+            record.msg = _redact_string(record.msg)
+            record.args = {k: _redact_arg(v) for k, v in args.items()}
+        else:
             record.msg = _redact_string(record.getMessage())
             record.args = ()
-        except Exception:
-            pass  # never let redaction drop a log record
-        return True
+        if record.args:
+            assembled = record.getMessage()
+            redacted = _redact_string(assembled)
+            if redacted != assembled:
+                record.msg = redacted
+                record.args = ()
+    except Exception:
+        # Fail closed: a record whose message cannot be built (a %-mismatch, say) would
+        # reach handleError, which prints the raw args. Keep the record, drop the text.
+        record.msg = "<log message dropped: it could not be formatted for redaction>"
+        record.args = ()
+    try:
+        if record.exc_info:
+            record.exc_text = _exc_formatter.formatException(record.exc_info)
+            record.exc_info = None
+        if record.exc_text:
+            record.exc_text = _redact_string(record.exc_text)
+        if record.stack_info:
+            record.stack_info = _redact_string(record.stack_info)
+    except Exception:
+        # Fail closed here: an unformattable traceback is dropped, not printed raw.
+        record.exc_info = None
+        record.exc_text = "<traceback dropped: redaction failed>"
+        record.stack_info = None
+
+
+def _install_redacting_record_factory() -> None:
+    """Redact every stdlib LogRecord when it is created, whichever logger made it.
+
+    A handler filter only covers records that reach that handler. FastMCP's ``fastmcp.*``
+    loggers have their own Rich handlers and ``propagate=False``, and it replaces those
+    handlers whenever it reconfigures, so a filter attached to them can be dropped. The
+    factory runs after the level check, for every logger, before any handler sees the
+    record. Installed once; a second call does not wrap it again.
+    """
+    current = logging.getLogRecordFactory()
+    if getattr(current, "_scoped_mcp_redacting", False):
+        return
+
+    def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = current(*args, **kwargs)
+        _redact_record(record)
+        return record
+
+    factory._scoped_mcp_redacting = True  # type: ignore[attr-defined]
+    logging.setLogRecordFactory(factory)
+
+
+class _PrivateRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """A RotatingFileHandler whose files are 0600, including after a rollover.
+
+    ``doRollover`` renames the current file, which keeps its mode, and calls ``_open``
+    for the new one, so overriding ``_open`` covers both. A process-wide ``os.umask``
+    would do the same for every file every module writes, which is not ours to change.
+
+    Unlike the shared agent-bus file, this one is scoped-mcp's own, so an existing file
+    this process owns is tightened to 0600 as well (a log written by an older version, or
+    reused across a restart). One owned by someone else is left alone.
+    """
+
+    def _open(self) -> Any:
+        fd = os.open(self.baseFilename, os.O_WRONLY | os.O_APPEND | os.O_CREAT, _LOG_FILE_MODE)
+        try:
+            st = os.fstat(fd)
+            if st.st_uid == os.geteuid() and st.st_mode & 0o077:
+                os.fchmod(fd, _LOG_FILE_MODE)
+        except OSError:
+            pass  # never let a mode fix stop logging
+        return self._builtin_open(fd, self.mode, encoding=self.encoding, errors=self.errors)
+
+
+def _ensure_private_dir(path: str) -> None:
+    """Create the log file's directory 0700 if it is missing. An existing one is left as is.
+
+    In production the launcher creates it first (``mkdir -m 0700``); this covers every
+    other way of starting scoped-mcp. Never loosens: ``mkdir`` does not touch a
+    directory that already exists. Nor does it tighten one: ``--audit-log ~/audit.log``
+    would otherwise chmod the home directory.
+    """
+    Path(path).parent.mkdir(mode=_LOG_DIR_MODE, parents=True, exist_ok=True)
 
 
 def configure_logging(audit_log: str | None = None, ops_log: str | None = None) -> None:
@@ -295,6 +568,10 @@ def configure_logging(audit_log: str | None = None, ops_log: str | None = None) 
         logger_factory=structlog.stdlib.LoggerFactory(),
     )
 
+    # Before the first record is written, so even the startup lines are covered. server.py
+    # extends it with the manifest's ${VAR} names once the manifest is loaded.
+    configure_value_redaction()
+
     _json_fmt = logging.Formatter("%(message)s")
 
     # All log output goes to stderr — stdout is the stdio JSON-RPC wire.
@@ -303,6 +580,8 @@ def configure_logging(audit_log: str | None = None, ops_log: str | None = None) 
     stderr_handler = logging.StreamHandler(sys.stderr)
     stderr_handler.setFormatter(_json_fmt)
     stderr_handler.addFilter(_RedactionFilter())  # F-05: scrub stdlib/dep logs on stderr
+    # And every record, including FastMCP's, which never reaches root (vikunja#1075).
+    _install_redacting_record_factory()
     root.addHandler(stderr_handler)
 
     # Rotation knobs — bound disk for a long-lived process; no-op for tiny stdio files.
@@ -311,7 +590,8 @@ def configure_logging(audit_log: str | None = None, ops_log: str | None = None) 
 
     def _file_handler(path: str) -> logging.Handler:
         # maxBytes=0 disables rotation (stdlib RotatingFileHandler semantics).
-        fh = logging.handlers.RotatingFileHandler(
+        _ensure_private_dir(path)
+        fh = _PrivateRotatingFileHandler(
             path, maxBytes=max(max_bytes, 0), backupCount=max(backups, 0)
         )
         fh.setFormatter(_json_fmt)

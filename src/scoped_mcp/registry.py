@@ -661,6 +661,16 @@ def _register_module_tools(
     return registered
 
 
+def _apply_content_limits(instance: ToolModule, manifest: Manifest) -> None:
+    """Hand the manifest-wide binary cap to a module that forwards content (vikunja#1071).
+
+    Called for a recovered instance too: the self-healer builds a fresh one, and without
+    this it would serve with the default cap instead of the manifest's.
+    """
+    if hasattr(instance, "_global_max_binary_bytes"):
+        instance._global_max_binary_bytes = manifest.content_limits.max_binary_bytes
+
+
 def _resolve_class_name(module_name: str, module_cfg: ModuleConfig) -> str:
     """Return the module class name to look up — type: if set, else the manifest key."""
     return module_cfg.type if module_cfg.type is not None else module_name
@@ -1139,6 +1149,7 @@ def build_server(
         # Expose the manifest key to mcp_proxy for pre-call hook lookups.
         if hasattr(instance, "_manifest_key"):
             instance._manifest_key = module_name
+        _apply_content_limits(instance, manifest)
         module_health[module_name] = {"status": "instantiated"}
         all_instances.append((module_name, module_cfg, instance))
 
@@ -1193,6 +1204,7 @@ def build_server(
 
         if hasattr(instance, "_manifest_key"):
             instance._manifest_key = module_name
+        _apply_content_limits(instance, manifest)
 
         try:
             await instance.startup()

@@ -11,10 +11,16 @@ import os
 import signal
 import sys
 
-from .audit import SESSION_ID, configure_audit, configure_logging, get_ops_logger
+from .audit import (
+    SESSION_ID,
+    configure_audit,
+    configure_logging,
+    configure_value_redaction,
+    get_ops_logger,
+)
 from .exceptions import ConfigError
 from .identity import AgentContext
-from .manifest import load_manifest
+from .manifest import load_manifest, manifest_env_var_names
 from .middleware import ToolCallMiddleware
 from .registry import build_server
 from .state import StateBackend, build_state_backend
@@ -153,6 +159,9 @@ def _run_serve(args: argparse.Namespace) -> None:
         ops.info("identity_resolved", agent_id=agent_ctx.agent_id, agent_type=agent_ctx.agent_type)
 
         manifest = load_manifest(args.manifest)
+        # Values the manifest's ${VAR}s resolved to are secrets whatever their names.
+        redacted_values = configure_value_redaction(manifest_env_var_names(args.manifest))
+        ops.info("value_redaction_configured", value_count=redacted_values)
         ops.info(
             "manifest_loaded",
             agent_type=manifest.agent_type,

@@ -8,7 +8,7 @@ What scoped-mcp protects against, and what it doesn't.
 Agent A cannot read Agent B's files, database rows, time-series buckets, or Grafana dashboards. Each agent's proxy enforces a scope boundary before any backend I/O.
 
 **Credential exposure to agents**
-API keys, passwords, tokens, and webhook URLs are held by the proxy process. They are injected into module constructors at startup and never passed to the agent or included in tool responses. The structlog processor redacts credential-like keys from audit logs.
+API keys, passwords, tokens, and webhook URLs are held by the proxy process. They are injected into module constructors at startup and never passed to the agent or included in tool responses. The structlog processor redacts credential-like keys from audit logs, and since v1.19.0 it also redacts by value: the values of environment variables whose names look sensitive, URL values carrying userinfo, and every variable the manifest references, whatever shape the value has. Values under 12 characters, digit-only values and bare URL origins are not collected, and secrets that never pass through the environment are not seen (see [Audit log files and redaction](manifest-schema.md#audit-log-files-and-redaction)). Audit and ops files are created `0600`. Secrets fetched from Vault or a secrets file are not in that value set; for those, the key-name and pattern redaction is still the only cover.
 
 **Scope mode bypass**
 An agent configured with `mode: read` cannot invoke write tools — the registry only registers tools matching the manifest's declared mode.

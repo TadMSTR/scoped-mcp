@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import pathlib
 
 import pytest
@@ -75,7 +76,9 @@ class _MockModule:
         self.agent_ctx = agent_ctx
 
 
-async def _make_tool(module: _MockModule, raise_exc: Exception | None = None) -> str:
+async def _make_tool(
+    module: _MockModule, raise_exc: Exception | None = None, value: str = "hello"
+) -> str:
     async def _tool(self: _MockModule, value: str) -> str:
         if raise_exc:
             raise raise_exc
@@ -83,7 +86,7 @@ async def _make_tool(module: _MockModule, raise_exc: Exception | None = None) ->
 
     _tool.__name__ = "test_tool"
     wrapped = audited("test_module_test_tool")(_tool)
-    return await wrapped(module, value="hello")
+    return await wrapped(module, value=value)
 
 
 @pytest.mark.asyncio
@@ -416,3 +419,703 @@ async def test_audited_emits_agent_bus_error_event(
         assert err_events[0]["metadata"]["error"] == "RuntimeError"
     finally:
         configure_audit(agent_bus_emit=False, agent_bus_comms_dir=None)
+
+
+# ── Private audit/ops/event files (vikunja#1075 item 3) ──────────────────────
+
+
+@pytest.fixture
+def permissive_umask():
+    """PM2's umask. Without it the tests would pass on a 077 workstation and prove nothing."""
+    import os
+
+    old = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(old)
+
+
+def _mode(path: pathlib.Path) -> int:
+    return path.stat().st_mode & 0o777
+
+
+def _private_handler(path: pathlib.Path, max_bytes: int = 0):
+    import logging
+
+    from scoped_mcp.audit import _PrivateRotatingFileHandler
+
+    handler = _PrivateRotatingFileHandler(str(path), maxBytes=max_bytes, backupCount=2)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    return handler
+
+
+def _record(msg: str):
+    import logging
+
+    return logging.LogRecord("audit", logging.INFO, __file__, 1, msg, None, None)
+
+
+def test_log_file_is_created_0600_under_a_permissive_umask(
+    tmp_path: pathlib.Path, permissive_umask: None
+) -> None:
+    path = tmp_path / "audit.jsonl"
+    handler = _private_handler(path)
+    try:
+        handler.emit(_record("x"))
+    finally:
+        handler.close()
+    assert _mode(path) == 0o600
+
+
+def test_rotated_and_new_log_files_stay_0600(
+    tmp_path: pathlib.Path, permissive_umask: None
+) -> None:
+    path = tmp_path / "audit.jsonl"
+    handler = _private_handler(path, max_bytes=64)
+    try:
+        for _ in range(10):
+            handler.emit(_record("y" * 40))
+    finally:
+        handler.close()
+    rotated = tmp_path / "audit.jsonl.1"
+    assert rotated.exists(), "the handler never rotated, so the test proves nothing"
+    assert _mode(rotated) == 0o600
+    assert _mode(path) == 0o600
+
+
+def test_configure_logging_creates_missing_dirs_0700_and_files_0600(
+    tmp_path: pathlib.Path, permissive_umask: None
+) -> None:
+    import logging
+
+    import structlog
+
+    from scoped_mcp.audit import configure_logging, get_audit_logger
+
+    audit_log = tmp_path / "agent" / "audit" / "audit.jsonl"
+    ops_log = tmp_path / "agent" / "ops" / "ops.jsonl"
+    saved_structlog = structlog.get_config()
+    root = logging.getLogger()
+    saved_root_handlers = list(root.handlers)
+    loggers = (logging.getLogger("audit"), logging.getLogger("ops"))
+    before = {id(h) for lg in loggers for h in lg.handlers}
+    try:
+        configure_logging(audit_log=str(audit_log), ops_log=str(ops_log))
+        get_audit_logger().info("probe")
+    finally:
+        structlog.configure(**saved_structlog)
+        root.handlers[:] = saved_root_handlers
+        for lg in loggers:
+            for h in list(lg.handlers):
+                if id(h) not in before:
+                    lg.removeHandler(h)
+                    h.close()
+    assert _mode(audit_log.parent) == 0o700
+    assert _mode(ops_log.parent) == 0o700
+    assert _mode(audit_log) == 0o600
+    assert _mode(ops_log) == 0o600
+
+
+def test_an_existing_log_dir_keeps_its_mode(tmp_path: pathlib.Path) -> None:
+    from scoped_mcp.audit import _ensure_private_dir
+
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o750)
+    _ensure_private_dir(str(shared / "audit.jsonl"))
+    assert _mode(shared) == 0o750
+
+
+def test_agent_bus_event_file_is_created_0600(
+    tmp_path: pathlib.Path, permissive_umask: None
+) -> None:
+    from scoped_mcp.audit import _sync_append_event
+
+    path = tmp_path / "2026-10-19-session.jsonl"
+    _sync_append_event(str(path), '{"a": 1}\n')
+    _sync_append_event(str(path), '{"a": 2}\n')
+    assert _mode(path) == 0o600
+    assert path.read_text() == '{"a": 1}\n{"a": 2}\n'
+
+
+def test_agent_bus_event_file_another_writer_created_keeps_its_mode(
+    tmp_path: pathlib.Path, permissive_umask: None
+) -> None:
+    """The session JSONL is shared with agent-bus. Appending must not re-mode its file."""
+    from scoped_mcp.audit import _sync_append_event
+
+    path = tmp_path / "2026-10-19-session.jsonl"
+    path.write_text("")
+    path.chmod(0o664)
+    _sync_append_event(str(path), "{}\n")
+    assert _mode(path) == 0o664
+
+
+@pytest.mark.asyncio
+async def test_agent_bus_logs_dir_is_created_0700(
+    agent_ctx: AgentContext, tmp_path: pathlib.Path, permissive_umask: None
+) -> None:
+    configure_audit(agent_bus_emit=True, agent_bus_comms_dir=str(tmp_path))
+    module = _MockModule(agent_ctx)
+    try:
+        await _make_tool(module)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0.05)
+    finally:
+        configure_audit(agent_bus_emit=False, agent_bus_comms_dir=None)
+    logs = tmp_path / "logs"
+    assert _mode(logs) == 0o700
+    assert all(_mode(f) == 0o600 for f in logs.iterdir())
+    assert list(logs.iterdir()), "no event file written"
+
+
+# ── By-value redaction (vikunja#1075 item 3) ─────────────────────────────────
+
+# Shaped like nothing the patterns know: not a JWT, bearer, PAT, Vault token or hex run.
+_SHAPELESS = "dk-Q7wLmZ2pXv9RtYc"
+_NTFY_URL = "https://ntfy.example.net/forge-alerts-3kq9vz"
+
+
+def test_shapeless_secret_passes_the_pattern_redaction() -> None:
+    """The premise: without by-value redaction this value reaches the log verbatim."""
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    configure_value_redaction(environ={})
+    assert _redact_string(f"curl -H 'X-Api-Key: {_SHAPELESS}'") == (
+        f"curl -H 'X-Api-Key: {_SHAPELESS}'"
+    )
+
+
+def test_sensitive_named_env_value_is_redacted_by_value() -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    configure_value_redaction(environ={"DOCKHAND_API_TOKEN": _SHAPELESS})
+    out = _redact_string(f"curl -H 'X-Api-Key: {_SHAPELESS}' http://dockhand")
+    assert _SHAPELESS not in out
+    assert "<redacted-value:DOCKHAND_API_TOKEN>" in out
+
+
+def test_value_is_redacted_inside_a_longer_token() -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    configure_value_redaction(environ={"DOCKHAND_API_TOKEN": _SHAPELESS})
+    assert _SHAPELESS not in _redact_string(f"x=abc{_SHAPELESS}def")
+
+
+def test_short_value_is_not_redacted() -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    assert configure_value_redaction(environ={"FOO_TOKEN": "short-val"}) == 0
+    assert _redact_string("a short-val here") == "a short-val here"
+
+
+def test_twelve_character_value_is_redacted() -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    configure_value_redaction(environ={"FOO_TOKEN": "abcdefghijkl"})
+    assert _redact_string("abcdefghijkl") == "<redacted-value:FOO_TOKEN>"
+
+
+def test_insensitive_env_names_are_not_collected() -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    configure_value_redaction(environ={"HOME": "/home/someone-long"})
+    assert _redact_string("/home/someone-long") == "/home/someone-long"
+
+
+def test_manifest_referenced_name_is_redacted_whatever_it_is_called() -> None:
+    """A name no heuristic flags still counts once the manifest references it."""
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    env = {"UPSTREAM_HEADER_VALUE": _SHAPELESS}
+    configure_value_redaction(environ=env)
+    assert _redact_string(_SHAPELESS) == _SHAPELESS
+    configure_value_redaction(["UPSTREAM_HEADER_VALUE"], environ=env)
+    assert _redact_string(_SHAPELESS) == "<redacted-value:UPSTREAM_HEADER_VALUE>"
+
+
+def test_alert_ntfy_topic_url_is_redacted_whole() -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    configure_value_redaction(environ={"SCOPED_MCP_ALERT_NTFY_URL": _NTFY_URL})
+    out = _redact_string(f"curl -d hi {_NTFY_URL}")
+    assert out == "curl -d hi <redacted-value:SCOPED_MCP_ALERT_NTFY_URL>"
+
+
+@pytest.mark.parametrize(
+    ("value", "redacted"),
+    [
+        ("https://vault.example.net:8200", False),
+        ("https://vault.example.net:8200/", False),
+        ("redis://:hunter2hunter2@127.0.0.1:6379", True),
+        ("https://hooks.example.net/T0/B0", True),
+        ("https://api.example.net/?key=abc", True),
+        ("123456789012345", False),
+    ],
+)
+def test_non_secret_values_are_skipped(value: str, redacted: bool) -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    configure_value_redaction(["SOME_REF"], environ={"SOME_REF": value})
+    assert (_redact_string(f"x {value} y") != f"x {value} y") is redacted
+
+
+def test_longest_value_wins_when_one_contains_another() -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    configure_value_redaction(
+        environ={"BASE_TOKEN": _SHAPELESS, "FULL_TOKEN": _SHAPELESS + "-extended"}
+    )
+    assert _redact_string(_SHAPELESS + "-extended") == "<redacted-value:FULL_TOKEN>"
+    assert _redact_string(_SHAPELESS) == "<redacted-value:BASE_TOKEN>"
+
+
+def test_values_are_redacted_before_patterns() -> None:
+    """A long hex run inside a known secret must not split it before the value pass."""
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    secret = "tok-" + "ab" * 20
+    configure_value_redaction(environ={"HEXY_TOKEN": secret})
+    assert _redact_string(secret) == "<redacted-value:HEXY_TOKEN>"
+
+
+def test_regex_metacharacters_in_a_value_are_literal() -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    configure_value_redaction(environ={"ODD_PASSWORD": "a.b*c+d(e)f|g"})
+    assert _redact_string("a.b*c+d(e)f|g") == "<redacted-value:ODD_PASSWORD>"
+    assert _redact_string("aXbbbcdddefg") == "aXbbbcdddefg"
+
+
+def test_value_count_is_distinct_values() -> None:
+    from scoped_mcp.audit import configure_value_redaction
+
+    env = {"A_TOKEN": _SHAPELESS, "B_TOKEN": _SHAPELESS, "C_SECRET": "another-secret-1"}
+    assert configure_value_redaction(environ=env) == 2
+
+
+def test_sanitize_processor_redacts_values_in_args_and_error_fields() -> None:
+    from scoped_mcp.audit import _sanitize_processor, configure_value_redaction
+
+    configure_value_redaction(environ={"DOCKHAND_API_TOKEN": _SHAPELESS})
+    event = {
+        "event": "tool_call",
+        "args": {"command": f"curl -H 'X-Api-Key: {_SHAPELESS}'", "argv": ["-k", _SHAPELESS]},
+        "error": f"401 for key {_SHAPELESS}",
+    }
+    out = _sanitize_processor(None, "info", event)
+    assert _SHAPELESS not in str(out)
+    assert out["args"]["argv"][1] == "<redacted-value:DOCKHAND_API_TOKEN>"
+
+
+def test_stdlib_records_are_redacted_by_value() -> None:
+    import logging
+
+    from scoped_mcp.audit import _RedactionFilter, configure_value_redaction
+
+    configure_value_redaction(environ={"DOCKHAND_API_TOKEN": _SHAPELESS})
+    record = logging.LogRecord("uvicorn", logging.INFO, __file__, 1, "hdr %s", (_SHAPELESS,), None)
+    _RedactionFilter().filter(record)
+    assert record.getMessage() == "hdr <redacted-value:DOCKHAND_API_TOKEN>"
+
+
+@pytest.mark.asyncio
+async def test_audit_file_never_holds_an_env_secret_value(
+    agent_ctx: AgentContext, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: env -> configure_logging -> @audited -> the audit file on disk."""
+    import logging
+
+    import structlog
+
+    from scoped_mcp.audit import configure_logging
+
+    monkeypatch.setenv("DOCKHAND_API_TOKEN", _SHAPELESS)
+    audit_log = tmp_path / "audit.jsonl"
+    saved_structlog = structlog.get_config()
+    root = logging.getLogger()
+    saved_root_handlers = list(root.handlers)
+    audit_logger = logging.getLogger("audit")
+    before = {id(h) for h in audit_logger.handlers}
+    try:
+        configure_logging(audit_log=str(audit_log))
+        await _make_tool(_MockModule(agent_ctx), value=f"curl -H 'X-Api-Key: {_SHAPELESS}'")
+    finally:
+        structlog.configure(**saved_structlog)
+        root.handlers[:] = saved_root_handlers
+        for h in list(audit_logger.handlers):
+            if id(h) not in before:
+                audit_logger.removeHandler(h)
+                h.close()
+    text = audit_log.read_text()
+    assert "tool_call" in text, "the tool call was not logged, so the test proves nothing"
+    assert _SHAPELESS not in text
+    assert "<redacted-value:DOCKHAND_API_TOKEN>" in text
+
+
+# Names measured in a live broker's env (2026-10-19) that the sensitive-key heuristic missed.
+_LIVE_SECRET_NAMES = [
+    "VAULT_SECRET_ID",
+    "VAULT_ROLE_ID",
+    "AGENT_REGISTRY_DSN",
+    "DOCKHAND_MCP_BEARER",
+    "RENOVATE_BOT_PAT",
+    "ALERTS_WEBHOOK_URL",
+]
+
+
+@pytest.mark.parametrize("name", _LIVE_SECRET_NAMES)
+def test_live_secret_name_shapes_are_collected(name: str) -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    value = "3f2c9a1e-7b4d-4e8a-9c0f-5d6e7f8a9b0c"  # UUID shape: hyphens defeat the hex rule
+    configure_value_redaction(environ={name: value})
+    assert _redact_string(f"x {value} y") == f"x <redacted-value:{name}> y"
+
+
+def test_url_with_userinfo_is_collected_whatever_its_name() -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    dsn = "postgresql://registry:pw-Q7wLmZ2pXv@127.0.0.1:5432/agents"
+    configure_value_redaction(environ={"SOME_DATABASE": dsn})
+    assert _redact_string(dsn) == "<redacted-value:SOME_DATABASE>"
+
+
+def test_value_name_suffixes_do_not_change_argument_key_redaction() -> None:
+    """The wider name set is for collecting env values only; an arg called *_PAT is unchanged."""
+    from scoped_mcp.audit import _sanitize_value
+
+    assert _sanitize_value("visible", key="LOG_DSN") == "visible"
+
+
+def test_an_existing_own_log_file_is_tightened_to_0600(
+    tmp_path: pathlib.Path, permissive_umask: None
+) -> None:
+    path = tmp_path / "audit.jsonl"
+    path.write_text("old\n")
+    path.chmod(0o644)
+    handler = _private_handler(path)
+    handler.close()
+    assert _mode(path) == 0o600
+
+
+def test_traceback_on_stderr_is_redacted_by_value() -> None:
+    """Formatter.format appends exc_info after the filter; it must not bring a secret back."""
+    import logging
+    import sys
+
+    from scoped_mcp.audit import _RedactionFilter, configure_value_redaction
+
+    configure_value_redaction(environ={"DOCKHAND_API_TOKEN": _SHAPELESS})
+    try:
+        raise RuntimeError(f"connect failed to http://x/?t={_SHAPELESS}")
+    except RuntimeError:
+        exc_info = sys.exc_info()
+    record = logging.LogRecord(
+        "fastmcp", logging.ERROR, __file__, 1, "Error calling tool", (), exc_info
+    )
+    _RedactionFilter().filter(record)
+    out = logging.Formatter("%(message)s").format(record)
+    assert "RuntimeError" in out, "the traceback was dropped, so the test proves nothing"
+    assert _SHAPELESS not in out
+    assert "<redacted-value:DOCKHAND_API_TOKEN>" in out
+
+
+def test_stack_info_on_stderr_is_redacted_by_value() -> None:
+    import logging
+
+    from scoped_mcp.audit import _RedactionFilter, configure_value_redaction
+
+    configure_value_redaction(environ={"DOCKHAND_API_TOKEN": _SHAPELESS})
+    record = logging.LogRecord("x", logging.INFO, __file__, 1, "m", (), None)
+    record.stack_info = f"Stack (most recent call last):\n  f({_SHAPELESS!r})"
+    _RedactionFilter().filter(record)
+    assert _SHAPELESS not in logging.Formatter("%(message)s").format(record)
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda s: (s, "x"),
+        lambda s: {s},
+        lambda s: frozenset({s}),
+        lambda s: {s: 1},
+        lambda s: type("Obj", (), {"__repr__": lambda self: f"Obj({s})"})(),
+    ],
+    ids=["tuple", "set", "frozenset", "dict-key", "object-repr"],
+)
+def test_non_dict_containers_and_objects_are_sanitised(make) -> None:
+    import json
+
+    from scoped_mcp.audit import _sanitize_processor, configure_value_redaction
+
+    configure_value_redaction(environ={"DOCKHAND_API_TOKEN": _SHAPELESS})
+    out = _sanitize_processor(None, "info", {"event": "e", "detail": make(_SHAPELESS)})
+    assert _SHAPELESS not in json.dumps(out, default=repr)
+
+
+def test_primitives_pass_the_sanitiser_unchanged() -> None:
+    from scoped_mcp.audit import _sanitize_value
+
+    assert [_sanitize_value(v) for v in (None, True, 3, 1.5)] == [None, True, 3, 1.5]
+
+
+def test_tuples_and_sets_keep_their_elements_as_a_list() -> None:
+    """Structure is kept, not flattened into one repr string."""
+    from scoped_mcp.audit import _sanitize_value
+
+    assert _sanitize_value(("a", "b")) == ["a", "b"]
+    assert _sanitize_value(frozenset({"a"})) == ["a"]
+
+
+def test_fastmcp_logger_tracebacks_are_redacted_through_real_dispatch() -> None:
+    """R2-01: fastmcp.* loggers do not propagate to root, so a root filter never sees them.
+
+    Logs through the real logger after `import fastmcp`, and reads the record from a handler
+    on the fastmcp logger whose formatter rebuilds the traceback from exc_info, the way
+    Rich does. A hand-built record passed to the filter would prove nothing here.
+    """
+    import logging
+
+    import fastmcp  # noqa: F401 — configures fastmcp's own handlers, propagate=False
+
+    from scoped_mcp.audit import _install_redacting_record_factory, configure_value_redaction
+
+    class _FromExcInfo(logging.Formatter):
+        def format(self, record: logging.LogRecord) -> str:
+            tb = self.formatException(record.exc_info) if record.exc_info else ""
+            return f"{record.getMessage()}\n{record.exc_text or ''}\n{tb}"
+
+    seen: list[str] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            seen.append(self.format(record))
+
+    configure_value_redaction(environ={"DOCKHAND_API_TOKEN": _SHAPELESS})
+    _install_redacting_record_factory()
+    fm = logging.getLogger("fastmcp")
+    assert fm.propagate is False, "premise: fastmcp does not propagate to root"
+    handler = _Capture()
+    handler.setFormatter(_FromExcInfo())
+    fm.addHandler(handler)
+    try:
+        try:
+            raise RuntimeError(f"connect failed to http://x/?t={_SHAPELESS}")
+        except RuntimeError:
+            logging.getLogger("fastmcp.server.server").exception("Error calling tool %s", "t")
+    finally:
+        fm.removeHandler(handler)
+    out = "\n".join(seen)
+    assert "RuntimeError" in out, "nothing was captured, so the test proves nothing"
+    assert _SHAPELESS not in out
+    assert "<redacted-value:DOCKHAND_API_TOKEN>" in out
+
+
+def test_record_factory_is_installed_once() -> None:
+    import logging
+
+    from scoped_mcp.audit import _install_redacting_record_factory
+
+    _install_redacting_record_factory()
+    first = logging.getLogRecordFactory()
+    _install_redacting_record_factory()
+    assert logging.getLogRecordFactory() is first
+
+
+def test_repr_escaped_secret_inside_an_object_is_redacted() -> None:
+    """R2-02: repr() doubles backslashes and escapes quotes before the value match runs."""
+    import json
+
+    from scoped_mcp.audit import _sanitize_processor, configure_value_redaction
+
+    secret = "pa'ss\\word-Q7x9-long\""
+    configure_value_redaction(environ={"PROBE_DB_PASSWORD": secret})
+
+    class M:
+        def __repr__(self) -> str:
+            return f"M(dsn={secret!r})"
+
+    out = json.dumps(_sanitize_processor(None, "info", {"event": "e", "detail": M()}))
+    assert "word-Q7x9-long" not in out
+    assert "<redacted-value:PROBE_DB_PASSWORD>" in out
+
+
+def test_json_escaped_secret_is_redacted() -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    secret = 'tok"en\\with-quotes-Q7x9'
+    configure_value_redaction(environ={"PROBE_API_TOKEN": secret})
+    rendered = json.dumps({"msg": secret})
+    assert "with-quotes-Q7x9" not in _redact_string(rendered)
+
+
+@pytest.mark.parametrize("key", [1, (1,), None])
+def test_non_str_dict_keys_do_not_break_the_sanitiser(key) -> None:
+    """R2-03: _key_looks_sensitive called .lower() on whatever the key was."""
+    from scoped_mcp.audit import _sanitize_value
+
+    assert _sanitize_value({key: "x"}) == {key: "x"}
+
+
+def test_configure_logging_installs_the_redacting_record_factory() -> None:
+    import logging
+
+    import structlog
+
+    from scoped_mcp.audit import configure_logging
+
+    saved_structlog = structlog.get_config()
+    root = logging.getLogger()
+    saved_root_handlers = list(root.handlers)
+    try:
+        configure_logging()
+        assert getattr(logging.getLogRecordFactory(), "_scoped_mcp_redacting", False)
+    finally:
+        structlog.configure(**saved_structlog)
+        root.handlers[:] = saved_root_handlers
+
+
+def test_uvicorn_access_log_still_formats_after_configure_logging(capsys) -> None:
+    """R3-01: uvicorn's AccessFormatter unpacks five record.args; emptying them broke every
+    access line into a "--- Logging error ---" block. Uses uvicorn's real LOGGING_CONFIG."""
+    import logging
+    import logging.config
+
+    import structlog
+    import uvicorn.config
+
+    from scoped_mcp.audit import configure_logging, configure_value_redaction
+
+    saved_structlog = structlog.get_config()
+    root = logging.getLogger()
+    saved_root_handlers = list(root.handlers)
+    access = logging.getLogger("uvicorn.access")
+    saved_access = (list(access.handlers), access.propagate, access.level)
+    errors: list[logging.LogRecord] = []
+    saved_handle_error = logging.Handler.handleError
+    logging.Handler.handleError = lambda self, record: errors.append(record)  # type: ignore[method-assign]
+    try:
+        configure_logging()
+        logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
+        configure_value_redaction(environ={"PROBE_API_TOKEN": _SHAPELESS})
+        access.info(
+            '%s - "%s %s HTTP/%s" %d',
+            "127.0.0.1:5555",
+            "POST",
+            f"/mcp?t={_SHAPELESS}",
+            "1.1",
+            200,
+        )
+    finally:
+        logging.Handler.handleError = saved_handle_error  # type: ignore[method-assign]
+        structlog.configure(**saved_structlog)
+        root.handlers[:] = saved_root_handlers
+        access.handlers[:], access.propagate, access.level = saved_access
+    out = capsys.readouterr()
+    text = out.out + out.err
+    assert not errors, "the access formatter raised inside logging"
+    assert '"POST /mcp?t=<redacted-value:PROBE_API_TOKEN> HTTP/1.1" 200' in text
+    assert _SHAPELESS not in text
+
+
+def _rec(msg, args):
+    import logging
+
+    return logging.LogRecord("x", logging.INFO, __file__, 1, msg, args, None)
+
+
+def test_plain_args_keep_their_shape_and_types() -> None:
+    from scoped_mcp.audit import _redact_record, configure_value_redaction
+
+    configure_value_redaction(environ={"PROBE_API_TOKEN": _SHAPELESS})
+    rec = _rec("path %s status %d", (f"/mcp?t={_SHAPELESS}", 200))
+    _redact_record(rec)
+    assert rec.args == ("/mcp?t=<redacted-value:PROBE_API_TOKEN>", 200)
+    assert rec.getMessage() == "path /mcp?t=<redacted-value:PROBE_API_TOKEN> status 200"
+
+
+def test_mapping_args_keep_their_shape() -> None:
+    from scoped_mcp.audit import _redact_record, configure_value_redaction
+
+    configure_value_redaction(environ={"PROBE_API_TOKEN": _SHAPELESS})
+    rec = _rec("t=%(t)s n=%(n)d", ({"t": _SHAPELESS, "n": 3},))
+    _redact_record(rec)
+    assert rec.args == {"t": "<redacted-value:PROBE_API_TOKEN>", "n": 3}
+
+
+def test_secret_assembled_from_two_args_is_flattened_and_redacted() -> None:
+    """Neither half matches alone; the joined message does."""
+    from scoped_mcp.audit import _redact_record, configure_value_redaction
+
+    configure_value_redaction(environ={"PROBE_API_TOKEN": _SHAPELESS})
+    half = len(_SHAPELESS) // 2
+    rec = _rec("token %s%s", (_SHAPELESS[:half], _SHAPELESS[half:]))
+    _redact_record(rec)
+    assert rec.args == ()
+    assert rec.getMessage() == "token <redacted-value:PROBE_API_TOKEN>"
+
+
+def test_object_args_are_flattened_to_a_redacted_message() -> None:
+    from scoped_mcp.audit import _redact_record, configure_value_redaction
+
+    configure_value_redaction(environ={"PROBE_API_TOKEN": _SHAPELESS})
+
+    class Obj:
+        def __repr__(self) -> str:
+            return f"Obj({_SHAPELESS})"
+
+    rec = _rec("got %r", (Obj(),))
+    _redact_record(rec)
+    assert rec.args == ()
+    assert rec.getMessage() == "got Obj(<redacted-value:PROBE_API_TOKEN>)"
+
+
+def test_secret_in_the_msg_template_is_redacted_with_args_kept() -> None:
+    from scoped_mcp.audit import _redact_record, configure_value_redaction
+
+    configure_value_redaction(environ={"PROBE_API_TOKEN": _SHAPELESS})
+    rec = _rec(f"key {_SHAPELESS} for %s", ("bob",))
+    _redact_record(rec)
+    assert rec.args == ("bob",)
+    assert rec.getMessage() == "key <redacted-value:PROBE_API_TOKEN> for bob"
+
+
+def test_object_args_are_flattened_even_when_str_is_clean() -> None:
+    """A formatter that re-renders args with %r would expose what str() hid."""
+    from scoped_mcp.audit import _redact_record, configure_value_redaction
+
+    configure_value_redaction(environ={"PROBE_API_TOKEN": _SHAPELESS})
+
+    class Obj:
+        def __str__(self) -> str:
+            return "Obj"
+
+        def __repr__(self) -> str:
+            return f"Obj({_SHAPELESS})"
+
+    rec = _rec("got %s", (Obj(),))
+    _redact_record(rec)
+    assert rec.args == ()
+    assert rec.getMessage() == "got Obj"
+
+
+def test_unformattable_record_fails_closed() -> None:
+    """A %-mismatch with an object arg used to reach handleError with its raw repr."""
+    import logging
+
+    from scoped_mcp.audit import _redact_record, configure_value_redaction
+
+    configure_value_redaction(environ={"PROBE_API_TOKEN": _SHAPELESS})
+
+    class Obj:
+        def __repr__(self) -> str:
+            return f"Obj({_SHAPELESS})"
+
+    rec = _rec("two %s %s but one arg", (Obj(),))
+    _redact_record(rec)
+    assert rec.args == ()
+    out = logging.Formatter("%(message)s").format(rec)
+    assert _SHAPELESS not in out
+    assert "could not be formatted" in out

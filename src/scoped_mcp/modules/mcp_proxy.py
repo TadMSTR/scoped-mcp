@@ -83,6 +83,11 @@ Config:
         Applied after allowlist filtering.
     discovery_timeout_seconds (float): Timeout for the initial tools/list
         call at startup. Default: 10.0.
+    max_binary_bytes (int): Override the manifest-wide
+        ``content_limits.max_binary_bytes`` for this module. An image or audio
+        block, or an embedded blob, whose decoded size is over the cap is replaced
+        by a text stub naming its type, MIME type and size; the other blocks are
+        kept. 0 disables the cap. Default: the manifest value (10 MiB).
 
 Note: the manifest mode: field has no effect for mcp_proxy — use
 tool_allowlist/tool_denylist for access control instead.
@@ -107,12 +112,24 @@ import jsonschema
 import structlog
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
-from mcp.types import TextContent
-from pydantic_core import to_jsonable_python
+from mcp.types import (
+    AudioContent,
+    BlobResourceContents,
+    EmbeddedResource,
+    ImageContent,
+    TextContent,
+)
+from pydantic_core import to_json, to_jsonable_python
 
+from ..manifest import DEFAULT_MAX_BINARY_BYTES
 from ._base import ToolModule
 
 _log = structlog.get_logger("audit")
+_ops_log = structlog.get_logger("ops")
+
+# A MIME type is upstream-controlled and goes into the stub text the agent reads, so
+# only a plain type/subtype is quoted back; anything else is reported as "unknown".
+_MIME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+-]{0,63}/[A-Za-z0-9][A-Za-z0-9.+-]{0,63}")
 
 # Errors that indicate the persistent stdio upstream's transport is dead (subprocess
 # exited, pipe closed, connection reset) — as opposed to a legitimate tool-level error
@@ -152,7 +169,94 @@ class _ProxyValidationError(ValueError):
     """Raised when proxied arguments fail upstream inputSchema validation."""
 
 
-def _unwrap_result(result: Any) -> Any:
+def _decoded_len(b64: str) -> int:
+    """Decoded size of a base64 string, measured on the string as sent.
+
+    The cap is on bytes delivered, not on the encoding, which is a third larger. Nothing
+    is stripped first: whitespace or ``=`` padding are forwarded too, and stripping them
+    let a 20 MiB run of spaces measure as 8 bytes. A well-formed string is over-counted
+    by at most two padding bytes.
+
+    The field is a plain ``str`` with no base64 check, so a non-ASCII string is not base64
+    at all, and each character can be four bytes on the wire. That is measured as its
+    full UTF-8 length, undiscounted.
+    """
+    if not b64.isascii():
+        return len(b64.encode("utf-8", "surrogatepass"))
+    return len(b64) * 3 // 4
+
+
+def _side_bytes(model: Any) -> int:
+    """Bytes a block forwards besides its binary field: extra fields, ``_meta``, annotations.
+
+    mcp.types models allow extra fields and FastMCP forwards them, so an upstream could
+    otherwise put any amount of data next to a tiny image. Zero for an ordinary block.
+    """
+    total = 0
+    for part in (model.model_extra, model.meta, getattr(model, "annotations", None)):
+        if part:
+            total += len(to_json(part))
+    return total
+
+
+def _binary_size(block: Any) -> tuple[str, str | None, int] | None:
+    """Return (kind, mime, size) for a block that carries binary data, else None.
+
+    The size is the decoded binary plus whatever the block carries beside it.
+    """
+    if isinstance(block, (ImageContent, AudioContent)):
+        return block.type, block.mimeType, _decoded_len(block.data) + _side_bytes(block)
+    if isinstance(block, EmbeddedResource) and isinstance(block.resource, BlobResourceContents):
+        res = block.resource
+        size = _decoded_len(res.blob) + _side_bytes(res) + _side_bytes(block)
+        return "resource", res.mimeType, size
+    return None
+
+
+def _cap_binary_blocks(content: list[Any], max_binary_bytes: int, module: str, tool: str) -> list:
+    """Replace each binary block over ``max_binary_bytes`` with a text stub (vikunja#1071).
+
+    The other blocks are kept in order, so ``[image, deeplink]`` with an oversized image
+    still delivers the deeplink. ``0`` disables the cap. The drop is logged to ops with
+    sizes only, never the payload.
+    """
+    if max_binary_bytes <= 0:
+        return content
+    capped: list[Any] = []
+    for block in content:
+        measured = _binary_size(block)
+        if measured is None or measured[2] <= max_binary_bytes:
+            capped.append(block)
+            continue
+        kind, mime, size = measured
+        safe_mime = mime if mime and _MIME_RE.fullmatch(mime) else "unknown"
+        _ops_log.warning(
+            "mcp_proxy_binary_dropped",
+            module=module,
+            tool=tool,
+            kind=kind,
+            mime=safe_mime,
+            size_bytes=size,
+            cap_bytes=max_binary_bytes,
+        )
+        capped.append(
+            TextContent(
+                type="text",
+                text=(
+                    f"[scoped-mcp: {kind} {safe_mime} of {size} bytes dropped;"
+                    f" cap {max_binary_bytes}]"
+                ),
+            )
+        )
+    return capped
+
+
+def _unwrap_result(
+    result: Any,
+    max_binary_bytes: int = DEFAULT_MAX_BINARY_BYTES,
+    module: str = "",
+    tool: str = "",
+) -> Any:
     """Turn an upstream ``CallToolResult`` into the proxy tool's return value.
 
     - Any non-text block (image, audio, embedded resource, resource link): return the
@@ -162,20 +266,22 @@ def _unwrap_result(result: Any) -> Any:
       This wins over ``result.data``: the proxied tool declares no output schema, so
       structured data would reach the agent as JSON text and the image would be lost.
       Upstreams that follow the spec also put that JSON in a text block.
+      A binary block over ``max_binary_bytes`` (decoded) is replaced by a text stub.
     - Otherwise structured data, if the upstream declared an output schema, converted to
       plain JSON types so the response filter can scan it.
     - Otherwise the text blocks joined with newlines (empty content passes through).
     """
     content = result.content or []
     if any(not isinstance(block, TextContent) for block in content):
-        # SECURITY[deferred]: binary blocks are forwarded at whatever size the upstream
-        # sends; no max_binary_bytes cap yet. Target: vikunja#1071 (id 1154).
-        # Audit: 2026-10-11/scoped-mcp-proxy-content-1070 F-04.
+        # SECURITY: each binary block is capped at max_binary_bytes (decoded size, default
+        # 10 MiB) and replaced by a text stub when over it. Was SECURITY[deferred]; fixed
+        # in v1.19.0, vikunja#1071 (id 1154). Audit: 2026-10-11/scoped-mcp-proxy-content-1070
+        # F-04.
         # SECURITY[accepted]: images reach the agent and text filters cannot screen pixels
         # (prompt injection via rendered text). Only grafana-mcp renders of forge's own
         # dashboards produce images today; revisit before proxying an external image tool.
         # Audit: 2026-10-11/scoped-mcp-proxy-content-1070 F-05.
-        return content
+        return _cap_binary_blocks(content, max_binary_bytes, module, tool)
     if result.data is not None:
         # The FastMCP client hydrates a model-typed output into a generated class, which
         # the response filter cannot walk, so it reached the agent unscanned. Plain JSON
@@ -235,6 +341,16 @@ class McpProxyModule(ToolModule):
         self._tool_allowlist: set[str] = set(allowlist) if allowlist else set()
         self._tool_denylist: set[str] = set(denylist)
         self._discovery_timeout: float = float(config.get("discovery_timeout_seconds", 10.0))
+
+        cap_override = config.get("max_binary_bytes")
+        if cap_override is not None and (
+            isinstance(cap_override, bool) or not isinstance(cap_override, int) or cap_override < 0
+        ):
+            raise ValueError("mcp_proxy: max_binary_bytes must be an integer >= 0")
+        self._max_binary_bytes_override: int | None = cap_override
+        # Set by the registry after instantiation from manifest.content_limits, the same
+        # way it sets _manifest_key. The per-module override wins over it.
+        self._global_max_binary_bytes: int = DEFAULT_MAX_BINARY_BYTES
         self._client_handle: Any | None = None  # outer Client for stdio — retained for __aexit__
         self._persistent_client: Any | None = None  # return value of __aenter__; used for calls
         # Serializes dead-transport reconnects so N concurrent callers that hit the same broken
@@ -268,6 +384,13 @@ class McpProxyModule(ToolModule):
         # the process start time: a module that failed init and was later recovered by
         # the self-healer re-discovers, and this moves while the process does not.
         self._discovered_at: str = datetime.now(UTC).isoformat()
+
+    @property
+    def max_binary_bytes(self) -> int:
+        """The binary block cap in force: the module override, else the manifest value."""
+        if self._max_binary_bytes_override is not None:
+            return self._max_binary_bytes_override
+        return self._global_max_binary_bytes
 
     def tool_inventory(self, include_names: bool = False) -> dict[str, Any]:
         """Return what this proxy actually registered from its upstream.
@@ -676,7 +799,12 @@ class McpProxyModule(ToolModule):
                 # HTTP: open a connection per call (cheap, stateless)
                 async with Client(module._transport()) as client:
                     result = await client.call_tool(upstream_tool_name, arguments=kwargs)
-            return _unwrap_result(result)
+            return _unwrap_result(
+                result,
+                module.max_binary_bytes,
+                module=module._manifest_key or module.name,
+                tool=upstream_tool_name,
+            )
 
         safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", upstream_tool_name)
         if safe_name and safe_name[0].isdigit():

@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.19.0] — 2026-10-19
+
+A cap on forwarded binary blocks, private audit logs and by-value redaction. Build plan
+`obs-followups-2026-10-p2-scoped-mcp-fixes`.
+
+### Added
+- **`content_limits.max_binary_bytes`** (manifest, default 10 MiB; `0` disables it), with a
+  per-module `config.max_binary_bytes` override on `mcp_proxy`. An image or audio block, or
+  an embedded blob, whose **decoded** size is over the cap is replaced with a text stub
+  naming its kind, MIME type and size. The other blocks are kept. The drop is logged to ops
+  as `mcp_proxy_binary_dropped`, without the payload. The size is measured on the string as
+  sent (padding and whitespace included) plus any extra fields, `_meta` or annotations, so
+  neither can carry a payload past the cap. Non-ASCII `data` (not base64) is counted at its
+  full UTF-8 size. The cap is per block. `scoped-mcp validate` rejects a
+  negative, boolean or non-integer cap. Closes vikunja#1071 (audit
+  2026-10-11/scoped-mcp-proxy-content-1070 F-04).
+
+### Security
+- **Audit and ops files are `0600`** whatever the umask, including rotated ones, and an
+  existing one the process owns is tightened on open. The agent-bus session JSONL is created
+  `0600` when scoped-mcp creates it; one another writer made keeps its mode. A missing log
+  directory is created `0700`; an existing one is not re-moded. Under PM2 (umask 022) these
+  files were `0644`, so any local UID could read tool arguments. vikunja#1075 item 3.
+- **By-value redaction.** Pattern redaction let a secret with no recognisable shape through
+  (a Dockhand API token, an ntfy topic URL). At startup the proxy now collects the values of
+  the sensitive-named variables in its environment (the existing suffixes plus `_SECRET_ID`,
+  `_ROLE_ID`, `_DSN`, `_BEARER`, `_PAT`, `_WEBHOOK[_URL]`), every URL value carrying
+  userinfo, `SCOPED_MCP_ALERT_NTFY_URL`, and every `${VAR}` the manifest references, and replaces them in every log string with
+  `<redacted-value:NAME>`, longest value first and before the pattern pass. It covers the
+  stdlib records on stderr too, tracebacks and stack info included. That runs in a
+  `LogRecord` factory, so it also reaches FastMCP's own `fastmcp.*` loggers, which do not
+  propagate to root. Tuples, sets, dict keys and object `repr()`s are scanned on the file
+  sinks, and each value's `repr`- and JSON-escaped forms are matched as well. Values under 12 characters, digit-only values and bare URL
+  origins are skipped. Only a count of values is logged. vikunja#1075 item 3 (audit
+  2026-10-12/observability-refresh-2026-10-p4-secrets-access F-02).
+
 ## [1.18.0] — 2026-10-16
 
 HITL lifecycle events. Build plan `operator-panel-2026-09-p3-lifecycle-events`, Phase 4.
