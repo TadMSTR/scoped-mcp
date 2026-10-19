@@ -485,8 +485,9 @@ modules:
 Header values support `${VAR}` substitution (same rules as all manifest fields).
 Headers are only applied to HTTP transports — configuring headers on a stdio
 transport logs a warning and ignores them. `Authorization` header values are
-automatically redacted from structured logs, and so is the value of every `${VAR}` the
-manifest references (by-value redaction, v1.19.0).
+automatically redacted from structured logs. Since v1.19.0 so is the value of every `${VAR}`
+the manifest references, except values under 12 characters, digit-only values and bare URL
+origins (by-value redaction; see [Audit log files and redaction](docs/manifest-schema.md#audit-log-files-and-redaction)).
 
 **Environment variables for stdio children** — pass environment variables to a spawned
 stdio subprocess:
@@ -901,7 +902,8 @@ guarantees. All are off by default; enable per-agent in the manifest:
     unchanged.
   - **Known limits.** Dict keys and extra-field names are not scanned, only values.
     Forwarded binary blocks are capped by `content_limits.max_binary_bytes` (default
-    10 MiB, v1.19.0), not screened. Images can carry prompt injection that text filters
+    10 MiB, v1.19.0), not screened. The cap is per block, so a result with N blocks can
+    carry up to N times the cap. Images can carry prompt injection that text filters
     cannot see.
 
 ---

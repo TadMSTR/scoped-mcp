@@ -176,7 +176,13 @@ def _decoded_len(b64: str) -> int:
     is stripped first: whitespace or ``=`` padding are forwarded too, and stripping them
     let a 20 MiB run of spaces measure as 8 bytes. A well-formed string is over-counted
     by at most two padding bytes.
+
+    The field is a plain ``str`` with no base64 check, so a non-ASCII string is not base64
+    at all, and each character can be four bytes on the wire. That is measured as its
+    full UTF-8 length, undiscounted.
     """
+    if not b64.isascii():
+        return len(b64.encode("utf-8", "surrogatepass"))
     return len(b64) * 3 // 4
 
 

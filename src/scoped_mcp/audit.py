@@ -353,10 +353,18 @@ def _sanitize_value(value: Any, key: str = "") -> Any:
             return redacted[:_MAX_ARG_LEN] + f"...<truncated {len(redacted.encode())} bytes>"
         return redacted
     if isinstance(value, dict):
-        return {k: _sanitize_value(v, k) for k, v in value.items()}
-    if isinstance(value, list):
+        # Keys are scanned too: a secret used as a key is still a secret in the file.
+        return {
+            (_redact_string(k) if isinstance(k, str) else k): _sanitize_value(v, k)
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple, set, frozenset)):
         return [_sanitize_value(v) for v in value]
-    return value
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    # Anything else (a model, an exception, a datetime) would reach JSONRenderer and be
+    # rendered through repr() after this processor has run, unscanned. Render it here.
+    return _sanitize_value(repr(value))
 
 
 def _sanitize_processor(logger: Any, method: str, event_dict: dict[str, Any]) -> dict[str, Any]:
@@ -386,7 +394,14 @@ class _RedactionFilter(logging.Filter):
     persistently by PM2. A dependency that logs an ``Authorization: Bearer <token>`` header at
     DEBUG would otherwise persist the secret. This filter runs the same pattern redaction over
     every formatted stderr record so a leaked bearer/token never reaches the log.
+
+    That includes the traceback. ``Formatter.format`` appends ``exc_info`` and
+    ``stack_info`` after the filter has run, so they are formatted and redacted here and
+    the raw exception is dropped from the record. FastMCP logs every tool exception with
+    ``logger.exception``, and exception text is where a DSN or a query-string token turns up.
     """
+
+    _exc_formatter = logging.Formatter()
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
@@ -394,6 +409,19 @@ class _RedactionFilter(logging.Filter):
             record.args = ()
         except Exception:
             pass  # never let redaction drop a log record
+        try:
+            if record.exc_info:
+                record.exc_text = self._exc_formatter.formatException(record.exc_info)
+                record.exc_info = None
+            if record.exc_text:
+                record.exc_text = _redact_string(record.exc_text)
+            if record.stack_info:
+                record.stack_info = _redact_string(record.stack_info)
+        except Exception:
+            # Fail closed here: an unformattable traceback is dropped, not printed raw.
+            record.exc_info = None
+            record.exc_text = "<traceback dropped: redaction failed>"
+            record.stack_info = None
         return True
 
 

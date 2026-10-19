@@ -83,7 +83,9 @@ included, plus any extra fields, `_meta` or annotations the block carries beside
 blocks in the result are kept. The drop is logged to ops as `mcp_proxy_binary_dropped` with
 the module, tool, kind, MIME type and sizes, never the payload. An upstream MIME type that
 isn't a plain `type/subtype` is reported as `unknown`. Text blocks and embedded text
-resources are not capped. Set `config.max_binary_bytes` on one `mcp_proxy` module to
+resources are not capped. The cap is **per block**: a result with N binary blocks can
+carry up to N times the cap, so it bounds one image, not a whole result. Set
+`config.max_binary_bytes` on one `mcp_proxy` module to
 override the value for that module only. (v1.19.0, vikunja#1071)
 
 ## Credential source config
@@ -390,7 +392,9 @@ Before a record is written, every string in it is redacted twice:
   secrets file are not in the environment, so this pass does not see them.
 - **By pattern.** JWTs, bearer tokens, GitHub tokens, Vault tokens and hex runs of 32+.
 
-The same two passes run over stdlib log records on stderr. Only the number of values is
+The same two passes run over stdlib log records on stderr, including their tracebacks
+and stack info. Tuples, sets, dict keys and other objects are scanned too; an object is
+rendered with `repr()` first. Only the number of values is
 logged (`value_redaction_configured`), never the values, their lengths or hashes.
 
 ## Complete example

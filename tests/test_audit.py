@@ -797,3 +797,72 @@ def test_an_existing_own_log_file_is_tightened_to_0600(
     handler = _private_handler(path)
     handler.close()
     assert _mode(path) == 0o600
+
+
+def test_traceback_on_stderr_is_redacted_by_value() -> None:
+    """Formatter.format appends exc_info after the filter; it must not bring a secret back."""
+    import logging
+    import sys
+
+    from scoped_mcp.audit import _RedactionFilter, configure_value_redaction
+
+    configure_value_redaction(environ={"DOCKHAND_API_TOKEN": _SHAPELESS})
+    try:
+        raise RuntimeError(f"connect failed to http://x/?t={_SHAPELESS}")
+    except RuntimeError:
+        exc_info = sys.exc_info()
+    record = logging.LogRecord(
+        "fastmcp", logging.ERROR, __file__, 1, "Error calling tool", (), exc_info
+    )
+    _RedactionFilter().filter(record)
+    out = logging.Formatter("%(message)s").format(record)
+    assert "RuntimeError" in out, "the traceback was dropped, so the test proves nothing"
+    assert _SHAPELESS not in out
+    assert "<redacted-value:DOCKHAND_API_TOKEN>" in out
+
+
+def test_stack_info_on_stderr_is_redacted_by_value() -> None:
+    import logging
+
+    from scoped_mcp.audit import _RedactionFilter, configure_value_redaction
+
+    configure_value_redaction(environ={"DOCKHAND_API_TOKEN": _SHAPELESS})
+    record = logging.LogRecord("x", logging.INFO, __file__, 1, "m", (), None)
+    record.stack_info = f"Stack (most recent call last):\n  f({_SHAPELESS!r})"
+    _RedactionFilter().filter(record)
+    assert _SHAPELESS not in logging.Formatter("%(message)s").format(record)
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda s: (s, "x"),
+        lambda s: {s},
+        lambda s: frozenset({s}),
+        lambda s: {s: 1},
+        lambda s: type("Obj", (), {"__repr__": lambda self: f"Obj({s})"})(),
+    ],
+    ids=["tuple", "set", "frozenset", "dict-key", "object-repr"],
+)
+def test_non_dict_containers_and_objects_are_sanitised(make) -> None:
+    import json
+
+    from scoped_mcp.audit import _sanitize_processor, configure_value_redaction
+
+    configure_value_redaction(environ={"DOCKHAND_API_TOKEN": _SHAPELESS})
+    out = _sanitize_processor(None, "info", {"event": "e", "detail": make(_SHAPELESS)})
+    assert _SHAPELESS not in json.dumps(out, default=repr)
+
+
+def test_primitives_pass_the_sanitiser_unchanged() -> None:
+    from scoped_mcp.audit import _sanitize_value
+
+    assert [_sanitize_value(v) for v in (None, True, 3, 1.5)] == [None, True, 3, 1.5]
+
+
+def test_tuples_and_sets_keep_their_elements_as_a_list() -> None:
+    """Structure is kept, not flattened into one repr string."""
+    from scoped_mcp.audit import _sanitize_value
+
+    assert _sanitize_value(("a", "b")) == ["a", "b"]
+    assert _sanitize_value(frozenset({"a"})) == ["a"]

@@ -19,7 +19,8 @@ A cap on forwarded binary blocks, private audit logs and by-value redaction. Bui
   naming its kind, MIME type and size. The other blocks are kept. The drop is logged to ops
   as `mcp_proxy_binary_dropped`, without the payload. The size is measured on the string as
   sent (padding and whitespace included) plus any extra fields, `_meta` or annotations, so
-  neither can carry a payload past the cap. `scoped-mcp validate` rejects a
+  neither can carry a payload past the cap. Non-ASCII `data` (not base64) is counted at its
+  full UTF-8 size. The cap is per block. `scoped-mcp validate` rejects a
   negative, boolean or non-integer cap. Closes vikunja#1071 (audit
   2026-10-11/scoped-mcp-proxy-content-1070 F-04).
 
@@ -35,7 +36,8 @@ A cap on forwarded binary blocks, private audit logs and by-value redaction. Bui
   `_ROLE_ID`, `_DSN`, `_BEARER`, `_PAT`, `_WEBHOOK[_URL]`), every URL value carrying
   userinfo, `SCOPED_MCP_ALERT_NTFY_URL`, and every `${VAR}` the manifest references, and replaces them in every log string with
   `<redacted-value:NAME>`, longest value first and before the pattern pass. It covers the
-  stdlib records on stderr too. Values under 12 characters, digit-only values and bare URL
+  stdlib records on stderr too, tracebacks and stack info included, and tuples, sets, dict
+  keys and object `repr()`s on the file sinks. Values under 12 characters, digit-only values and bare URL
   origins are skipped. Only a count of values is logged. vikunja#1075 item 3 (audit
   2026-10-12/observability-refresh-2026-10-p4-secrets-access F-02).
 

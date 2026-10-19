@@ -1249,3 +1249,12 @@ def test_an_ordinary_block_has_no_side_bytes(agent_ctx):
     from scoped_mcp.modules.mcp_proxy import _side_bytes
 
     assert _side_bytes(_image()) == 0
+
+
+def test_non_ascii_data_is_measured_in_bytes(agent_ctx):
+    """1,200 four-byte characters: measured as 900 characters' worth before, 4,800 bytes sent."""
+    image = ImageContent(type="image", data="\U0001f600" * 1200, mimeType="image/png")
+    _, result = _capped_proxy(
+        agent_ctx, FakeCallToolResult(data=None, content=[image]), override=1000
+    )
+    assert result[0].text == _stub_text("image", "image/png", 4800, 1000)
