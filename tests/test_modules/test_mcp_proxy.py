@@ -1203,3 +1203,49 @@ def test_registry_hands_the_manifest_cap_to_the_module(agent_ctx):
     )
     _apply_content_limits(mod, manifest)
     assert mod.max_binary_bytes == 4321
+
+
+@pytest.mark.parametrize(
+    "data",
+    [_PNG_B64[:8] + " " * 5000, _PNG_B64[:8] + "=" * 5000, _PNG_B64[:8] + "\n" * 5000],
+    ids=["spaces", "padding", "newlines"],
+)
+def test_padding_cannot_shrink_a_block_under_the_cap(agent_ctx, data):
+    """Everything in the string is forwarded, so everything is measured."""
+    image = ImageContent(type="image", data=data, mimeType="image/png")
+    _, result = _capped_proxy(
+        agent_ctx, FakeCallToolResult(data=None, content=[image]), override=1000
+    )
+    assert isinstance(result[0], TextContent)
+
+
+def test_extra_fields_count_towards_the_cap(agent_ctx):
+    """mcp.types allows extra fields; a tiny image cannot carry a large payload beside it."""
+    image = ImageContent(type="image", data="AAAA", mimeType="image/png", junk="x" * 5000)
+    _, result = _capped_proxy(
+        agent_ctx, FakeCallToolResult(data=None, content=[image]), override=1000
+    )
+    assert isinstance(result[0], TextContent)
+
+
+def test_meta_on_an_embedded_blob_counts_towards_the_cap(agent_ctx):
+    blob = EmbeddedResource(
+        type="resource",
+        resource=BlobResourceContents(
+            uri="file:///x.bin",
+            blob="AAAA",
+            mimeType="application/octet-stream",
+            _meta={"pad": "y" * 5000},
+        ),
+    )
+    _, result = _capped_proxy(
+        agent_ctx, FakeCallToolResult(data=None, content=[blob]), override=1000
+    )
+    assert isinstance(result[0], TextContent)
+
+
+def test_an_ordinary_block_has_no_side_bytes(agent_ctx):
+    """So the at-cap boundary above is exact: the cap is not loosened or tightened by metadata."""
+    from scoped_mcp.modules.mcp_proxy import _side_bytes
+
+    assert _side_bytes(_image()) == 0

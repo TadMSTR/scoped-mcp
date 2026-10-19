@@ -119,7 +119,7 @@ from mcp.types import (
     ImageContent,
     TextContent,
 )
-from pydantic_core import to_jsonable_python
+from pydantic_core import to_json, to_jsonable_python
 
 from ..manifest import DEFAULT_MAX_BINARY_BYTES
 from ._base import ToolModule
@@ -170,22 +170,40 @@ class _ProxyValidationError(ValueError):
 
 
 def _decoded_len(b64: str) -> int:
-    """Decoded size of a base64 string, without decoding it.
+    """Decoded size of a base64 string, measured on the string as sent.
 
-    The cap is on bytes delivered, not on the encoding, which is a third larger. Padding
-    and whitespace are not payload. Malformed base64 still gets a size bounded by its
-    length, which is all the cap needs.
+    The cap is on bytes delivered, not on the encoding, which is a third larger. Nothing
+    is stripped first: whitespace or ``=`` padding are forwarded too, and stripping them
+    let a 20 MiB run of spaces measure as 8 bytes. A well-formed string is over-counted
+    by at most two padding bytes.
     """
-    stripped = "".join(b64.split()).rstrip("=")
-    return len(stripped) * 3 // 4
+    return len(b64) * 3 // 4
+
+
+def _side_bytes(model: Any) -> int:
+    """Bytes a block forwards besides its binary field: extra fields, ``_meta``, annotations.
+
+    mcp.types models allow extra fields and FastMCP forwards them, so an upstream could
+    otherwise put any amount of data next to a tiny image. Zero for an ordinary block.
+    """
+    total = 0
+    for part in (model.model_extra, model.meta, getattr(model, "annotations", None)):
+        if part:
+            total += len(to_json(part))
+    return total
 
 
 def _binary_size(block: Any) -> tuple[str, str | None, int] | None:
-    """Return (kind, mime, decoded size) for a block that carries binary data, else None."""
+    """Return (kind, mime, size) for a block that carries binary data, else None.
+
+    The size is the decoded binary plus whatever the block carries beside it.
+    """
     if isinstance(block, (ImageContent, AudioContent)):
-        return block.type, block.mimeType, _decoded_len(block.data)
+        return block.type, block.mimeType, _decoded_len(block.data) + _side_bytes(block)
     if isinstance(block, EmbeddedResource) and isinstance(block.resource, BlobResourceContents):
-        return "resource", block.resource.mimeType, _decoded_len(block.resource.blob)
+        res = block.resource
+        size = _decoded_len(res.blob) + _side_bytes(res) + _side_bytes(block)
+        return "resource", res.mimeType, size
     return None
 
 

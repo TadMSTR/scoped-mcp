@@ -77,7 +77,8 @@ content_limits:
 
 `max_binary_bytes` caps each binary block an `mcp_proxy` module forwards: an image or audio
 block, or an embedded resource blob. The cap is on the **decoded** size, not on the base64
-text, which is a third larger. A block over the cap is replaced with a text block such as
+text, which is a third larger. It is measured on the string as sent, padding and whitespace
+included, plus any extra fields, `_meta` or annotations the block carries beside its data. A block over the cap is replaced with a text block such as
 `[scoped-mcp: image image/png of 12582912 bytes dropped; cap 10485760]`, and the other
 blocks in the result are kept. The drop is logged to ops as `mcp_proxy_binary_dropped` with
 the module, tool, kind, MIME type and sizes, never the payload. An upstream MIME type that
@@ -371,16 +372,18 @@ Bus events are for display. Never approve, grant or launch anything from one.
 ### Audit log files and redaction
 
 Since v1.19.0 the audit and ops files (`--audit-log`, `--ops-log`, including rotated
-files) and the session JSONL under `agent_bus_comms_dir/logs/` are created `0600`,
-whatever the process umask. A missing log directory is created `0700`. An existing file
-or directory keeps its mode, so the shared session JSONL that agent-bus also writes is not
-re-moded.
+files) are `0600` whatever the process umask: created so, and an existing one the process
+owns is tightened on open. A missing log directory is created `0700`; an existing one keeps
+its mode (`--audit-log ~/audit.log` must not re-mode the home directory). The session JSONL
+under `agent_bus_comms_dir/logs/` is created `0600` when scoped-mcp creates it, but it is
+shared with agent-bus, so a file another writer made keeps its mode.
 
 Before a record is written, every string in it is redacted twice:
 - **By value.** At startup the proxy collects the values in its own environment whose
-  names look sensitive (`*_TOKEN`, `*_KEY`, `*_SECRET`, `*_PASSWORD`, ... and names like
-  `token` or `api_key`), plus `SCOPED_MCP_ALERT_NTFY_URL`, plus every variable the manifest
-  references as `${VAR}`, whatever it is called. Each occurrence is replaced with
+  names look sensitive (`*_TOKEN`, `*_KEY`, `*_SECRET`, `*_PASSWORD`, `*_SECRET_ID`,
+  `*_ROLE_ID`, `*_DSN`, `*_BEARER`, `*_PAT`, `*_WEBHOOK[_URL]`, ... and names like `token` or
+  `api_key`), every URL value with a username or password in it, `SCOPED_MCP_ALERT_NTFY_URL`,
+  and every variable the manifest references as `${VAR}`, whatever it is called. Each occurrence is replaced with
   `<redacted-value:NAME>`. Values under 12 characters, digit-only values and bare URL
   origins (`https://host:port`) are skipped. A URL with userinfo, a path or a query is
   kept, because any of those can carry the credential. Values held only in Vault or a

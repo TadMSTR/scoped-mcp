@@ -624,14 +624,14 @@ def test_insensitive_env_names_are_not_collected() -> None:
 
 
 def test_manifest_referenced_name_is_redacted_whatever_it_is_called() -> None:
-    """DOCKHAND_MCP_BEARER does not look sensitive; a manifest reference makes it count."""
+    """A name no heuristic flags still counts once the manifest references it."""
     from scoped_mcp.audit import _redact_string, configure_value_redaction
 
-    env = {"DOCKHAND_MCP_BEARER": _SHAPELESS}
+    env = {"UPSTREAM_HEADER_VALUE": _SHAPELESS}
     configure_value_redaction(environ=env)
     assert _redact_string(_SHAPELESS) == _SHAPELESS
-    configure_value_redaction(["DOCKHAND_MCP_BEARER"], environ=env)
-    assert _redact_string(_SHAPELESS) == "<redacted-value:DOCKHAND_MCP_BEARER>"
+    configure_value_redaction(["UPSTREAM_HEADER_VALUE"], environ=env)
+    assert _redact_string(_SHAPELESS) == "<redacted-value:UPSTREAM_HEADER_VALUE>"
 
 
 def test_alert_ntfy_topic_url_is_redacted_whole() -> None:
@@ -751,3 +751,49 @@ async def test_audit_file_never_holds_an_env_secret_value(
     assert "tool_call" in text, "the tool call was not logged, so the test proves nothing"
     assert _SHAPELESS not in text
     assert "<redacted-value:DOCKHAND_API_TOKEN>" in text
+
+
+# Names measured in a live broker's env (2026-10-19) that the sensitive-key heuristic missed.
+_LIVE_SECRET_NAMES = [
+    "VAULT_SECRET_ID",
+    "VAULT_ROLE_ID",
+    "AGENT_REGISTRY_DSN",
+    "DOCKHAND_MCP_BEARER",
+    "RENOVATE_BOT_PAT",
+    "ALERTS_WEBHOOK_URL",
+]
+
+
+@pytest.mark.parametrize("name", _LIVE_SECRET_NAMES)
+def test_live_secret_name_shapes_are_collected(name: str) -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    value = "3f2c9a1e-7b4d-4e8a-9c0f-5d6e7f8a9b0c"  # UUID shape: hyphens defeat the hex rule
+    configure_value_redaction(environ={name: value})
+    assert _redact_string(f"x {value} y") == f"x <redacted-value:{name}> y"
+
+
+def test_url_with_userinfo_is_collected_whatever_its_name() -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    dsn = "postgresql://registry:pw-Q7wLmZ2pXv@127.0.0.1:5432/agents"
+    configure_value_redaction(environ={"SOME_DATABASE": dsn})
+    assert _redact_string(dsn) == "<redacted-value:SOME_DATABASE>"
+
+
+def test_value_name_suffixes_do_not_change_argument_key_redaction() -> None:
+    """The wider name set is for collecting env values only; an arg called *_PAT is unchanged."""
+    from scoped_mcp.audit import _sanitize_value
+
+    assert _sanitize_value("visible", key="LOG_DSN") == "visible"
+
+
+def test_an_existing_own_log_file_is_tightened_to_0600(
+    tmp_path: pathlib.Path, permissive_umask: None
+) -> None:
+    path = tmp_path / "audit.jsonl"
+    path.write_text("old\n")
+    path.chmod(0o644)
+    handler = _private_handler(path)
+    handler.close()
+    assert _mode(path) == 0o600

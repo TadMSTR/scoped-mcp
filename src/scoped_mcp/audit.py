@@ -221,10 +221,41 @@ _MIN_REDACT_VALUE_LEN = 12
 # Secret by path, so the sensitive-name heuristic cannot see it: the topic is the
 # credential (vikunja#1075).
 _SECRET_ENV_NAMES = frozenset({"SCOPED_MCP_ALERT_NTFY_URL"})
+# Name shapes that hold a secret but are not in _SENSITIVE_SUFFIXES, measured on a live
+# broker's env (VAULT_SECRET_ID, VAULT_ROLE_ID, AGENT_REGISTRY_DSN, DOCKHAND_MCP_BEARER,
+# RENOVATE_BOT_PAT). For value collection only: widening _SENSITIVE_SUFFIXES would also
+# change which tool-argument keys are blanked.
+_VALUE_NAME_SUFFIXES = (
+    "_SECRET_ID",
+    "_ROLE_ID",
+    "_DSN",
+    "_BEARER",
+    "_PAT",
+    "_WEBHOOK",
+    "_WEBHOOK_URL",
+)
 _URL_RE = re.compile(r"(?i)^[a-z][a-z0-9+.-]*://")
 
-_value_redaction_re: re.Pattern[str] | None = None
-_value_redaction_names: dict[str, str] = {}
+# (pattern, value -> name). One tuple, rebound in a single assignment, so a concurrent
+# reader never pairs a new pattern with the old names (which would raise inside the
+# substitution and, in _RedactionFilter, let the record through unredacted).
+_value_redaction: tuple[re.Pattern[str], dict[str, str]] | None = None
+
+
+def _url_has_userinfo(value: str) -> bool:
+    if not _URL_RE.match(value):
+        return False
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return False
+    return bool(parts.username or parts.password)
+
+
+def _name_holds_secret(name: str) -> bool:
+    return _key_looks_sensitive(name) or name.upper().endswith(_VALUE_NAME_SUFFIXES)
 
 
 def _is_redactable_value(value: str) -> bool:
@@ -250,36 +281,40 @@ def configure_value_redaction(
 ) -> int:
     """(Re)build the by-value redaction set from the process environment.
 
-    Collects every variable whose name looks sensitive, the names in
+    Collects every variable whose name looks sensitive, every URL value carrying
+    userinfo (a password in a DSN, whatever the variable is called), the names in
     ``_SECRET_ENV_NAMES``, and ``extra_names`` (the manifest's ${VAR} references,
     whatever they are called). Rebuilt from scratch on each call. Returns how many
     distinct values are redacted, the one thing about the set that may be logged.
     """
-    global _value_redaction_re, _value_redaction_names
+    global _value_redaction
     env = os.environ if environ is None else environ
-    wanted = {n for n in env if _key_looks_sensitive(n)} | _SECRET_ENV_NAMES | set(extra_names)
+    wanted = (
+        {n for n, v in env.items() if _name_holds_secret(n) or _url_has_userinfo(v)}
+        | _SECRET_ENV_NAMES
+        | set(extra_names)
+    )
     names: dict[str, str] = {}
     # Sorted so that two names sharing a value always report the same one.
     for name in sorted(wanted):
         value = env.get(name)
         if value and _is_redactable_value(value):
             names.setdefault(value, name)
-    _value_redaction_names = names
     if not names:
-        _value_redaction_re = None
+        _value_redaction = None
         return 0
     # One compiled alternation, longest value first: at any position the longest secret
     # wins, so a value that contains another is replaced whole.
     alternatives = sorted(names, key=len, reverse=True)
-    _value_redaction_re = re.compile("|".join(re.escape(v) for v in alternatives))
+    _value_redaction = (re.compile("|".join(re.escape(v) for v in alternatives)), names)
     return len(names)
 
 
 def _redact_values(s: str) -> str:
-    pattern = _value_redaction_re
-    if pattern is None:
+    current = _value_redaction
+    if current is None:
         return s
-    names = _value_redaction_names
+    pattern, names = current
     return pattern.sub(lambda m: f"<redacted-value:{names[m.group(0)]}>", s)
 
 
@@ -363,15 +398,25 @@ class _RedactionFilter(logging.Filter):
 
 
 class _PrivateRotatingFileHandler(logging.handlers.RotatingFileHandler):
-    """A RotatingFileHandler whose files are created 0600, including after a rollover.
+    """A RotatingFileHandler whose files are 0600, including after a rollover.
 
     ``doRollover`` renames the current file, which keeps its mode, and calls ``_open``
     for the new one, so overriding ``_open`` covers both. A process-wide ``os.umask``
     would do the same for every file every module writes, which is not ours to change.
+
+    Unlike the shared agent-bus file, this one is scoped-mcp's own, so an existing file
+    this process owns is tightened to 0600 as well (a log written by an older version, or
+    reused across a restart). One owned by someone else is left alone.
     """
 
     def _open(self) -> Any:
         fd = os.open(self.baseFilename, os.O_WRONLY | os.O_APPEND | os.O_CREAT, _LOG_FILE_MODE)
+        try:
+            st = os.fstat(fd)
+            if st.st_uid == os.geteuid() and st.st_mode & 0o077:
+                os.fchmod(fd, _LOG_FILE_MODE)
+        except OSError:
+            pass  # never let a mode fix stop logging
         return self._builtin_open(fd, self.mode, encoding=self.encoding, errors=self.errors)
 
 
@@ -380,7 +425,8 @@ def _ensure_private_dir(path: str) -> None:
 
     In production the launcher creates it first (``mkdir -m 0700``); this covers every
     other way of starting scoped-mcp. Never loosens: ``mkdir`` does not touch a
-    directory that already exists.
+    directory that already exists. Nor does it tighten one: ``--audit-log ~/audit.log``
+    would otherwise chmod the home directory.
     """
     Path(path).parent.mkdir(mode=_LOG_DIR_MODE, parents=True, exist_ok=True)
 
