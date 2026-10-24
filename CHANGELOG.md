@@ -52,8 +52,11 @@ read-only enforcement and the audit log's `agent_id`. Each of the sixteen now fa
 - Constant-time compares are pinned structurally, since a behavioural test cannot see timing:
   - every function that compares a secret (the HTTP bearer, the HITL endpoint bearer, the
     Phase 2 OTP) must still call `hmac.compare_digest`;
-  - a new `compare_digest` call site fails the suite until it is registered;
-  - no `==`/`!=` anywhere in `src/` may have a secret-named operand.
+  - a new `compare_digest` call site, whether written `hmac.compare_digest` or as a bare
+    imported name, fails the suite until it is registered;
+  - no `==`, `!=`, `in` or `not in` in `src/` may have a secret-named operand. Name matching
+    is heuristic. Presence checks against `None` or `""` are allowed, as are three reviewed
+    non-secret compares, each listed in the test with its reason.
 - Secrets file at `0o604` and a foreign owner, both under `strict_permissions`.
 - Redaction tests:
   - lowercase sensitive keys (`api_token`, `db_password`), as arguments and as top-level
