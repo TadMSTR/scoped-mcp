@@ -191,7 +191,7 @@ async def test_http_auth_claim_equals_the_env_identity() -> None:
     assert access.client_id == ctx.agent_id
 
 
-@pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.12", "::", "example.com", ""])
+@pytest.mark.parametrize("host", ["0.0.0.0", "192.0.2.10", "::", "example.com", ""])
 def test_http_bind_refuses_non_loopback_host(host: str) -> None:
     from scoped_mcp.exceptions import ConfigError
     from scoped_mcp.server import _check_http_bind
