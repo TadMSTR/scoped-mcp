@@ -42,7 +42,12 @@ def test_token_claim_valid_is_still_used() -> None:
 def test_env_identity_never_keeps_trailing_whitespace(
     monkeypatch: pytest.MonkeyPatch, suffix: str
 ) -> None:
-    """The env path strips first, so the value is normalised rather than refused."""
+    """The env path strips first, so the value is normalised rather than refused.
+
+    This pins the normalisation, not the regex method: with the strip in place, ``match``
+    and ``fullmatch`` behave the same here. The claim-path test above is the one that pins
+    ``fullmatch`` (security audit F-03).
+    """
     monkeypatch.setenv("AGENT_ID", f"dev{suffix}")
     monkeypatch.setenv("AGENT_TYPE", f"developer{suffix}")
     ctx = AgentContext.from_env()

@@ -101,13 +101,14 @@ async def test_argument_filter_blocks_through_the_server(agent_ctx: AgentContext
 
 
 async def test_no_middleware_leaves_tools_unwrapped(agent_ctx: AgentContext) -> None:
-    recorder = _RecordingMiddleware()
-    server = _build(agent_ctx, _manifest("write"), middleware=None)
+    from scoped_mcp.middleware import MiddlewareChain
+
+    with patch.object(MiddlewareChain, "wrap", autospec=True) as wrap:
+        server = _build(agent_ctx, _manifest("write"), middleware=None)
+    wrap.assert_not_called()
 
     async with Client(server) as client:
         assert _text(await client.call_tool("mod_poke", {"body": "DROP"})) == "poked"
-
-    assert recorder.calls == []
 
 
 # ── Mode honoured ─────────────────────────────────────────────────────────────

@@ -13,6 +13,7 @@ keyed on ``agent_type`` pass the existing isolation test.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import os
@@ -21,16 +22,21 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-
-pytest.importorskip("aiosqlite")
-
 from fastmcp import Client
 
 from scoped_mcp.exceptions import ScopeViolation
 from scoped_mcp.identity import AgentContext
 from scoped_mcp.manifest import Manifest
 from scoped_mcp.modules.filesystem import FilesystemModule
-from scoped_mcp.modules.sqlite import SqliteModule
+
+# aiosqlite is an optional extra. Only the sqlite tests need it; a module-level importorskip
+# would also skip the filesystem isolation and audit-identity tests.
+_HAS_AIOSQLITE = importlib.util.find_spec("aiosqlite") is not None
+needs_aiosqlite = pytest.mark.skipif(
+    not _HAS_AIOSQLITE, reason="aiosqlite (sqlite extra) not installed"
+)
+if _HAS_AIOSQLITE:
+    from scoped_mcp.modules.sqlite import SqliteModule
 from scoped_mcp.registry import build_server
 
 AGENT_A = AgentContext(agent_id="iso-agent-a", agent_type="research")
@@ -71,6 +77,7 @@ def _tree(root: Path) -> dict[str, str]:
 # ── 1. sqlite: one file per agent_id, checked on disk ────────────────────────
 
 
+@needs_aiosqlite
 async def test_sqlite_each_agent_writes_only_its_own_file(tmp_path: Path) -> None:
     db_dir = tmp_path / "db"
     mod_a = SqliteModule(agent_ctx=AGENT_A, credentials={}, config={"db_dir": str(db_dir)})
@@ -104,6 +111,7 @@ def seeded_sqlite(tmp_path: Path) -> tuple[SqliteModule, Path]:
     return mod, db_file
 
 
+@needs_aiosqlite
 @pytest.mark.parametrize(
     "sql",
     [
@@ -125,6 +133,7 @@ async def test_sqlite_query_refuses_non_select(
     assert _sqlite_rows(db_file, "keep") == ["original"]
 
 
+@needs_aiosqlite
 @pytest.mark.parametrize(
     "sql",
     [
@@ -265,6 +274,7 @@ def _fs_manifest(base: Path) -> Manifest:
     )
 
 
+@needs_aiosqlite
 async def test_audit_identity_matches_sqlite_backend_touched(
     tmp_path: Path, audit_file: Path
 ) -> None:
