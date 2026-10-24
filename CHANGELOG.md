@@ -23,6 +23,10 @@ read-only enforcement and the audit log's `agent_id`. Each of the sixteen now fa
   reachable today, since the only issuer stamps the validated `AGENT_ID`. Every `^…$` validator in
   `src/` now uses `fullmatch`: agent id and type, manifest `agent_type`, rate limits, ntfy topic
   and Matrix room, Grafana UID and datasource name, InfluxDB measurement and identifier.
+- **Dependencies:** fastmcp 3.4.8 → 3.4.11 (GHSA-7xgj-8392-5q4r) and certifi 2026.5.20 →
+  2026.10.23 (PYSEC-2026-4320), in the lockfile (#122). The FastMCP advisory skips
+  component-level authorization after a transform. scoped-mcp sets no component auth policy,
+  so it is not reachable here.
 
 ### Changed
 - `server.py`: the HTTP pre-flight checks (bearer token present, loopback bind and port) are
@@ -45,8 +49,11 @@ read-only enforcement and the audit log's `agent_id`. Each of the sixteen now fa
   Both are tested at startup and on the self-heal re-registration path.
 - M8: the dangling-symlink ancestor case, which only the ancestor walk catches. The existing
   test's `match="symlink"` was satisfied by pytest's tmp directory name, not the error.
-- A structural test fails on `==`/`!=` with a token, secret, password or signature operand in
-  `http_auth.py` and `hitl_signing.py`. A behavioural test cannot see timing.
+- Constant-time compares are pinned structurally, since a behavioural test cannot see timing:
+  - every function that compares a secret (the HTTP bearer, the HITL endpoint bearer, the
+    Phase 2 OTP) must still call `hmac.compare_digest`;
+  - a new `compare_digest` call site fails the suite until it is registered;
+  - no `==`/`!=` anywhere in `src/` may have a secret-named operand.
 - Secrets file at `0o604` and a foreign owner, both under `strict_permissions`.
 - Redaction tests:
   - lowercase sensitive keys (`api_token`, `db_password`), as arguments and as top-level
