@@ -45,13 +45,13 @@ _DATASOURCE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9 _.-]{1,64}$")
 
 
 def _validate_uid(uid: str) -> str:
-    if not _UID_PATTERN.match(uid):
+    if not _UID_PATTERN.fullmatch(uid):
         raise ValueError(f"Invalid Grafana UID: {uid!r}")
     return uid
 
 
 def _validate_datasource_name(name: str) -> str:
-    if not _DATASOURCE_NAME_PATTERN.match(name):
+    if not _DATASOURCE_NAME_PATTERN.fullmatch(name):
         raise ValueError(f"Invalid datasource name: {name!r}")
     return name
 
@@ -75,7 +75,7 @@ class GrafanaModule(ToolModule):
         if not isinstance(allowed, list) or any(not isinstance(x, str) for x in allowed):
             raise ValueError("grafana config 'allowed_datasources' must be a list of strings")
         for name in allowed:
-            if not _DATASOURCE_NAME_PATTERN.match(name):
+            if not _DATASOURCE_NAME_PATTERN.fullmatch(name):
                 raise ValueError(f"grafana config allowed_datasources entry is invalid: {name!r}")
         self._allowed_datasources: frozenset[str] = frozenset(allowed)
 

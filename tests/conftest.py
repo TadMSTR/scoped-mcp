@@ -15,16 +15,19 @@ def _no_value_redaction_leak():
 
     configure_logging() builds the value set from the real environment and installs a
     redacting LogRecord factory. Either, left behind by one test, would silently change
-    what the next one logs.
+    what the next one logs. It also sets the root logger to DEBUG, which the tests that call
+    it restore handlers for but not the level (vikunja#1219, CodeRabbit CR-01/CR-04).
     """
     import logging
 
     factory = logging.getLogRecordFactory()
+    root_level = logging.getLogger().level
     yield
     from scoped_mcp.audit import configure_value_redaction
 
     configure_value_redaction(environ={})
     logging.setLogRecordFactory(factory)
+    logging.getLogger().setLevel(root_level)
 
 
 @pytest.fixture

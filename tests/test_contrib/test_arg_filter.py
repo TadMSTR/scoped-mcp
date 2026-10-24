@@ -451,3 +451,23 @@ async def test_block_error_message_does_not_leak_rule_or_field_name() -> None:
     error_text = str(exc_info.value)
     assert "VERY-SPECIFIC-RULE-NAME-XYZ" not in error_text
     assert "secret_field_name" not in error_text
+
+
+@pytest.mark.asyncio
+async def test_field_scoped_block_checks_fields_after_a_non_matching_one() -> None:
+    """Argument order must not bypass a field-scoped rule (vikunja#1219).
+
+    ``title`` comes first and is not in the rule's fields; the scan has to skip it and
+    still reach ``body``.
+    """
+    mw = ArgumentFilterMiddleware(
+        rules=[{"name": "creds", "pattern": "password", "fields": ["body"], "action": "block"}],
+        agent_id="a1",
+    )
+    with pytest.raises(ConfigError, match="argument filter policy"):
+        await mw(
+            agent_ctx=None,
+            tool_name="vikunja_task_create",
+            kwargs={"title": "x", "body": "the password is here"},
+            call_next=_passthrough,
+        )

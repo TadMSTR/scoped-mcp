@@ -86,11 +86,10 @@ def test_prefix_scope_write_target_nonexistent(tmp_base: Path, agent_ctx: AgentC
 def test_prefix_scope_symlink_ancestor_with_nonexistent_tail(
     tmp_base: Path, agent_ctx: AgentContext
 ) -> None:
-    """M8: operator-seeded symlink as ancestor of a non-existent tail is caught.
+    """M8: operator-seeded symlink to an existing directory, with a non-existent tail.
 
-    Without the defense-in-depth ancestor walk, a write to
-    ``{scope}/link/newfile`` where ``link`` is a symlink to ``/etc`` would
-    resolve the non-existent-tail fallback and pass the ``relative_to`` check.
+    ``link`` exists, so the first check resolves it and rejects the path before the
+    ancestor walk runs. The dangling-link case below is the one only the walk catches.
     """
     agent_root = tmp_base / "agents" / "test-agent-1"
     outside_dir = tmp_base / "outside"
@@ -101,8 +100,31 @@ def test_prefix_scope_symlink_ancestor_with_nonexistent_tail(
 
     scope = PrefixScope(str(tmp_base))
     new_path = str(link / "new_file.txt")
-    with pytest.raises(ScopeViolation, match="symlink"):
+    # Match the message, not "symlink": pytest names tmp_path after the test, so that
+    # word is in the path and would match any error (vikunja#1219).
+    with pytest.raises(ScopeViolation, match="is outside the agent scope"):
         scope.enforce(new_path, agent_ctx)
+
+
+def test_prefix_scope_dangling_symlink_ancestor_is_caught(
+    tmp_base: Path, agent_ctx: AgentContext
+) -> None:
+    """M8, the case only the ancestor walk catches (vikunja#1219).
+
+    A dangling link does not exist(), so the first check resolves the agent root and
+    reattaches ``pending/payload.txt`` under it, which passes. Writing there would
+    create ``outside/not-yet/payload.txt``.
+    """
+    agent_root = tmp_base / "agents" / "test-agent-1"
+    outside = tmp_base / "outside"
+    outside.mkdir()
+    link = agent_root / "pending"
+    link.symlink_to(outside / "not-yet")
+    assert not link.exists()  # dangling
+
+    scope = PrefixScope(str(tmp_base))
+    with pytest.raises(ScopeViolation, match="crosses a symlink at"):
+        scope.enforce(str(link / "payload.txt"), agent_ctx)
 
 
 # ── NamespaceScope ────────────────────────────────────────────────────────────

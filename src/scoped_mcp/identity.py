@@ -91,13 +91,13 @@ class AgentContext:
         if missing:
             raise ConfigError(f"Required environment variable(s) not set: {', '.join(missing)}")
 
-        if not _AGENT_ID_PATTERN.match(agent_id):
+        if not _AGENT_ID_PATTERN.fullmatch(agent_id):
             raise ConfigError(
                 f"AGENT_ID {agent_id!r} does not match required pattern "
                 f"{_AGENT_ID_PATTERN.pattern}. Must be 1-63 characters of "
                 f"lowercase a-z / digits / hyphen and start with a letter or digit."
             )
-        if not _AGENT_TYPE_PATTERN.match(agent_type):
+        if not _AGENT_TYPE_PATTERN.fullmatch(agent_type):
             raise ConfigError(
                 f"AGENT_TYPE {agent_type!r} does not match required pattern "
                 f"{_AGENT_TYPE_PATTERN.pattern}. Must be 1-63 characters of "
@@ -168,7 +168,7 @@ def resolve_request_identity(default_agent_id: str, default_session_id: str) -> 
             # or malformed claim is ignored, keeping the validated default. Not reachable while
             # the only issuer stamps the validated env AGENT_ID, but the guard ships with the
             # trusting code so the clone-pool token issuer cannot introduce a traversal sink.
-            if claim and _AGENT_ID_PATTERN.match(claim):
+            if claim and _AGENT_ID_PATTERN.fullmatch(claim):
                 agent_id = claim
     except Exception:
         pass  # unauthenticated transport (stdio) — keep default

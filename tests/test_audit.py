@@ -1119,3 +1119,62 @@ def test_unformattable_record_fails_closed() -> None:
     out = logging.Formatter("%(message)s").format(rec)
     assert _SHAPELESS not in out
     assert "could not be formatted" in out
+
+
+# ── Key-based redaction is case-insensitive; userinfo-only URLs (vikunja#1219) ──
+
+_LOWERCASE_SECRET_KEYS = ["api_token", "db_password", "x_api_key", "oauth_secret"]
+
+
+@pytest.mark.parametrize("key", _LOWERCASE_SECRET_KEYS)
+def test_sanitize_value_redacts_lowercase_sensitive_key(key: str) -> None:
+    # A value with no secret shape, so only the key can trigger redaction.
+    assert _sanitize_value("plain-value-1", key) == "<redacted>"
+    assert _sanitize_value({key: "plain-value-1"}) == {key: "<redacted>"}
+
+
+def test_top_level_log_fields_are_redacted_by_key(tmp_path: pathlib.Path) -> None:
+    """A secret passed as a top-level structlog field, not inside ``args``."""
+    import logging
+
+    import structlog
+
+    from scoped_mcp.audit import configure_logging, get_audit_logger
+
+    audit_log = tmp_path / "audit.jsonl"
+    saved_structlog = structlog.get_config()
+    root = logging.getLogger()
+    saved_root_handlers = list(root.handlers)
+    audit_logger = logging.getLogger("audit")
+    before = {id(h) for h in audit_logger.handlers}
+    fields = {key: f"plain-value-{i}" for i, key in enumerate(_LOWERCASE_SECRET_KEYS)}
+    fields["UPSTREAM_TOKEN"] = "plain-value-upper"
+    try:
+        configure_logging(audit_log=str(audit_log))
+        get_audit_logger().info("probe_event", note="kept", **fields)
+    finally:
+        structlog.configure(**saved_structlog)
+        root.handlers[:] = saved_root_handlers
+        for h in list(audit_logger.handlers):
+            if id(h) not in before:
+                audit_logger.removeHandler(h)
+                h.close()
+
+    record = json.loads(audit_log.read_text().splitlines()[-1])
+    assert record["event"] == "probe_event"
+    assert record["note"] == "kept"
+    for key in fields:
+        assert record[key] == "<redacted>", key
+
+
+def test_url_with_token_as_username_only_is_redacted_by_value() -> None:
+    """``https://<token>@host`` carries a credential with no password part."""
+    from scoped_mcp.audit import _redact_string, _url_has_userinfo, configure_value_redaction
+
+    url = "https://ghp_EXAMPLE@github.com/x"
+    assert _url_has_userinfo(url)
+    # The name looks harmless, so only the userinfo test can put the value in the set.
+    assert configure_value_redaction(environ={"REPO_REMOTE_URL": url}) >= 1
+    redacted = _redact_string(f"cloning {url} now")
+    assert "ghp_EXAMPLE" not in redacted
+    assert "<redacted-value:REPO_REMOTE_URL>" in redacted

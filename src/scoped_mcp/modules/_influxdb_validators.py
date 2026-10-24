@@ -20,7 +20,7 @@ _LOGICAL_OPS: frozenset[str] = frozenset({"and", "or"})
 
 
 def _validate_measurement(value: str) -> str:
-    if not isinstance(value, str) or not _MEASUREMENT_PATTERN.match(value):
+    if not isinstance(value, str) or not _MEASUREMENT_PATTERN.fullmatch(value):
         raise ValueError(
             f"Invalid measurement name: {value!r}. Must match {_MEASUREMENT_PATTERN.pattern}"
         )
@@ -28,7 +28,7 @@ def _validate_measurement(value: str) -> str:
 
 
 def _validate_identifier(value: str, kind: str = "identifier") -> str:
-    if not isinstance(value, str) or not _FLUX_IDENT.match(value):
+    if not isinstance(value, str) or not _FLUX_IDENT.fullmatch(value):
         raise ValueError(f"Invalid {kind}: {value!r}. Must match {_FLUX_IDENT.pattern}")
     return value
 
@@ -39,7 +39,7 @@ def _validate_time(value: str) -> str:
     v = value.strip()
     if v == "now()":
         return v
-    if _RFC3339.match(v) or _DURATION.match(v):
+    if _RFC3339.fullmatch(v) or _DURATION.fullmatch(v):
         return v
     raise ValueError(
         f"Invalid time value: {value!r}. Expected RFC3339, a duration like -1h, or now()."

@@ -158,3 +158,110 @@ def test_attribution_runs_after_rate_limit_and_before_hitl(monkeypatch) -> None:
     assert types.index(SessionAttributionMiddleware) > types.index(RateLimitMiddleware)
     assert types.index(SessionAttributionMiddleware) > types.index(ArgumentFilterMiddleware)
     assert types.index(SessionAttributionMiddleware) < types.index(HitlMiddleware)
+
+
+# ── HTTP pre-flight refusals (vikunja#1219) ───────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "environ", [{}, {"SCOPED_MCP_BEARER_TOKEN": ""}, {"SCOPED_MCP_BEARER_TOKEN": "  \n"}]
+)
+def test_http_auth_refuses_without_bearer_token(environ: dict) -> None:
+    from scoped_mcp.exceptions import ConfigError
+    from scoped_mcp.identity import AgentContext
+    from scoped_mcp.server import _build_http_auth
+
+    with pytest.raises(ConfigError, match="refusing to bind an unauthenticated HTTP port"):
+        _build_http_auth(AgentContext(agent_id="dev", agent_type="developer"), environ)
+
+
+async def test_http_auth_claim_equals_the_env_identity() -> None:
+    """Pins today's single-issuer equality: the token's agent_id claim is the identity
+    modules scope by. resolve_request_identity prefers the claim for the audit record, so a
+    divergence would make the audit log name a different agent than the one scoped."""
+    from scoped_mcp.identity import AgentContext
+    from scoped_mcp.server import _build_http_auth
+
+    ctx = AgentContext(agent_id="dev-07", agent_type="developer")
+    verifier = _build_http_auth(ctx, {"SCOPED_MCP_BEARER_TOKEN": "placeholder-token"})
+    assert await verifier.verify_token("wrong-token-xx") is None
+    access = await verifier.verify_token("placeholder-token")
+    assert access is not None
+    assert access.claims["agent_id"] == ctx.agent_id
+    assert access.client_id == ctx.agent_id
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "192.0.2.10", "::", "example.com", ""])
+def test_http_bind_refuses_non_loopback_host(host: str) -> None:
+    from scoped_mcp.exceptions import ConfigError
+    from scoped_mcp.server import _check_http_bind
+
+    with pytest.raises(ConfigError, match="refuses non-loopback host"):
+        _check_http_bind(host, 8080)
+
+
+def test_http_bind_requires_a_port() -> None:
+    from scoped_mcp.exceptions import ConfigError
+    from scoped_mcp.server import _check_http_bind
+
+    with pytest.raises(ConfigError, match="requires --port"):
+        _check_http_bind("127.0.0.1", 0)
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1"])
+def test_http_bind_accepts_loopback(host: str) -> None:
+    from scoped_mcp.server import _check_http_bind
+
+    _check_http_bind(host, 8080)
+
+
+def test_run_serve_refuses_http_without_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """The extracted check is the one _run_serve calls: no token → exit 1, nothing served."""
+    from unittest.mock import patch
+
+    manifest = _write(tmp_path, _VALID_MANIFEST)
+    monkeypatch.setenv("AGENT_ID", "dev")
+    monkeypatch.setenv("AGENT_TYPE", "research")
+    monkeypatch.delenv("SCOPED_MCP_BEARER_TOKEN", raising=False)
+    args = argparse.Namespace(
+        manifest=manifest, transport="http", host="127.0.0.1", port=8080, path="/mcp"
+    )
+    with (
+        patch("scoped_mcp.server.configure_logging"),
+        patch("scoped_mcp.server.build_server") as build,
+        pytest.raises(SystemExit) as exc,
+    ):
+        from scoped_mcp.server import _run_serve
+
+        _run_serve(args)
+    assert exc.value.code == 1
+    build.assert_not_called()
+    assert "SCOPED_MCP_BEARER_TOKEN" in capsys.readouterr().err
+
+
+def test_run_serve_refuses_non_loopback_bind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    from unittest.mock import patch
+
+    manifest = _write(tmp_path, _VALID_MANIFEST)
+    monkeypatch.setenv("AGENT_ID", "dev")
+    monkeypatch.setenv("AGENT_TYPE", "research")
+    monkeypatch.setenv("SCOPED_MCP_BEARER_TOKEN", "placeholder-token")
+    args = argparse.Namespace(
+        manifest=manifest, transport="http", host="0.0.0.0", port=8080, path="/mcp"
+    )
+    with (
+        patch("scoped_mcp.server.configure_logging"),
+        patch("scoped_mcp.server.build_server") as build,
+        patch("scoped_mcp.server.signal.signal"),
+        pytest.raises(SystemExit) as exc,
+    ):
+        from scoped_mcp.server import _run_serve
+
+        _run_serve(args)
+    assert exc.value.code == 1
+    build.return_value.run.assert_not_called()
+    assert "non-loopback" in capsys.readouterr().err

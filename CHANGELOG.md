@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.19.1] — 2026-10-24
+
+Tests that fail when a security control is removed, and one identity-validation fix. Build
+plan `scoped-mcp-isolation-test-hardening-2026-10`, vikunja#1219.
+
+Sixteen single-line edits that each removed a control left all 1,147 tests passing,
+including dropping the HITL/rate-limit/argument-filter middleware for every tool, sqlite's
+read-only enforcement and the audit log's `agent_id`. Each of the sixteen now fails the suite.
+
+### Security
+- **Anchored validators reject a trailing newline.** `re.match` with a pattern ending in `$`
+  accepts `"dev\n"`, because `$` also matches before a final newline. The bearer token's
+  `agent_id` claim was checked that way (F-01 guard), and the claim is not stripped. It is not
+  reachable today, since the only issuer stamps the validated `AGENT_ID`. Every `^…$` validator in
+  `src/` now uses `fullmatch`: agent id and type, manifest `agent_type`, rate limits, ntfy topic
+  and Matrix room, Grafana UID and datasource name, InfluxDB measurement and identifier.
+- **Dependencies:** fastmcp 3.4.8 → 3.4.11 (GHSA-7xgj-8392-5q4r) and certifi 2026.5.20 →
+  2026.10.23 (PYSEC-2026-4320), in the lockfile (#122). The FastMCP advisory skips
+  component-level authorization after a transform. scoped-mcp sets no component auth policy,
+  so it is not reachable here.
+
+### Changed
+- `server.py`: the HTTP pre-flight checks (bearer token present, loopback bind and port) are
+  extracted into `_build_http_auth` and `_check_http_bind` so they can be tested. Behaviour
+  and order are unchanged.
+
+### Tests
+- **Out-of-band isolation and audit identity** (`tests/test_isolation_out_of_band.py`),
+  suggested by @bhooshanvarma in GitHub #83. Two agents share an `agent_type` and differ
+  only in `agent_id`.
+  - Each agent's sqlite file and filesystem root is opened directly with `sqlite3` /
+    `pathlib`, not through the module, to check the agent wrote only its own backend.
+  - Tool calls go through a real `build_server`, and the `agent_id` in the audit file is
+    checked against the backend the call changed.
+  - `query()` and `execute()` refusals are verified on the public tools, with the schema
+    re-read independently.
+  - Every filesystem tool, `list_dir` included, refuses an absolute path, `../<other agent>`
+    and the other agent's root.
+- Registry wiring: middleware runs, and a `mode: read` module does not register write tools.
+  Both are tested at startup and on the self-heal re-registration path.
+- M8: the dangling-symlink ancestor case, which only the ancestor walk catches. The existing
+  test's `match="symlink"` was satisfied by pytest's tmp directory name, not the error.
+- Constant-time compares are pinned structurally, since a behavioural test cannot see timing:
+  - every function that compares a secret (the HTTP bearer, the HITL endpoint bearer, the
+    Phase 2 OTP) must still call `hmac.compare_digest`;
+  - a new `compare_digest` call site, whether written `hmac.compare_digest` or as a bare
+    imported name, fails the suite until it is registered;
+  - no `==`, `!=`, `in` or `not in` in `src/` may have a secret-named operand. Name matching
+    is heuristic. Presence checks against `None` or `""` are allowed, as are three reviewed
+    non-secret compares, each listed in the test with its reason.
+- Secrets file at `0o604` and a foreign owner, both under `strict_permissions`.
+- Redaction tests:
+  - lowercase sensitive keys (`api_token`, `db_password`), as arguments and as top-level
+    log fields through a configured logger;
+  - `https://<token>@host` with no password.
+- A field-scoped argument-filter rule still blocks when a non-matching field comes first.
+- HTTP refusals: no bearer token, a non-loopback host, no port. A separate test pins today's
+  equality between the token's `agent_id` claim and the env identity.
+
 ## [1.19.0] — 2026-10-19
 
 A cap on forwarded binary blocks, private audit logs and by-value redaction. Build plan
