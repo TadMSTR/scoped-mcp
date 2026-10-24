@@ -99,6 +99,27 @@ def test_file_source_rejects_group_readable(tmp_path: object) -> None:
         resolve_credentials("file", ["MY_TOKEN"], file_path=path)
 
 
+def test_file_source_rejects_other_readable_only(tmp_path: object) -> None:
+    """0o604: other-readable with no group bit, so a group-only mask would miss it
+    (vikunja#1219)."""
+    path = _write_secrets(tmp_path, "MY_TOKEN: v\n", mode=0o604)
+    with pytest.raises(CredentialError, match="group/other-accessible"):
+        resolve_credentials("file", ["MY_TOKEN"], file_path=path)
+
+
+def test_file_source_rejects_foreign_owner(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 0600 file owned by another uid is refused under strict_permissions."""
+    import os
+
+    path = _write_secrets(tmp_path, "MY_TOKEN: v\n", mode=0o600)
+    owner = os.stat(path).st_uid
+    monkeypatch.setattr(os, "getuid", lambda: owner + 1)
+    with pytest.raises(CredentialError, match=f"owned by uid {owner}"):
+        resolve_credentials("file", ["MY_TOKEN"], file_path=path)
+
+
 def test_file_source_strict_permissions_false_warns(
     tmp_path: object, caplog: pytest.LogCaptureFixture
 ) -> None:

@@ -10,6 +10,8 @@ import argparse
 import os
 import signal
 import sys
+from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 from .audit import (
     SESSION_ID,
@@ -24,6 +26,9 @@ from .manifest import load_manifest, manifest_env_var_names
 from .middleware import ToolCallMiddleware
 from .registry import build_server
 from .state import StateBackend, build_state_backend
+
+if TYPE_CHECKING:
+    from .http_auth import BearerTokenVerifier
 
 
 def _build_middleware(
@@ -141,6 +146,41 @@ def _run_validate(args: argparse.Namespace) -> None:
     )
 
 
+def _build_http_auth(agent_ctx: AgentContext, environ: Mapping[str, str]) -> BearerTokenVerifier:
+    """Build the per-agent bearer verifier for the HTTP transport, or refuse to serve.
+
+    HTTP replaces stdio's private-pipe isolation with a localhost TCP port, so it MUST
+    authenticate. The verifier stamps ``agent_ctx.agent_id`` as the token's ``agent_id``
+    claim, which keeps the audit identity equal to the identity modules scope by.
+    """
+    from .http_auth import BearerTokenVerifier
+
+    token = environ.get("SCOPED_MCP_BEARER_TOKEN", "").strip()
+    if not token:
+        raise ConfigError(
+            "transport=http requires SCOPED_MCP_BEARER_TOKEN in the environment "
+            "(per-agent bearer secret); refusing to bind an unauthenticated HTTP port"
+        )
+    return BearerTokenVerifier(
+        expected_token=token,
+        agent_id=agent_ctx.agent_id,
+        agent_type=agent_ctx.agent_type,
+    )
+
+
+def _check_http_bind(host: str, port: int) -> None:
+    """Raise ConfigError unless the HTTP transport binds a loopback host and a port."""
+    # SECURITY: loopback bind only. A non-loopback host would expose the agent's
+    # entire tool surface to the LAN behind one static bearer — refuse it outright.
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        raise ConfigError(
+            f"transport=http refuses non-loopback host {host!r}; "
+            f"bind 127.0.0.1 only (localhost-only by design)"
+        )
+    if not port:
+        raise ConfigError("transport=http requires --port <PORT>")
+
+
 def _run_serve(args: argparse.Namespace) -> None:
     audit_log = getattr(args, "audit_log", None)
     ops_log = getattr(args, "ops_log", None)
@@ -216,21 +256,7 @@ def _run_serve(args: argparse.Namespace) -> None:
 
         # HTTP transport replaces stdio's private-pipe isolation with a localhost TCP port,
         # so it MUST authenticate. Build the per-agent bearer verifier before the server.
-        auth = None
-        if transport == "http":
-            from .http_auth import BearerTokenVerifier
-
-            token = os.environ.get("SCOPED_MCP_BEARER_TOKEN", "").strip()
-            if not token:
-                raise ConfigError(
-                    "transport=http requires SCOPED_MCP_BEARER_TOKEN in the environment "
-                    "(per-agent bearer secret); refusing to bind an unauthenticated HTTP port"
-                )
-            auth = BearerTokenVerifier(
-                expected_token=token,
-                agent_id=agent_ctx.agent_id,
-                agent_type=agent_ctx.agent_type,
-            )
+        auth = _build_http_auth(agent_ctx, os.environ) if transport == "http" else None
 
         server = build_server(
             agent_ctx,
@@ -260,15 +286,7 @@ def _run_serve(args: argparse.Namespace) -> None:
             host = getattr(args, "host", "127.0.0.1") or "127.0.0.1"
             port = int(getattr(args, "port", 0) or 0)
             path = getattr(args, "path", "/mcp") or "/mcp"
-            # SECURITY: loopback bind only. A non-loopback host would expose the agent's
-            # entire tool surface to the LAN behind one static bearer — refuse it outright.
-            if host not in ("127.0.0.1", "localhost", "::1"):
-                raise ConfigError(
-                    f"transport=http refuses non-loopback host {host!r}; "
-                    f"bind 127.0.0.1 only (localhost-only by design)"
-                )
-            if not port:
-                raise ConfigError("transport=http requires --port <PORT>")
+            _check_http_bind(host, port)
             ops.info(
                 "server_ready",
                 transport="streamable-http",

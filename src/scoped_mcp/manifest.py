@@ -170,7 +170,7 @@ class RateLimitsConfig(BaseModel):
     @field_validator("global_limit", mode="before")
     @classmethod
     def _validate_global(cls, v: Any) -> Any:
-        if v is not None and not _RATE_LIMIT_RE.match(str(v)):
+        if v is not None and not _RATE_LIMIT_RE.fullmatch(str(v)):
             raise ValueError(f"rate_limits.global must be '<N>/second|minute|hour', got {v!r}")
         return v
 
@@ -180,7 +180,7 @@ class RateLimitsConfig(BaseModel):
         if not isinstance(v, dict):
             return v
         for key, val in v.items():
-            if not _RATE_LIMIT_RE.match(str(val)):
+            if not _RATE_LIMIT_RE.fullmatch(str(val)):
                 raise ValueError(
                     f"rate_limits.per_tool[{key!r}] must be '<N>/second|minute|hour', got {val!r}"
                 )
@@ -207,14 +207,14 @@ class NotifyConfig(BaseModel):
     @field_validator("topic")
     @classmethod
     def _validate_topic(cls, v: str | None) -> str | None:
-        if v is not None and not _NTFY_TOPIC_RE.match(v):
+        if v is not None and not _NTFY_TOPIC_RE.fullmatch(v):
             raise ValueError(f"hitl.notify.topic must match ^[A-Za-z0-9_-]{{1,64}}$, got {v!r}")
         return v
 
     @field_validator("room")
     @classmethod
     def _validate_room(cls, v: str | None) -> str | None:
-        if v is not None and not _MATRIX_ROOM_RE.match(v):
+        if v is not None and not _MATRIX_ROOM_RE.fullmatch(v):
             raise ValueError(
                 f"hitl.notify.room must be a Matrix room id (!… or #…) "
                 f"of the form '!local:server' or '#alias:server', got {v!r}"
@@ -503,7 +503,7 @@ class Manifest(BaseModel):
     @field_validator("agent_type")
     @classmethod
     def _agent_type_pattern(cls, v: str) -> str:
-        if not _AGENT_TYPE_RE.match(v):
+        if not _AGENT_TYPE_RE.fullmatch(v):
             raise ValueError(f"agent_type must match ^[a-z0-9][a-z0-9_-]{{0,62}}$, got {v!r}")
         return v
 
