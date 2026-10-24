@@ -40,18 +40,18 @@ def test_env_source_empty_list(monkeypatch: pytest.MonkeyPatch) -> None:
 # ── file source ───────────────────────────────────────────────────────────────
 
 
-def _write_secrets(tmp_path: object, content: str, mode: int = 0o600) -> str:
+def _write_creds_file(tmp_path: object, content: str, mode: int = 0o600) -> str:
     from pathlib import Path
 
     assert isinstance(tmp_path, Path)
-    secrets_file = tmp_path / "secrets.yml"
-    secrets_file.write_text(content)
-    secrets_file.chmod(mode)
-    return str(secrets_file)
+    creds_file = tmp_path / "secrets.yml"
+    creds_file.write_text(content)
+    creds_file.chmod(mode)
+    return str(creds_file)
 
 
 def test_file_source_success(tmp_path: object) -> None:
-    path = _write_secrets(
+    path = _write_creds_file(
         tmp_path,
         textwrap.dedent("""\
         MY_TOKEN: file-secret-value
@@ -63,7 +63,7 @@ def test_file_source_success(tmp_path: object) -> None:
 
 
 def test_file_source_missing_key(tmp_path: object) -> None:
-    path = _write_secrets(tmp_path, "OTHER_KEY: value\n")
+    path = _write_creds_file(tmp_path, "OTHER_KEY: value\n")
     with pytest.raises(CredentialError, match="MY_TOKEN"):
         resolve_credentials("file", ["MY_TOKEN"], file_path=path)
 
@@ -79,7 +79,7 @@ def test_file_source_requires_path() -> None:
 
 
 def test_file_source_invalid_yaml(tmp_path: object) -> None:
-    path = _write_secrets(tmp_path, ": invalid: yaml: :\n")
+    path = _write_creds_file(tmp_path, ": invalid: yaml: :\n")
     with pytest.raises(CredentialError):
         resolve_credentials("file", ["MY_TOKEN"], file_path=path)
 
@@ -88,13 +88,13 @@ def test_file_source_invalid_yaml(tmp_path: object) -> None:
 
 
 def test_file_source_rejects_world_readable(tmp_path: object) -> None:
-    path = _write_secrets(tmp_path, "MY_TOKEN: v\n", mode=0o644)
+    path = _write_creds_file(tmp_path, "MY_TOKEN: v\n", mode=0o644)
     with pytest.raises(CredentialError, match="insecure permissions"):
         resolve_credentials("file", ["MY_TOKEN"], file_path=path)
 
 
 def test_file_source_rejects_group_readable(tmp_path: object) -> None:
-    path = _write_secrets(tmp_path, "MY_TOKEN: v\n", mode=0o640)
+    path = _write_creds_file(tmp_path, "MY_TOKEN: v\n", mode=0o640)
     with pytest.raises(CredentialError, match="insecure permissions"):
         resolve_credentials("file", ["MY_TOKEN"], file_path=path)
 
@@ -102,7 +102,7 @@ def test_file_source_rejects_group_readable(tmp_path: object) -> None:
 def test_file_source_rejects_other_readable_only(tmp_path: object) -> None:
     """0o604: other-readable with no group bit, so a group-only mask would miss it
     (vikunja#1219)."""
-    path = _write_secrets(tmp_path, "MY_TOKEN: v\n", mode=0o604)
+    path = _write_creds_file(tmp_path, "MY_TOKEN: v\n", mode=0o604)
     with pytest.raises(CredentialError, match="group/other-accessible"):
         resolve_credentials("file", ["MY_TOKEN"], file_path=path)
 
@@ -113,7 +113,7 @@ def test_file_source_rejects_foreign_owner(
     """A 0600 file owned by another uid is refused under strict_permissions."""
     import os
 
-    path = _write_secrets(tmp_path, "MY_TOKEN: v\n", mode=0o600)
+    path = _write_creds_file(tmp_path, "MY_TOKEN: v\n", mode=0o600)
     owner = os.stat(path).st_uid
     monkeypatch.setattr(os, "getuid", lambda: owner + 1)
     with pytest.raises(CredentialError, match=f"owned by uid {owner}"):
@@ -125,7 +125,7 @@ def test_file_source_strict_permissions_false_warns(
 ) -> None:
     import logging
 
-    path = _write_secrets(tmp_path, "MY_TOKEN: v\n", mode=0o644)
+    path = _write_creds_file(tmp_path, "MY_TOKEN: v\n", mode=0o644)
     with caplog.at_level(logging.WARNING, logger="scoped_mcp.credentials"):
         result = resolve_credentials("file", ["MY_TOKEN"], file_path=path, strict_permissions=False)
     assert result == {"MY_TOKEN": "v"}
@@ -133,7 +133,7 @@ def test_file_source_strict_permissions_false_warns(
 
 
 def test_file_source_0600_passes(tmp_path: object) -> None:
-    path = _write_secrets(tmp_path, "MY_TOKEN: v\n", mode=0o600)
+    path = _write_creds_file(tmp_path, "MY_TOKEN: v\n", mode=0o600)
     assert resolve_credentials("file", ["MY_TOKEN"], file_path=path) == {"MY_TOKEN": "v"}
 
 
@@ -177,7 +177,7 @@ def test_env_required_missing_still_raises_when_optional_present(
 
 
 def test_file_optional_key_present(tmp_path: object) -> None:
-    path = _write_secrets(tmp_path, "REQUIRED_KEY: a\nOPTIONAL_KEY: b\n")
+    path = _write_creds_file(tmp_path, "REQUIRED_KEY: a\nOPTIONAL_KEY: b\n")
     result = resolve_credentials(
         "file", ["REQUIRED_KEY"], file_path=path, optional_keys=["OPTIONAL_KEY"]
     )
@@ -185,7 +185,7 @@ def test_file_optional_key_present(tmp_path: object) -> None:
 
 
 def test_file_optional_key_absent_does_not_raise(tmp_path: object) -> None:
-    path = _write_secrets(tmp_path, "REQUIRED_KEY: a\n")
+    path = _write_creds_file(tmp_path, "REQUIRED_KEY: a\n")
     result = resolve_credentials(
         "file", ["REQUIRED_KEY"], file_path=path, optional_keys=["OPTIONAL_KEY"]
     )

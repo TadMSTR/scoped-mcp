@@ -22,9 +22,9 @@ from unittest.mock import patch
 
 import pytest
 
-import scoped_mcp
+from scoped_mcp import __file__ as _PKG_INIT
 
-_PKG = Path(scoped_mcp.__file__).parent
+_PKG = Path(_PKG_INIT).parent
 
 # (file relative to the package, function) for every secret compare in src/.
 _CONSTANT_TIME_SITES = {
