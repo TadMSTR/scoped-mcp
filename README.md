@@ -357,6 +357,10 @@ deliberate guard against shadowing attacks, where an unrecognized field could ma
 real setting. Every field an agent platform attaches to its manifests must therefore
 be modeled explicitly.
 
+Pattern-checked values are matched in full (`fullmatch`, v1.19.1), so a trailing
+newline is refused. This covers `agent_type`, rate limits, ntfy topics and Matrix
+rooms in the manifest, and the `agent_id` claim in an HTTP bearer token.
+
 Alongside the operational fields (`modules`, `credentials`, `state_backend`,
 `rate_limits`, `argument_filters`, `response_filters`, `hitl`, `audit`), the model
 accepts three **platform-metadata** fields. scoped-mcp validates and stores them but
@@ -698,6 +702,18 @@ audit logging. To back that up:
 - **Verifiable isolation:** the `examples/claude-code/multi-agent-setup.md`
   includes a step-by-step verification walkthrough — you can confirm filesystem
   isolation and credential non-exposure yourself in under five minutes.
+  The test suite also verifies isolation out-of-band (v1.19.1).
+  `tests/test_isolation_out_of_band.py` runs two agents of the same type and then
+  opens each agent's sqlite file and filesystem root directly with `sqlite3` and
+  `pathlib`, not through the module, to confirm each agent changed only its own
+  backend. It also checks the audit log's `agent_id` against the backend a tool
+  call actually changed. Suggested by @bhooshanvarma in GitHub #83.
+- **Security-boundary tests:** 16 single-line mutations that each remove a
+  control (for example the HITL/rate-limit/argument-filter wiring, sqlite's
+  read-only enforcement, or the audit `agent_id`) once left the whole suite
+  green. Each now fails it. Constant-time compares are pinned structurally, since
+  a behavioural test can't see timing. The secret-name match in that guard is a
+  heuristic, not a proof. See CHANGELOG 1.19.1.
 
 ### Optional guardrails
 
