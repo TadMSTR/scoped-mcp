@@ -1,8 +1,11 @@
-# Vault credential source example — research agent.
-# Credentials are fetched from HashiCorp Vault using AppRole auth.
+# Vault / OpenBao credential source example — research agent.
+# Credentials are fetched from HashiCorp Vault or OpenBao using AppRole auth.
+# OpenBao serves the same API (hvac client, X-Vault-Token header), so this manifest
+# works unchanged against either; only `addr` differs.
 # The env vars VAULT_ROLE_ID and VAULT_SECRET_ID must be set at startup.
 #
 # Usage:
+#   export VAULT_ADDR=https://vault.example.com    # or your OpenBao address
 #   export VAULT_ROLE_ID=<your-role-id>
 #   export VAULT_SECRET_ID=<your-secret-id>
 #   scoped-mcp run --manifest examples/vault/manifest-vault.yml
@@ -13,12 +16,17 @@ description: "Research agent with Vault-sourced credentials"
 credentials:
   source: vault
   vault:
-    addr: https://vault.example.com
+    # ${VAULT_ADDR} is expanded from the environment at load time. Quote it.
+    addr: "${VAULT_ADDR}"
     auth: approle
     role_id_env: VAULT_ROLE_ID
     secret_id_env: VAULT_SECRET_ID
-    # {agent_type} is interpolated to the agent_type value above ("research")
-    path: "secret/data/scoped-mcp/{agent_type}"
+    # Path is relative to the KV v2 mount `secret/`: hvac builds the request as
+    # /v1/secret/data/<path>. Do NOT prefix it with "secret/data/" — that would request
+    # secret/data/secret/data/... and fail the policy check with a 403.
+    # {agent_type} is interpolated to the agent_type value above ("research"), so this
+    # reads secret/data/agents/research — the one path vault-policy.hcl grants.
+    path: "agents/{agent_type}"
     kv_version: 2
 
 modules:

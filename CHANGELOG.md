@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs
+- OpenBao is documented as a supported Vault credential source (same API, hvac client and
+  `VAULT_ADDR`; no code change). `examples/vault/setup.sh` takes `VAULT_CLI=bao`.
+- The Vault example path is now relative to the KV v2 mount (`agents/{agent_type}`). The old
+  `secret/data/...` form was read as `secret/data/secret/data/...` and could never succeed.
+- The example policy grants one exact per-agent read path, no wildcard.
+- README notes the restart policy needed when the store is sealed at startup.
+
 ## [1.19.1] — 2026-10-24
 
 Tests that fail when a security control is removed, and one identity-validation fix. Build

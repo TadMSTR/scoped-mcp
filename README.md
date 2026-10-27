@@ -578,10 +578,51 @@ Credentials are passed in `settings.json` under `env` (for Claude Code) or expor
 in the shell before running `scoped-mcp`. They are loaded once at startup, injected
 into module contexts, and never returned in tool responses or logged.
 
-For HashiCorp Vault — set `credentials.source: vault` in the manifest with an
+For HashiCorp Vault or OpenBao — set `credentials.source: vault` in the manifest with an
 `approle` block; credentials are fetched once at startup and the client token is
 renewed in the background. Requires `pip install scoped-mcp[vault]`. See
-`examples/vault/` for a working manifest, AppRole setup script, and Vault policy.
+`examples/vault/` for a working manifest, AppRole setup script, and policy.
+
+**OpenBao** is supported with no code or manifest change. OpenBao serves the Vault HTTP
+API, so the same `hvac` client, `X-Vault-Token` header and AppRole/KV v2 endpoints work
+against it; point `addr` at the OpenBao listener (by convention through
+`addr: "${VAULT_ADDR}"`, so the env var name stays `VAULT_ADDR`). This has been run in
+production against OpenBao 2.7.1. The `bao` CLI is a drop-in for `vault` in
+`examples/vault/setup.sh` (`VAULT_CLI=bao bash examples/vault/setup.sh`).
+
+`path` is relative to the KV v2 mount (`secret/` by default): `path: "agents/{agent_type}"`
+reads `secret/data/agents/<agent_type>`. Give each agent its own AppRole and its own
+policy granting `read` on exactly that path. Don't use a shared wildcard such as
+`secret/data/agents/*`, which lets any agent read every other agent's credentials.
+
+**Sealed store at startup.** `fetch()` runs before the server starts, and any failure is
+fatal: against a sealed (or unreachable) Vault/OpenBao, scoped-mcp raises `CredentialError`
+and exits 1 in well under a second (about 0.6 s measured). Under PM2's defaults
+(`min_uptime: 1000` ms, `max_restarts: 16`) every such exit counts as an unstable restart,
+so PM2 stops the process as `errored` within seconds and does **not** restart it when the
+store is later unsealed. A store with a manual (Shamir) unseal is sealed after every
+restart, so this happens on every host reboot. Give Vault-backed processes a restart
+policy that keeps retrying:
+
+```js
+// ecosystem.config.js
+{
+  name: "scoped-mcp-research",
+  // ...
+  exp_backoff_restart_delay: 1000,  // 1 s, then x1.5 per crash, capped at 15 s
+  max_restarts: 16,                 // PM2 default, shown for clarity
+}
+```
+
+PM2 (checked against 6.x) counts an exit as unstable only within `min_uptime × max_restarts`
+(16 s by default) of the process being started; a manual `pm2 restart` resets that clock.
+With a backoff delay,
+only the first few crashes land inside that window, so PM2 never reaches `max_restarts`
+and keeps retrying about every 15 s until the store is unsealed. Once the process has
+stayed up for 30 s the backoff resets. A fixed `restart_delay` (for example `10000`) works
+for the same reason. Don't rely on lowering `min_uptime` below the crash time; that
+shrinks the window and fights a timing you don't control. Alert on the seal state itself,
+for example by polling `GET /v1/sys/health`, rather than waiting for agents to notice.
 
 For integration with a secrets manager such as Vaultwarden, see
 `examples/vaultwarden/`.
@@ -731,7 +772,7 @@ guarantees. All are off by default; enable per-agent in the manifest:
   per-tool limits with glob patterns. Backed by `InProcessBackend` (default)
   or `DragonflyBackend` (`[dragonfly]` extra) for cross-process state.
 - **Vault-backed credentials** (`credentials.source: vault`, v0.8) — fetch
-  credentials from HashiCorp Vault via AppRole; client token auto-renewed in
+  credentials from HashiCorp Vault or OpenBao via AppRole; client token auto-renewed in
   the background, with opt-in self-heal re-auth, credential-health surfacing,
   an unauthenticated `/health` probe, and out-of-band degradation alerts
   (SMCP-26 — see **Credential Health, Self-Heal & Alerting** above).
@@ -954,7 +995,7 @@ pip install "scoped-mcp[otel]"
 # With shared state backend for rate limiting and HITL across processes
 pip install "scoped-mcp[dragonfly]"
 
-# With HashiCorp Vault credential source
+# With HashiCorp Vault / OpenBao credential source
 pip install "scoped-mcp[vault]"
 
 # With the agent session registry (HITL audit trail on agent-postgres)

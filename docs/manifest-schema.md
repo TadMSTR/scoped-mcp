@@ -109,7 +109,7 @@ GRAFANA_SERVICE_ACCOUNT_TOKEN: glsa_abc123
 
 ## Vault credential source
 
-Set `credentials.source: vault` to fetch credentials from HashiCorp Vault via AppRole auth.
+Set `credentials.source: vault` to fetch credentials from HashiCorp Vault or OpenBao via AppRole auth.
 Credentials are fetched once at startup; the client token is renewed automatically in the background.
 Requires `pip install scoped-mcp[vault]`.
 
@@ -121,7 +121,7 @@ credentials:
     auth: approle
     role_id_env: VAULT_ROLE_ID        # env var holding the AppRole role ID
     secret_id_env: VAULT_SECRET_ID    # env var holding the AppRole secret ID
-    path: secret/data/scoped-mcp/{agent_type}  # {agent_type} interpolated at startup
+    path: "agents/{agent_type}"      # relative to the KV v2 mount (secret/); {agent_type} interpolated at startup
     kv_version: 2                     # 1 or 2 (default: 2)
 ```
 
