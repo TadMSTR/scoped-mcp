@@ -13,6 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   within seconds of a reboot, so none recovered after the unseal. They now retry every
   <= 15 s until the store unseals (vikunja#1268).
 
+### Security
+- **Lock bump for 8 advisories in two transitive dependencies** (lock only; pyproject ranges
+  unchanged). This turned the Dependency audit red on every run from 2026-10-27.
+  - authlib 1.7.2 → 1.9.1 (via fastmcp-slim): CVE-2026-96760 / GHSA-6v38-4h7w-rj9h,
+    CVE-2026-114618 / GHSA-fch4-3c6x-j4gc, CVE-2026-114615 / GHSA-7vr2-2fgp-9w7p,
+    CVE-2026-114617 / GHSA-c5mf-xmp2-59rc, CVE-2026-114620 / GHSA-x4rv-c3wx-4cr8,
+    CVE-2026-114614 / GHSA-jj7h-c3hg-m23x, CVE-2026-114616 / GHSA-8m4g-j4wp-wgcg.
+  - dnspython 2.8.0 → 2.9.0 (via email-validator): CVE-2026-114605 / GHSA-45c3-73f7-pv4m.
+  - Not reachable in scoped-mcp's configuration. HTTP auth is the static per-agent
+    `BearerTokenVerifier`, nothing in `src/` uses authlib, email-validator or dnspython, and
+    importing the server loads neither package (fastmcp imports its authlib-based providers
+    lazily).
+
 ### Docs
 - OpenBao is documented as a supported Vault credential source (same API, hvac client and
   `VAULT_ADDR`; no code change). `examples/vault/setup.sh` takes `VAULT_CLI=bao`.
