@@ -7,11 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.19.2] — 2026-10-28
+
+Dependency-security release: clears the 8 advisories that turned the Dependency audit red,
+and lands the open dependency and deploy-config PRs. No change to scoped-mcp's own code.
+Build plan `scoped-mcp-open-prs-2026-10`, vikunja#1297.
+
 ### Fixed
 - `ecosystem.config.js` gives every broker `exp_backoff_restart_delay: 1000`. Against a sealed
   OpenBao the broker exits in ~0.64 s, and with no delay PM2 parked all of them `errored`
   within seconds of a reboot, so none recovered after the unseal. They now retry every
-  <= 15 s until the store unseals (vikunja#1268).
+  <= 15 s until the store unseals (vikunja#1268). Deploy-side only: the file is not in the
+  wheel, and it takes effect only when a broker is deleted and started again from it.
 
 ### Security
 - **Lock bump for 8 advisories in two transitive dependencies** (lock only; pyproject ranges
@@ -25,6 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `BearerTokenVerifier`, nothing in `src/` uses authlib, email-validator or dnspython, and
     importing the server loads neither package (fastmcp imports its authlib-based providers
     lazily).
+
+### Dependencies
+- sqlglot 30.21.0 → 30.24.0 in the lock (#125). It is the parser behind the sqlite module's
+  statement checks. The read-only and blocked-statement pins all pass on it, none skipped.
+- ruff 0.17.0 → 0.17.2 (dev tooling, #117). It flags nothing new.
+- CI actions: astral-sh/setup-uv 10.3.2 (#124), pypa/gh-action-pypi-publish 1.14.3 (#123), and
+  the codeql-action group 4.39.1 with init, analyze and upload-sarif kept on one sha (#120).
 
 ### Docs
 - OpenBao is documented as a supported Vault credential source (same API, hvac client and
