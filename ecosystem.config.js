@@ -83,7 +83,7 @@ function buildApp(agentType, httpPort) {
     // PM2 resets the backoff after 30 s of stable uptime. Verified against
     // PM2 6.0.14 lib/God.js handleExit; see README "Sealed store at startup".
     // Leave max_restarts and min_uptime at their defaults: raising either
-    // widens the window. vikunja#1268 (id 1351).
+    // widens the window. vikunja#1268.
     exp_backoff_restart_delay: 1000,
     // Matches current running state. Log paths are left to PM2's default
     // (~/.pm2/logs/<name>-{out,error}.log), which is already where these write.

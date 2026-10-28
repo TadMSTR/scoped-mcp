@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.19.3] — 2026-10-28
+
+Comment-only follow-up to 1.19.2's security audit. No behaviour change.
+
+### Security
+- Two source comments carried an internal tracker database id next to the public
+  `vikunja#N` reference: `ecosystem.config.js` (added in 1.19.2) and
+  `modules/mcp_proxy.py` (since 1.17.2). Both now cite `vikunja#N` only, and the
+  `mcp_proxy.py` comment no longer names the maintainer's host. Already-published sdists and
+  wheels for 1.17.2–1.19.2 keep the old text.
+- Correction to 1.19.2's notes: the pypa/gh-action-pypi-publish 1.14.3 bump (#123) is a
+  security fix upstream (GHSA-5xjx-3w67-w9x9, plus hash-checking of the action's own runtime
+  dependencies). 1.19.2 was the first release published with it.
+
 ## [1.19.2] — 2026-10-28
 
 Dependency-security release: clears the 8 advisories that turned the Dependency audit red,
