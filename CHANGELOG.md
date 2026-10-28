@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `ecosystem.config.js` gives every broker `exp_backoff_restart_delay: 1000`. Against a sealed
+  OpenBao the broker exits in ~0.64 s, and with no delay PM2 parked all of them `errored`
+  within seconds of a reboot, so none recovered after the unseal. They now retry every
+  <= 15 s until the store unseals (vikunja#1268).
+
 ### Docs
 - OpenBao is documented as a supported Vault credential source (same API, hvac client and
   `VAULT_ADDR`; no code change). `examples/vault/setup.sh` takes `VAULT_CLI=bao`.
