@@ -70,6 +70,21 @@ function buildApp(agentType, httpPort) {
     cwd: "/home/ted",
     exec_mode: "fork",
     autorestart: true,
+    // KEEP RETRYING A SEALED SECRET STORE. With OpenBao sealed (every boot
+    // until Ted unseals), the broker exits 1 at credential fetch in ~0.64 s.
+    // With no restart delay that is 16 restarts inside PM2's unstable-restart
+    // window (min_uptime 1 s x max_restarts 16 = 16 s after the app is
+    // created), so PM2 parked every broker `errored` and nothing came back
+    // after the unseal. With exponential backoff (1 s, growing x1.5, capped at
+    // 15 s by PM2), only ~5 restarts land in that window, so the cap is never
+    // reached. Auto-restarts do not reset the window (only a manual
+    // restart/reload does), so after the first 16 s a crash is never counted.
+    // The broker therefore retries every <= 15 s until the store unseals, and
+    // PM2 resets the backoff after 30 s of stable uptime. Verified against
+    // PM2 6.0.14 lib/God.js handleExit; see README "Sealed store at startup".
+    // Leave max_restarts and min_uptime at their defaults: raising either
+    // widens the window. vikunja#1268 (id 1351).
+    exp_backoff_restart_delay: 1000,
     // Matches current running state. Log paths are left to PM2's default
     // (~/.pm2/logs/<name>-{out,error}.log), which is already where these write.
     merge_logs: true,

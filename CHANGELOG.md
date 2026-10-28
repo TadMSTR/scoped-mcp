@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `ecosystem.config.js` gives every broker `exp_backoff_restart_delay: 1000`. Against a sealed
+  OpenBao the broker exits in ~0.64 s, and with no delay PM2 parked all of them `errored`
+  within seconds of a reboot, so none recovered after the unseal. They now retry every
+  <= 15 s until the store unseals (vikunja#1268).
+
 ### Security
 - **Lock bump for 8 advisories in two transitive dependencies** (lock only; pyproject ranges
   unchanged). This turned the Dependency audit red on every run from 2026-10-27.
