@@ -275,11 +275,10 @@ def _unwrap_result(
     if any(not isinstance(block, TextContent) for block in content):
         # SECURITY: each binary block is capped at max_binary_bytes (decoded size, default
         # 10 MiB) and replaced by a text stub when over it. Was SECURITY[deferred]; fixed
-        # in v1.19.0, vikunja#1071 (id 1154). Audit: 2026-10-11/scoped-mcp-proxy-content-1070
-        # F-04.
+        # in v1.19.0, vikunja#1071. Audit: 2026-10-11/scoped-mcp-proxy-content-1070 F-04.
         # SECURITY[accepted]: images reach the agent and text filters cannot screen pixels
-        # (prompt injection via rendered text). Only grafana-mcp renders of forge's own
-        # dashboards produce images today; revisit before proxying an external image tool.
+        # (prompt injection via rendered text). Only grafana-mcp renders of the operator's
+        # own dashboards produce images today; revisit before proxying an external image tool.
         # Audit: 2026-10-11/scoped-mcp-proxy-content-1070 F-05.
         return _cap_binary_blocks(content, max_binary_bytes, module, tool)
     if result.data is not None:
