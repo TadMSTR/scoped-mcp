@@ -1217,6 +1217,47 @@ def test_sanitize_url_userinfo(value: str, expected: str) -> None:
     assert _sanitize_value(value) == expected
 
 
+# Whatever precedes the scheme must not decide whether the URL is redacted
+# (quickwins-security-runtime-2026-11 audit F-01): `pip -i<url>`, `curl -x<url>`.
+_URL_PREFIXES = [
+    "",
+    " ",
+    "-",
+    "+",
+    ".",
+    "9",
+    "_",
+    "=",
+    "'",
+    '"',
+    "(",
+    "<",
+    ",",
+    ";",
+    "-i",
+    "-x",
+    "--index-url=",
+    "9-",
+    "a.",
+    "x+",
+    "1.",
+]
+_URL_SCHEMES = ["https", "http", "redis", "postgres", "git+ssh", "s3"]
+
+
+@pytest.mark.parametrize("prefix", _URL_PREFIXES)
+@pytest.mark.parametrize("scheme", _URL_SCHEMES)
+def test_url_userinfo_redacted_whatever_precedes_the_scheme(prefix: str, scheme: str) -> None:
+    pw = "Pw-probe-7f3c"
+    for text, expected in (
+        (f"{prefix}{scheme}://user:{pw}@host:1/x", f"{prefix}{scheme}://***@host:1/x"),
+        (f"run {prefix}{scheme}://{pw}@host now", f"run {prefix}{scheme}://***@host now"),
+    ):
+        out = _redact_string(text)
+        assert pw not in out, (text, out)
+        assert out == expected
+
+
 def test_url_userinfo_redaction_is_linear() -> None:
     """A long run of scheme characters must not be rescanned from every position."""
     import time

@@ -204,10 +204,9 @@ _GH_PAT_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b")
 # Modern SSTs use base64url, which contains _ and -; \b cannot terminate before _, so
 # the modern arm has no trailing \b. The legacy arm covers all three legacy prefixes.
 _VAULT_TOKEN_RE = re.compile(r"\b(?:hvs|hvb|hvr)\.[A-Za-z0-9_-]+|\b[sbr]\.[A-Za-z0-9]{24,}\b")
-# URL userinfo (`scheme://user:pass@host`, or a bare token as the user). The start of a
-# URL: the lookbehind lets a match begin only where a run of scheme characters begins, so a
-# long run is not rescanned from every position.
-_URL_START_RE = re.compile(r"(?<![A-Za-z0-9+.\-])[A-Za-z][A-Za-z0-9+.\-]*+://")
+# URL userinfo (`scheme://user:pass@host`, or a bare token as the user). Anchored on `://`,
+# not on the scheme: whatever precedes `://` (`-ihttps`, `9redis`) is irrelevant to where
+# the userinfo is, and a scheme-start rule missed `pip -i<url>` (audit F-01).
 _WHITESPACE_RE = re.compile(r"\s")
 _AUTHORITY_END_RE = re.compile(r"[/?#]")
 
@@ -342,8 +341,17 @@ def _redact_url_userinfo(s: str) -> str:
     `https://host/@scope/pkg`, deliberately: a log line that loses a path is cheaper than one
     that keeps a password tail.
 
-    Not covered, by design: a scheme-only form with no `//` (`unix:/path`), and a credential
-    whose URL is broken by whitespace. By-value redaction still catches a known secret there.
+    A URL is found by its `://`, whatever precedes it, so `-ihttps://u:p@h` and
+    `9redis://u:p@h` are covered.
+
+    Not covered, by design: only the text after a `://` is ever redacted, so these keep
+    their credential:
+    - no `://` at all: a scheme-only form (`unix:/path`), a scheme-relative `//u:p@h`, or a
+      scheme-less `u:p@host:5432`;
+    - a credential ahead of an embedded `://` in the same run (`//admin:pw://x@host` keeps
+      `pw`);
+    - a credential whose URL is broken by whitespace.
+    By-value redaction still catches a known secret in any of them.
 
     Linear: each URL's run is scanned once, and the next search starts after it.
     """
@@ -352,8 +360,8 @@ def _redact_url_userinfo(s: str) -> str:
     out: list[str] = []
     pos = 0
     search_from = 0
-    while (m := _URL_START_RE.search(s, search_from)) is not None:
-        start = m.end()
+    while (sep := s.find("://", search_from)) != -1:
+        start = sep + 3
         ws = _WHITESPACE_RE.search(s, start)
         run_end = ws.start() if ws else len(s)
         search_from = max(run_end, start)
