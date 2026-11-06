@@ -51,7 +51,8 @@ _STATUS_CODES = {
 # SMCP-37: deployed AGENT_ID carries a forward-compat clone-pool suffix
 # (e.g. "sysadmin-01") that matrix-hitl-bot's config doesn't know about.
 # Strip it before comparing so config can use the stable bare name.
-_CLONE_SUFFIX_RE = re.compile(r"-\d+$")
+# [0-9] and \Z: \d matches any Unicode digit, and $ also matches before a final newline.
+_CLONE_SUFFIX_RE = re.compile(r"-[0-9]+\Z")
 
 
 def _normalize_agent_id(agent_id: str) -> str:

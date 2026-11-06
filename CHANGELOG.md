@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.19.4] — 2026-11-06
+
+Patch release: URL-userinfo log redaction, a HITL message fix, a dependency bump, and four
+small correctness fixes.
+
+### Security
+- URL userinfo is now redacted by shape in log lines: `scheme://user:pass@host`, or a bare
+  token as the user, becomes `scheme://***@host`. A URL is found by its `://`, whatever
+  precedes it (`pip -i<url>`, `curl -x<url>` are covered). Before this, a credential URL in
+  a tool argument reached the `tool_call` audit line (`log_args` defaults to on) and the
+  MCP client's DEBUG trace on stderr verbatim. The boundary is decided on the whole text
+  after `://` (to the next whitespace): userinfo ends at its last `@`, so a password
+  containing `@` is fully covered. When the text before that `@` holds a `/`, `?` or `#` (an
+  unencoded delimiter inside a password, or an `@` that is really in a path, query or
+  fragment), the boundary is ambiguous and everything after `://` is replaced with
+  `<redacted>`. This deliberately over-redacts URLs such as `https://host/@scope/pkg`. The
+  scan is linear in input length. Only text after a `://` is redacted, so these are not
+  covered: forms with no `://` (`unix:/path`, scheme-relative `//u:p@h`, scheme-less
+  `u:p@host:5432`), a credential ahead of an embedded `://` in the same token, and a URL
+  broken by whitespace. By-value redaction still covers a known secret in any of them.
+  (vikunja#1227)
+- The HITL rejection message under `hitl.signing.mode: observe` pointed at the wrong
+  approval route. Every signing mode other than `off` now names only the operator's
+  `approve_command`. (vikunja#982)
+- `joserfc` (a transitive dependency, via authlib) is bumped from 1.7.1 to 1.8.0 in `uv.lock`,
+  clearing GHSA-9pg5-8c7x-5hfx and GHSA-jpxq-7h8p-2q76.
+
+### Fixed
+- The `httpx` and `httpcore` loggers are set to WARNING. The root logger stays at DEBUG
+  for scoped-mcp's own loggers, but successful-request and connection trace no longer
+  fills stderr (about 70% of a long-running broker's error log). (vikunja#554)
+- The rate-limit spec and the InfluxDB RFC3339/duration validators accept only ASCII
+  digits. `\d` on a `str` pattern matches any Unicode digit. (vikunja#1221)
+- The HITL endpoint's clone-suffix normalisation of an agent id (`sysadmin-01` → `sysadmin`)
+  strips only ASCII digits at the very end of the string, with the same `\d` / `$` reasoning.
+- The `VaultCredentialSource` docstring example gave a KV v2 path that included the
+  `secret/data/` prefix, which hvac adds itself. It now shows the mount-relative path.
+
 ## [1.19.3] — 2026-10-28
 
 Comment-only follow-up to 1.19.2's security audit. No behaviour change.

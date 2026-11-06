@@ -30,7 +30,8 @@ _log = structlog.get_logger("ops")
 _AGENT_TYPE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 
 # Rate limit spec format: "<N>/<unit>" e.g. "100/minute", "50/hour", "10/second".
-_RATE_LIMIT_RE = re.compile(r"^\d+/(second|minute|hour)$")
+# [0-9], not \d: on str patterns \d matches every Unicode digit.
+_RATE_LIMIT_RE = re.compile(r"^[0-9]+/(second|minute|hour)$")
 
 # Default cap on one binary content block forwarded by mcp_proxy (vikunja#1071): 10 MiB,
 # about 250x the largest grafana-mcp panel render measured on forge (41 KB).
@@ -258,7 +259,7 @@ class HitlSigningConfig(BaseModel):
     mode: Literal["off", "observe", "enforce"] = "off"
     public_key_path: str | None = None
     # What the agent is told to ask the operator to run, followed by the approval
-    # id, in the rejection message under enforce. Deployment-specific (it usually
+    # id, in the rejection message in every mode except off. Deployment-specific (it usually
     # names a sudo target), so it is configuration, not code.
     approve_command: str = "scoped-mcp-approve"
 

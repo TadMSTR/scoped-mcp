@@ -204,6 +204,11 @@ _GH_PAT_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b")
 # Modern SSTs use base64url, which contains _ and -; \b cannot terminate before _, so
 # the modern arm has no trailing \b. The legacy arm covers all three legacy prefixes.
 _VAULT_TOKEN_RE = re.compile(r"\b(?:hvs|hvb|hvr)\.[A-Za-z0-9_-]+|\b[sbr]\.[A-Za-z0-9]{24,}\b")
+# URL userinfo (`scheme://user:pass@host`, or a bare token as the user). Anchored on `://`,
+# not on the scheme: whatever precedes `://` (`-ihttps`, `9redis`) is irrelevant to where
+# the userinfo is, and a scheme-start rule missed `pip -i<url>` (audit F-01).
+_WHITESPACE_RE = re.compile(r"\s")
+_AUTHORITY_END_RE = re.compile(r"[/?#]")
 
 
 # ── By-value redaction (vikunja#1075 item 3) ─────────────────────────────────
@@ -323,6 +328,57 @@ def _redact_values(s: str) -> str:
     return pattern.sub(lambda m: f"<redacted-value:{names[m.group(0)]}>", s)
 
 
+def _redact_url_userinfo(s: str) -> str:
+    """Redact the userinfo of every `scheme://` URL in `s`.
+
+    The boundary is decided on the whole run after `://` (to the next whitespace), before
+    any query or fragment is trimmed: an unencoded `/`, `?` or `#` inside a password moves
+    every delimiter. Userinfo ends at the run's LAST `@`, as urlsplit reads it, so a `p@ss`
+    password is covered whole. If the text before that `@` is a clean authority (no `/`, `?`
+    or `#`), only the userinfo goes (`scheme://***@host/...`). Otherwise the boundary is
+    ambiguous (a password holding `/?#`, or an `@` that is really in a path, query or
+    fragment) and the whole run after `://` goes: `scheme://<redacted>`. That over-redacts
+    `https://host/@scope/pkg`, deliberately: a log line that loses a path is cheaper than one
+    that keeps a password tail.
+
+    A URL is found by its `://`, whatever precedes it, so `-ihttps://u:p@h` and
+    `9redis://u:p@h` are covered.
+
+    Not covered, by design: only the text after a `://` is ever redacted, so these keep
+    their credential:
+    - no `://` at all: a scheme-only form (`unix:/path`), a scheme-relative `//u:p@h`, or a
+      scheme-less `u:p@host:5432`;
+    - a credential ahead of an embedded `://` in the same run (`//admin:pw://x@host` keeps
+      `pw`);
+    - a credential whose URL is broken by whitespace.
+    By-value redaction still catches a known secret in any of them.
+
+    Linear: each URL's run is scanned once, and the next search starts after it.
+    """
+    if "@" not in s or "://" not in s:
+        return s
+    out: list[str] = []
+    pos = 0
+    search_from = 0
+    while (sep := s.find("://", search_from)) != -1:
+        start = sep + 3
+        ws = _WHITESPACE_RE.search(s, start)
+        run_end = ws.start() if ws else len(s)
+        search_from = max(run_end, start)
+        at = s.rfind("@", start, run_end)
+        if at == -1:
+            continue
+        out.append(s[pos:start])
+        if _AUTHORITY_END_RE.search(s, start, at):
+            out.append("<redacted>")
+            pos = run_end
+        else:
+            out.append("***")
+            pos = at
+    out.append(s[pos:])
+    return "".join(out)
+
+
 def _redact_string(s: str) -> str:
     """Apply value-based, then pattern-based, redaction to a single string.
 
@@ -330,6 +386,7 @@ def _redact_string(s: str) -> str:
     it, say) and leave the rest unmatched.
     """
     s = _redact_values(s)
+    s = _redact_url_userinfo(s)
     s = _JWT_RE.sub("<redacted-jwt>", s)
     s = _BEARER_RE.sub("<redacted-bearer>", s)
     s = _GH_PAT_RE.sub("<redacted-gh-token>", s)
@@ -577,6 +634,10 @@ def configure_logging(audit_log: str | None = None, ops_log: str | None = None) 
     # All log output goes to stderr — stdout is the stdio JSON-RPC wire.
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
+    # DEBUG is for scoped-mcp's own loggers. httpx logs every request at INFO and
+    # httpcore traces each connection at DEBUG, which buried the real errors in stderr.
+    for _name in ("httpx", "httpcore"):
+        logging.getLogger(_name).setLevel(logging.WARNING)
     stderr_handler = logging.StreamHandler(sys.stderr)
     stderr_handler.setFormatter(_json_fmt)
     stderr_handler.addFilter(_RedactionFilter())  # F-05: scrub stdlib/dep logs on stderr

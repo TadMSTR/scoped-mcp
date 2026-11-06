@@ -429,10 +429,13 @@ async def test_enforce_signature_for_other_args_does_not_approve(key):
 
 
 @pytest.mark.asyncio
-async def test_enforce_rejection_message_names_the_approve_command(key):
+@pytest.mark.parametrize("mode", ["enforce", "observe"])
+async def test_signed_rejection_message_names_the_approve_command(key, mode):
+    """Under observe an unsigned approval still works, so the agent must not be told about
+    it there either: any signing mode other than off names only the operator's command."""
     mw = _mw(
         PrefixedState(FakeRedis(), AGENT),
-        "enforce",
+        mode,
         key,
         hint="sudo -u approver scoped-mcp-approve",
     )

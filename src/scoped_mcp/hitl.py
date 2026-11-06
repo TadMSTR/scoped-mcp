@@ -536,10 +536,11 @@ class HitlMiddleware:
         head = (
             f"Tool call to {tool_name!r} requires operator approval (approval ID: {approval_id}). "
         )
-        if self._signing_mode == "enforce":
-            # The agent cannot approve this itself, and must not try: every
-            # unsigned route is refused. Tell it exactly what to ask the operator
-            # to run, so it stops and asks instead of hunting for a workaround.
+        if self._signing_mode != "off":
+            # The agent cannot approve this itself, and must not try. Under enforce
+            # every unsigned route is refused; under observe one still works, which is
+            # why the agent must not be pointed at it. Tell it exactly what to ask the
+            # operator to run, so it stops and asks instead of hunting for a workaround.
             cmd = self._approve_hint or "scoped-mcp-approve"
             return (
                 head + "Only the operator can approve it, by running in a terminal: "

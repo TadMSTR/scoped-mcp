@@ -70,7 +70,7 @@ class VaultCredentialSource:
             addr="https://vault.example.com",
             role_id_env="VAULT_ROLE_ID",
             secret_id_env="VAULT_SECRET_ID",
-            path="secret/data/scoped-mcp/{agent_type}",
+            path="scoped-mcp/{agent_type}",  # relative to the "secret" mount
             agent_type="research",
             kv_version=2,
         )

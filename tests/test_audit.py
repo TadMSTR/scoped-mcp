@@ -11,6 +11,7 @@ import structlog.testing
 
 from scoped_mcp.audit import (
     SESSION_ID,
+    _redact_string,
     _sanitize_processor,
     _sanitize_value,
     audited,
@@ -1178,3 +1179,180 @@ def test_url_with_token_as_username_only_is_redacted_by_value() -> None:
     redacted = _redact_string(f"cloning {url} now")
     assert "ghp_EXAMPLE" not in redacted
     assert "<redacted-value:REPO_REMOTE_URL>" in redacted
+
+
+# ── URL userinfo (vikunja#1227) ──────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("https://u:p@h/x", "https://***@h/x"),
+        ("clone https://tok@github.com/o/r.git now", "clone https://***@github.com/o/r.git now"),
+        ("postgres://app:s3cr%40t@db:5432/x", "postgres://***@db:5432/x"),
+        # urlsplit ends userinfo at the LAST @ of the authority: nothing of p@ss survives.
+        ("https://u:p@ss@h/x", "https://***@h/x"),
+        ("redis://:pw@cache?db=1", "redis://***@cache?db=1"),
+        ("a https://u:p@h b http://v:q@i", "a https://***@h b http://***@i"),
+        ("git+ssh://git:pw@host/r", "git+ssh://***@host/r"),
+        ("https://u:p%40ss@h/x", "https://***@h/x"),
+        # An unencoded / ? or # in the password moves every delimiter: the boundary is
+        # ambiguous, so everything after :// goes.
+        ("https://u:p?ss@h/x", "https://<redacted>"),
+        ("https://u:p#ss@h/x", "https://<redacted>"),
+        ("https://u:p/ss@h/x", "https://<redacted>"),
+        ("https://u:p/?ss@h/x", "https://<redacted>"),
+        ("https://u:p@s/s@h/x", "https://<redacted>"),
+        # An @ only in the query or fragment could be a password tail: fail closed.
+        ("https://h/x?password=a@b", "https://<redacted>"),
+        ("https://h/x#a@b", "https://<redacted>"),
+        ("https://h/x?to=a@b and more", "https://<redacted> and more"),
+        # No @ after the scheme: untouched.
+        ("https://h/x?q=1", "https://h/x?q=1"),
+        ("mail me at a@b.example", "mail me at a@b.example"),
+        ("see https://h/x then a@b", "see https://h/x then a@b"),
+    ],
+)
+def test_sanitize_url_userinfo(value: str, expected: str) -> None:
+    assert _sanitize_value(value) == expected
+
+
+# Whatever precedes the scheme must not decide whether the URL is redacted
+# (quickwins-security-runtime-2026-11 audit F-01): `pip -i<url>`, `curl -x<url>`.
+_URL_PREFIXES = [
+    "",
+    " ",
+    "-",
+    "+",
+    ".",
+    "9",
+    "_",
+    "=",
+    "'",
+    '"',
+    "(",
+    "<",
+    ",",
+    ";",
+    "-i",
+    "-x",
+    "--index-url=",
+    "9-",
+    "a.",
+    "x+",
+    "1.",
+]
+_URL_SCHEMES = ["https", "http", "redis", "postgres", "git+ssh", "s3"]
+
+
+@pytest.mark.parametrize("prefix", _URL_PREFIXES)
+@pytest.mark.parametrize("scheme", _URL_SCHEMES)
+def test_url_userinfo_redacted_whatever_precedes_the_scheme(prefix: str, scheme: str) -> None:
+    pw = "Pw-probe-7f3c"
+    for text, expected in (
+        (f"{prefix}{scheme}://user:{pw}@host:1/x", f"{prefix}{scheme}://***@host:1/x"),
+        (f"run {prefix}{scheme}://{pw}@host now", f"run {prefix}{scheme}://***@host now"),
+    ):
+        out = _redact_string(text)
+        assert pw not in out, (text, out)
+        assert out == expected
+
+
+def test_url_userinfo_redaction_is_linear() -> None:
+    """A long run of scheme characters must not be rescanned from every position."""
+    import time
+
+    hostile = "a" * 200_000 + "://" + "b" * 200_000 + "@"
+    start = time.monotonic()
+    _redact_string(hostile)
+    _redact_string("a" * 400_000)
+    # Many URL starts in one whitespace-free run, each with an @ ahead of it.
+    _redact_string("a://" * 100_000 + "@")
+    _redact_string("a://b@" * 100_000)
+    assert time.monotonic() - start < 1.0
+
+
+def test_nested_argument_url_userinfo_is_redacted() -> None:
+    out = _sanitize_value({"opts": {"remotes": ["https://p4:fake-pat-value@example.invalid/x"]}})
+    assert out == {"opts": {"remotes": ["https://***@example.invalid/x"]}}
+
+
+@pytest.mark.asyncio
+async def test_audit_file_never_holds_url_userinfo(
+    agent_ctx: AgentContext, tmp_path: pathlib.Path
+) -> None:
+    """End to end: a credential URL in an argument -> @audited -> the audit file on disk."""
+    import logging
+
+    import structlog
+
+    from scoped_mcp.audit import configure_logging
+
+    audit_log = tmp_path / "audit.jsonl"
+    saved_structlog = structlog.get_config()
+    root = logging.getLogger()
+    saved_root_handlers = list(root.handlers)
+    audit_logger = logging.getLogger("audit")
+    before = {id(h) for h in audit_logger.handlers}
+    try:
+        configure_audit(log_args=True)
+        configure_logging(audit_log=str(audit_log))
+        await _make_tool(_MockModule(agent_ctx), value="fetch https://u:p4ss-w0rd@h/")
+    finally:
+        structlog.configure(**saved_structlog)
+        root.handlers[:] = saved_root_handlers
+        for h in list(audit_logger.handlers):
+            if id(h) not in before:
+                audit_logger.removeHandler(h)
+                h.close()
+    text = audit_log.read_text()
+    assert "tool_call" in text, "the tool call was not logged, so the test proves nothing"
+    assert "p4ss-w0rd" not in text
+    assert "https://***@h/" in text
+
+
+def test_stdlib_record_url_userinfo_is_redacted() -> None:
+    """The MCP client's DEBUG wire trace goes through stdlib logging, not the audit path."""
+    import logging
+
+    from scoped_mcp.audit import _RedactionFilter
+
+    record = logging.LogRecord(
+        "mcp.client",
+        logging.DEBUG,
+        __file__,
+        1,
+        "Sending client message: %s",
+        ({"arguments": {"method": "https://u:p4ss-w0rd@h/x"}},),
+        None,
+    )
+    _RedactionFilter().filter(record)
+    assert "p4ss-w0rd" not in record.getMessage()
+
+
+# ── httpx / httpcore are quiet (vikunja#554) ──────────────────────────────────
+
+
+def test_configure_logging_quiets_httpx_and_httpcore() -> None:
+    import logging
+
+    import structlog
+
+    from scoped_mcp.audit import configure_logging
+
+    saved_structlog = structlog.get_config()
+    root = logging.getLogger()
+    saved_root_handlers = list(root.handlers)
+    saved_levels = {n: logging.getLogger(n).level for n in ("httpx", "httpcore")}
+    try:
+        configure_logging()
+        assert root.level == logging.DEBUG
+        for name in ("httpx", "httpcore", "httpcore.connection"):
+            lg = logging.getLogger(name)
+            assert not lg.isEnabledFor(logging.INFO), name
+            assert lg.isEnabledFor(logging.WARNING), name
+    finally:
+        structlog.configure(**saved_structlog)
+        root.handlers[:] = saved_root_handlers
+        for n, lvl in saved_levels.items():
+            logging.getLogger(n).setLevel(lvl)
