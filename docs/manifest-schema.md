@@ -391,6 +391,12 @@ Before a record is written, every string in it is redacted twice:
   kept, because any of those can carry the credential. Values held only in Vault or a
   secrets file are not in the environment, so this pass does not see them.
 - **By pattern.** JWTs, bearer tokens, GitHub tokens, Vault tokens and hex runs of 32+.
+  Since v1.19.4, URL userinfo by shape as well: in the text after each `://`, up to the next
+  whitespace, the userinfo before the last `@` becomes `***` (`scheme://***@host`), or the
+  whole run becomes `<redacted>` when a `/`, `?` or `#` before that `@` makes the boundary
+  ambiguous. Only text after a `://` is redacted, so these keep their credential unless the
+  by-value pass knows it: forms with no `://` (`unix:/path`, `//u:p@h`, `u:p@host:5432`), a
+  credential ahead of an embedded `://` in the same token, and a URL split by whitespace.
 
 The same two passes run over every stdlib log record when it is created, including its
 traceback and stack info, so libraries with their own handlers (FastMCP's `fastmcp.*`
