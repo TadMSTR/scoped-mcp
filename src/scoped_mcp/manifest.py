@@ -259,7 +259,7 @@ class HitlSigningConfig(BaseModel):
     mode: Literal["off", "observe", "enforce"] = "off"
     public_key_path: str | None = None
     # What the agent is told to ask the operator to run, followed by the approval
-    # id, in the rejection message under enforce. Deployment-specific (it usually
+    # id, in the rejection message in every mode except off. Deployment-specific (it usually
     # names a sudo target), so it is configuration, not code.
     approve_command: str = "scoped-mcp-approve"
 
