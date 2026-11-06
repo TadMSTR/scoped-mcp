@@ -21,7 +21,8 @@ Patch release: log redaction and three small correctness fixes.
   unencoded delimiter inside a password, or an `@` that is really in a path, query or
   fragment), the boundary is ambiguous and everything after `://` is replaced with
   `<redacted>`. This deliberately over-redacts URLs such as `https://host/@scope/pkg`. The
-  scan is linear in input length. (vikunja#1227)
+  scan is linear in input length. Not covered: scheme-only forms without `//` (`unix:/path`),
+  and a URL broken by whitespace. (vikunja#1227)
 - Under `hitl.signing.mode: observe`, the HITL rejection message told the agent to run
   `scoped-mcp hitl approve`, an unsigned route that still works in observe. Every signing
   mode other than `off` now names only the operator's `approve_command`. (vikunja#982)

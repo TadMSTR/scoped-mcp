@@ -342,6 +342,9 @@ def _redact_url_userinfo(s: str) -> str:
     `https://host/@scope/pkg`, deliberately: a log line that loses a path is cheaper than one
     that keeps a password tail.
 
+    Not covered, by design: a scheme-only form with no `//` (`unix:/path`), and a credential
+    whose URL is broken by whitespace. By-value redaction still catches a known secret there.
+
     Linear: each URL's run is scanned once, and the next search starts after it.
     """
     if "@" not in s or "://" not in s:
