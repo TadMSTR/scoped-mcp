@@ -15,12 +15,18 @@ Patch release: log redaction and three small correctness fixes.
 - URL userinfo is now redacted by shape in every log line: `scheme://user:pass@host`, or
   a bare token as the user, becomes `scheme://***@host`. Before this, a credential URL in
   a tool argument reached the `tool_call` audit line (`log_args` defaults to on) and the
-  MCP client's DEBUG trace on stderr verbatim. Userinfo ends at the last `@` of the
-  authority, as `urllib.parse.urlsplit` reads it, so a password containing `@` is fully
-  covered. The pattern is linear in input length. (vikunja#1227)
+  MCP client's DEBUG trace on stderr verbatim. The boundary is decided on the whole text
+  after `://` (to the next whitespace): userinfo ends at its last `@`, so a password
+  containing `@` is fully covered. When the text before that `@` holds a `/`, `?` or `#` (an
+  unencoded delimiter inside a password, or an `@` that is really in a path, query or
+  fragment), the boundary is ambiguous and everything after `://` is replaced with
+  `<redacted>`. This deliberately over-redacts URLs such as `https://host/@scope/pkg`. The
+  scan is linear in input length. (vikunja#1227)
 - Under `hitl.signing.mode: observe`, the HITL rejection message told the agent to run
   `scoped-mcp hitl approve`, an unsigned route that still works in observe. Every signing
   mode other than `off` now names only the operator's `approve_command`. (vikunja#982)
+- `joserfc` (a transitive dependency, via authlib) is bumped from 1.7.1 to 1.8.0 in `uv.lock`,
+  clearing GHSA-9pg5-8c7x-5hfx and GHSA-jpxq-7h8p-2q76.
 
 ### Fixed
 - The `httpx` and `httpcore` loggers are set to WARNING. The root logger stays at DEBUG
@@ -29,6 +35,8 @@ Patch release: log redaction and three small correctness fixes.
 - The rate-limit spec and the InfluxDB RFC3339/duration validators accept only ASCII
   digits. `\d` on a `str` pattern matches any Unicode digit, so `-١٢h` passed validation
   and reached Flux. (vikunja#1221)
+- The HITL endpoint's clone-suffix normalisation of an agent id (`sysadmin-01` → `sysadmin`)
+  strips only ASCII digits at the very end of the string, with the same `\d` / `$` reasoning.
 - The `VaultCredentialSource` docstring example gave a KV v2 path that included the
   `secret/data/` prefix, which hvac adds itself. It now shows the mount-relative path.
 

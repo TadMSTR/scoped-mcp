@@ -1195,10 +1195,22 @@ def test_url_with_token_as_username_only_is_redacted_by_value() -> None:
         ("redis://:pw@cache?db=1", "redis://***@cache?db=1"),
         ("a https://u:p@h b http://v:q@i", "a https://***@h b http://***@i"),
         ("git+ssh://git:pw@host/r", "git+ssh://***@host/r"),
-        # No userinfo: untouched, including an @ after the authority ends.
-        ("https://h/x?to=a@b", "https://h/x?to=a@b"),
-        ("https://h/u@v", "https://h/u@v"),
+        ("https://u:p%40ss@h/x", "https://***@h/x"),
+        # An unencoded / ? or # in the password moves every delimiter: the boundary is
+        # ambiguous, so everything after :// goes.
+        ("https://u:p?ss@h/x", "https://<redacted>"),
+        ("https://u:p#ss@h/x", "https://<redacted>"),
+        ("https://u:p/ss@h/x", "https://<redacted>"),
+        ("https://u:p/?ss@h/x", "https://<redacted>"),
+        ("https://u:p@s/s@h/x", "https://<redacted>"),
+        # An @ only in the query or fragment could be a password tail: fail closed.
+        ("https://h/x?password=a@b", "https://<redacted>"),
+        ("https://h/x#a@b", "https://<redacted>"),
+        ("https://h/x?to=a@b and more", "https://<redacted> and more"),
+        # No @ after the scheme: untouched.
+        ("https://h/x?q=1", "https://h/x?q=1"),
         ("mail me at a@b.example", "mail me at a@b.example"),
+        ("see https://h/x then a@b", "see https://h/x then a@b"),
     ],
 )
 def test_sanitize_url_userinfo(value: str, expected: str) -> None:
@@ -1209,10 +1221,13 @@ def test_url_userinfo_redaction_is_linear() -> None:
     """A long run of scheme characters must not be rescanned from every position."""
     import time
 
-    hostile = "a" * 200_000 + "://" + "b" * 200_000
+    hostile = "a" * 200_000 + "://" + "b" * 200_000 + "@"
     start = time.monotonic()
     _redact_string(hostile)
     _redact_string("a" * 400_000)
+    # Many URL starts in one whitespace-free run, each with an @ ahead of it.
+    _redact_string("a://" * 100_000 + "@")
+    _redact_string("a://b@" * 100_000)
     assert time.monotonic() - start < 1.0
 
 

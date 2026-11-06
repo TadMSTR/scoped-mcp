@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from fastmcp import FastMCP
 from starlette.testclient import TestClient
 
@@ -172,3 +173,19 @@ def test_pending_agent_id_query_rejects_different_agent(monkeypatch):
         r = client.get("/hitl/pending", params={"agent_id": "developer"}, headers=auth)
         assert r.status_code == 200
         assert r.json()["pending"] == []
+
+
+@pytest.mark.parametrize(
+    ("agent_id", "expected"),
+    [
+        ("sysadmin-01", "sysadmin"),
+        ("sysadmin", "sysadmin"),
+        # Only ASCII digits are a clone suffix, and only at the very end.
+        ("sysadmin-" + chr(0x661), "sysadmin-" + chr(0x661)),
+        ("sysadmin-01\n", "sysadmin-01\n"),
+    ],
+)
+def test_normalize_agent_id_strips_only_an_ascii_clone_suffix(agent_id, expected):
+    from scoped_mcp.hitl_http import _normalize_agent_id
+
+    assert _normalize_agent_id(agent_id) == expected
