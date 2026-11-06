@@ -106,3 +106,45 @@ def test_influxdb_validators_reject_trailing_newline() -> None:
         _validate_measurement("cpu\n")
     with pytest.raises(ValueError):
         _validate_identifier("host\n")
+
+
+# ── ASCII-only digits ────────────────────────────────────────────────────────
+# On str patterns \d matches any Unicode digit (category Nd). These validators feed a
+# query language or a number parse, so only 0-9 is accepted.
+
+# Built with chr() so the source stays ASCII.
+_AI0, _AI1, _AI2 = chr(0x660), chr(0x661), chr(0x662)  # Arabic-Indic 0, 1, 2
+_ARABIC_INDIC_12 = _AI1 + _AI2
+
+
+def test_rate_limit_rejects_non_ascii_digits() -> None:
+    from scoped_mcp.manifest import RateLimitsConfig
+
+    assert RateLimitsConfig.model_validate({"global": "12/minute"})
+    with pytest.raises(ValidationError):
+        RateLimitsConfig.model_validate({"global": f"{_ARABIC_INDIC_12}/minute"})
+    with pytest.raises(ValidationError):
+        RateLimitsConfig.model_validate({"per_tool": {"x_*": f"{_ARABIC_INDIC_12}/minute"}})
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        f"-{_ARABIC_INDIC_12}h",
+        f"20{_ARABIC_INDIC_12}-01-01T00:00:00Z",
+        f"2026-01-01T00:00:00.{_AI1}Z",
+        f"2026-01-01T00:00:00+{_AI0}{_AI1}:00",
+    ],
+)
+def test_influxdb_time_rejects_non_ascii_digits(value: str) -> None:
+    from scoped_mcp.modules._influxdb_validators import _validate_time
+
+    with pytest.raises(ValueError):
+        _validate_time(value)
+
+
+@pytest.mark.parametrize("value", ["-12h", "2026-01-01T00:00:00.5Z", "2026-01-01T00:00:00+01:00"])
+def test_influxdb_time_still_accepts_ascii_digits(value: str) -> None:
+    from scoped_mcp.modules._influxdb_validators import _validate_time
+
+    assert _validate_time(value) == value

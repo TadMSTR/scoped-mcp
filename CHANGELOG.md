@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.19.4] — 2026-11-06
+
+Patch release: log redaction and three small correctness fixes.
+
+### Security
+- URL userinfo is now redacted by shape in every log line: `scheme://user:pass@host`, or
+  a bare token as the user, becomes `scheme://***@host`. Before this, a credential URL in
+  a tool argument reached the `tool_call` audit line (`log_args` defaults to on) and the
+  MCP client's DEBUG trace on stderr verbatim. Userinfo ends at the last `@` of the
+  authority, as `urllib.parse.urlsplit` reads it, so a password containing `@` is fully
+  covered. The pattern is linear in input length. (vikunja#1227)
+- Under `hitl.signing.mode: observe`, the HITL rejection message told the agent to run
+  `scoped-mcp hitl approve`, an unsigned route that still works in observe. Every signing
+  mode other than `off` now names only the operator's `approve_command`. (vikunja#982)
+
+### Fixed
+- The `httpx` and `httpcore` loggers are set to WARNING. The root logger stays at DEBUG
+  for scoped-mcp's own loggers, but successful-request and connection trace no longer
+  fills stderr (about 70% of a long-running broker's error log). (vikunja#554)
+- The rate-limit spec and the InfluxDB RFC3339/duration validators accept only ASCII
+  digits. `\d` on a `str` pattern matches any Unicode digit, so `-١٢h` passed validation
+  and reached Flux. (vikunja#1221)
+- The `VaultCredentialSource` docstring example gave a KV v2 path that included the
+  `secret/data/` prefix, which hvac adds itself. It now shows the mount-relative path.
+
 ## [1.19.3] — 2026-10-28
 
 Comment-only follow-up to 1.19.2's security audit. No behaviour change.

@@ -204,6 +204,14 @@ _GH_PAT_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b")
 # Modern SSTs use base64url, which contains _ and -; \b cannot terminate before _, so
 # the modern arm has no trailing \b. The legacy arm covers all three legacy prefixes.
 _VAULT_TOKEN_RE = re.compile(r"\b(?:hvs|hvb|hvr)\.[A-Za-z0-9_-]+|\b[sbr]\.[A-Za-z0-9]{24,}\b")
+# URL userinfo (`scheme://user:pass@host`, or a bare token as the user). The authority
+# runs to the first `/`, `?`, `#` or whitespace, and its userinfo ends at the LAST `@`
+# in it, as urlsplit reads it: stopping at the first `@` would leave `ss` of a `p@ss`
+# password readable. Linear: the lookbehind starts an attempt only at the beginning of a
+# run of scheme characters, and every quantifier is possessive, so nothing is rescanned.
+_URL_USERINFO_RE = re.compile(
+    r"(?<![A-Za-z0-9+.\-])(?P<scheme>[A-Za-z][A-Za-z0-9+.\-]*+://)(?:[^/?#@\s]*+@)++"
+)
 
 
 # ── By-value redaction (vikunja#1075 item 3) ─────────────────────────────────
@@ -330,6 +338,7 @@ def _redact_string(s: str) -> str:
     it, say) and leave the rest unmatched.
     """
     s = _redact_values(s)
+    s = _URL_USERINFO_RE.sub(r"\g<scheme>***@", s)
     s = _JWT_RE.sub("<redacted-jwt>", s)
     s = _BEARER_RE.sub("<redacted-bearer>", s)
     s = _GH_PAT_RE.sub("<redacted-gh-token>", s)
@@ -577,6 +586,10 @@ def configure_logging(audit_log: str | None = None, ops_log: str | None = None) 
     # All log output goes to stderr — stdout is the stdio JSON-RPC wire.
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
+    # DEBUG is for scoped-mcp's own loggers. httpx logs every request at INFO and
+    # httpcore traces each connection at DEBUG, which buried the real errors in stderr.
+    for _name in ("httpx", "httpcore"):
+        logging.getLogger(_name).setLevel(logging.WARNING)
     stderr_handler = logging.StreamHandler(sys.stderr)
     stderr_handler.setFormatter(_json_fmt)
     stderr_handler.addFilter(_RedactionFilter())  # F-05: scrub stdlib/dep logs on stderr

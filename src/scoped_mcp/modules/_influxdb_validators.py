@@ -12,8 +12,11 @@ from typing import Any
 
 _FLUX_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MEASUREMENT_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
-_RFC3339 = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$")
-_DURATION = re.compile(r"^-?\d+(ns|us|µs|ms|s|m|h|d|w|mo|y)$")
+# [0-9], not \d: on str patterns \d matches every Unicode digit, and these reach Flux.
+_RFC3339 = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$"
+)
+_DURATION = re.compile(r"^-?[0-9]+(ns|us|µs|ms|s|m|h|d|w|mo|y)$")
 
 _ALLOWED_OPS: frozenset[str] = frozenset({"==", "!=", "<", "<=", ">", ">=", "=~", "!~"})
 _LOGICAL_OPS: frozenset[str] = frozenset({"and", "or"})
