@@ -109,11 +109,17 @@ def validate_proxy_config(config: dict[str, Any]) -> list[str]:
     refuses what the module would refuse at startup.
     """
     errors: list[str] = []
+    headers = config.get("headers")
+    # Checked before anything iterates it: `headers: 5` raised TypeError out of validate
+    # and module init, and `headers: [...]` passed silently (same class as transform).
+    headers_ok = headers is None or isinstance(headers, dict)
+    if not headers_ok:
+        errors.append("headers must be a mapping of header name to value")
     forward = config.get("forward_identity", False)
     if not isinstance(forward, bool):
         errors.append("forward_identity must be true or false")
-    elif forward:
-        static = {str(k).lower() for k in (config.get("headers") or {})}
+    elif forward and headers_ok:
+        static = {str(k).lower() for k in (headers or {})}
         clash = [h for h in FORWARDED_HEADERS if h.lower() in static]
         if clash:
             errors.append(

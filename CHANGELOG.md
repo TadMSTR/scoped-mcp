@@ -50,6 +50,14 @@ rate-limit refusals say when to retry.
   `Rate limit exceeded for agent 'a': global limit 120/minute (120/60s), current=120,
   limit_type=global, retry_after_seconds=14`.
 
+### Fixed (security audit, round 1)
+
+- `mcp_proxy` config validation reports a non-mapping `headers` (`headers: 5`, a list)
+  as a problem instead of raising `TypeError` from `scoped-mcp validate` and module init.
+- The threat model, manifest schema and `mcp_proxy` docstrings now state what
+  `result_attributes` really records: a value matching `[A-Za-z0-9_.-]{1,64}` is kept
+  verbatim, so `path` must select non-sensitive identifier fields.
+
 ## [1.19.4] — 2026-11-06
 
 Patch release: URL-userinfo log redaction, a HITL message fix, a dependency bump, and four

@@ -154,6 +154,14 @@ def test_static_forwarded_header_is_allowed_while_forward_identity_is_off():
     assert cfg.validate_proxy_config({"headers": {"X-Forge-Run-Id": "x"}}) == []
 
 
+@pytest.mark.parametrize("headers", [5, True, "x", ["X-Forge-Run-Id"], 1.5])
+@pytest.mark.parametrize("forward", [True, False])
+def test_non_mapping_headers_are_reported_not_raised(headers, forward):
+    """F-10 (round 1): a sibling of the transform type check; `headers: 5` raised."""
+    errors = cfg.validate_proxy_config({"forward_identity": forward, "headers": headers})
+    assert errors == ["headers must be a mapping of header name to value"]
+
+
 def test_forward_identity_must_be_a_bool():
     assert cfg.validate_proxy_config({"forward_identity": "yes"}) == [
         "forward_identity must be true or false"
