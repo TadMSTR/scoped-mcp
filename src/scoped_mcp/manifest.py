@@ -404,12 +404,10 @@ class ResponseFilterRule(BaseModel):
 
 
 #: The grant-lint rules a module-level ``deviation`` may exempt. The rules themselves live
-#: in host-forge/scripts ``grant-lint.py`` (githost-scoped-2026-11 p3); this list must
+#: in the operator's grant linter (``grant-lint.py``), not in scoped-mcp; this list must
 #: name the same ones, so a typo is refused at load rather than exempting nothing.
 GRANT_LINT_RULES = ("allowlist_required", "hitl_required", "consistent_mode")
 
-# A Vikunja ticket reference, cited as forge's convention requires: "#N (id M)".
-_TICKET_REF_RE = re.compile(r"#[0-9]+ \(id [0-9]+\)")
 # Unicode control characters (Cc) and line/paragraph separators. A deviation is shown to
 # the agent in scoped_mcp_status, so it stays one line of plain text.
 _DEVIATION_FORBIDDEN_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
@@ -418,6 +416,7 @@ _DEVIATION_FORBIDDEN_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 #: limits, so they only bite if a value reached the model some other way.
 DEVIATION_REASON_MAX = 500
 DEVIATION_DECIDED_BY_MAX = 64
+DEVIATION_TICKET_MAX = 64
 
 
 class ModuleDeviation(BaseModel):
@@ -438,7 +437,9 @@ class ModuleDeviation(BaseModel):
     reason: str = Field(min_length=1, max_length=DEVIATION_REASON_MAX)
     decided_by: str = Field(min_length=1, max_length=DEVIATION_DECIDED_BY_MAX)
     decided: date
-    ticket: str
+    # Any tracker's reference ("PROJ-12", "#520", a URL): scoped-mcp does not
+    # interpret it, only shows it.
+    ticket: str = Field(min_length=1, max_length=DEVIATION_TICKET_MAX)
 
     @field_validator("rules")
     @classmethod
@@ -447,7 +448,7 @@ class ModuleDeviation(BaseModel):
             raise ValueError("deviation.rules lists a rule more than once")
         return v
 
-    @field_validator("reason", "decided_by")
+    @field_validator("reason", "decided_by", "ticket")
     @classmethod
     def _one_line_of_text(cls, v: str, info: Any) -> str:
         if not v.strip():
@@ -458,13 +459,6 @@ class ModuleDeviation(BaseModel):
             )
         return v
 
-    @field_validator("ticket")
-    @classmethod
-    def _ticket_ref(cls, v: str) -> str:
-        if not _TICKET_REF_RE.fullmatch(v):
-            raise ValueError("deviation.ticket must look like '#520 (id 603)'")
-        return v
-
     def for_status(self) -> dict[str, Any]:
         """The marker as scoped_mcp_status shows it, every text field capped."""
         return {
@@ -472,7 +466,7 @@ class ModuleDeviation(BaseModel):
             "reason": self.reason[:DEVIATION_REASON_MAX],
             "decided_by": self.decided_by[:DEVIATION_DECIDED_BY_MAX],
             "decided": self.decided.isoformat(),
-            "ticket": self.ticket[:32],
+            "ticket": self.ticket[:DEVIATION_TICKET_MAX],
         }
 
 
@@ -481,7 +475,7 @@ class ModuleConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    # A reviewed exception to a grant-lint rule (githost-scoped-2026-11 p3, #520 (id 603)).
+    # A reviewed exception to a grant-lint rule (v1.21.0).
     # Shown in scoped_mcp_status; enforces nothing. See ModuleDeviation.
     deviation: ModuleDeviation | None = None
 

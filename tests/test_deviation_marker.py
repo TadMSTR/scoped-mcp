@@ -1,7 +1,7 @@
 """Module-level ``deviation`` marker and the ``mcp_proxy_unfiltered`` warning (1.21.0).
 
-githost-scoped-2026-11 p3, #947 (id 1030) and #520 (id 603). A manifest's grant for a
-server can differ from host-forge/scripts' grant ruleset only through a typed, reviewed
+vikunja#947 and vikunja#520. A manifest's grant for a server can differ from the
+operator's grant ruleset only through a typed, reviewed
 marker. scoped-mcp validates the marker's shape at load and shows it in
 ``scoped_mcp_status``, and enforces nothing from it. Separately, every mcp_proxy module
 with no ``tool_allowlist`` says so at startup, because a denylist or no list at all
@@ -34,7 +34,7 @@ VALID = {
     "reason": "read-only upstream; every tool is a read",
     "decided_by": "Ted",
     "decided": "2026-11-08",
-    "ticket": "#520 (id 603)",
+    "ticket": "OPS-520",
 }
 
 
@@ -52,7 +52,7 @@ def test_a_valid_deviation_loads():
         reason=VALID["reason"],
         decided_by="Ted",
         decided=date(2026, 11, 8),
-        ticket="#520 (id 603)",
+        ticket="OPS-520",
     )
 
 
@@ -62,7 +62,7 @@ def test_a_yaml_date_loads():
 
     doc = yaml.safe_load(
         "rules: [hitl_required, consistent_mode]\n"
-        "reason: r\ndecided_by: Ted\ndecided: 2026-11-08\nticket: '#1 (id 2)'\n"
+        "reason: r\ndecided_by: Ted\ndecided: 2026-11-08\nticket: 'OPS-1'\n"
     )
     assert isinstance(doc["decided"], date)
     assert ModuleDeviation.model_validate(doc).decided == date(2026, 11, 8)
@@ -89,11 +89,11 @@ def test_every_field_is_required(field):
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("ticket", "#520", "ticket"),
-        ("ticket", "vikunja#520", "ticket"),
-        ("ticket", "#520 (id 603)\n", "ticket"),
-        ("ticket", "#520 (id 603) ", "ticket"),
-        ("ticket", "520 (id 603)", "ticket"),
+        ("ticket", "", "ticket"),
+        ("ticket", "   ", "blank"),
+        ("ticket", "OPS-520\n", "line-break"),
+        ("ticket", "OPS-520\u2028x", "line-break"),
+        ("ticket", "x" * 65, "ticket"),
         ("rules", [], "rules"),
         ("rules", ["allowlist_requred"], "rules"),
         ("rules", ["allowlist_required", "allowlist_required"], "more than once"),
@@ -128,7 +128,9 @@ def test_an_extra_key_is_refused():
 def test_a_bad_deviation_fails_the_whole_manifest():
     """Refused at load, so a broker never starts on a manifest with a malformed marker."""
     with pytest.raises(ValidationError) as exc:
-        _manifest({"githost-mcp": {"type": "mcp_proxy", "deviation": {**VALID, "ticket": "x"}}})
+        _manifest(
+            {"githost-mcp": {"type": "mcp_proxy", "deviation": {**VALID, "ticket": "OPS-1\nx"}}}
+        )
     assert "deviation" in str(exc.value)
     assert "ticket" in str(exc.value)
 
@@ -148,12 +150,12 @@ def test_for_status_caps_every_text_field():
         reason="r" * 5000,
         decided_by="d" * 500,
         decided=date(2026, 11, 8),
-        ticket="#1 (id 2)" + "z" * 500,
+        ticket="OPS-1" + "z" * 500,
     )
     shown = dev.for_status()
     assert len(shown["reason"]) == manifest_mod.DEVIATION_REASON_MAX
     assert len(shown["decided_by"]) == manifest_mod.DEVIATION_DECIDED_BY_MAX
-    assert len(shown["ticket"]) == 32
+    assert len(shown["ticket"]) == manifest_mod.DEVIATION_TICKET_MAX
     assert shown["decided"] == "2026-11-08"
     assert shown["rules"] == ["consistent_mode"]
 
@@ -191,7 +193,7 @@ def test_status_shows_the_deviation_under_its_module(agent_ctx: AgentContext, tm
         "reason": VALID["reason"],
         "decided_by": "Ted",
         "decided": "2026-11-08",
-        "ticket": "#520 (id 603)",
+        "ticket": "OPS-520",
     }
     assert "deviation" not in result["modules"]["without"]
     # Information only: the module's health is reported exactly as without a marker.

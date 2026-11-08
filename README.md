@@ -415,7 +415,7 @@ modules:
       reason: "read-only upstream; every tool is a read"   # 1-500 chars, one line
       decided_by: "Ted"                 # 1-64 chars, one line
       decided: 2026-11-08               # ISO date
-      ticket: "#520 (id 603)"           # a Vikunja reference, exactly "#N (id M)"
+      ticket: "OPS-520"                 # your tracker's reference, 1-64 chars, one line
 ```
 
 Every field is required, and unknown keys are refused. `rules` is a non-empty list without

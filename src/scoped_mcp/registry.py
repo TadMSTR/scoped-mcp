@@ -742,9 +742,9 @@ def _warn_if_unfiltered_proxy(
 
     Without an allowlist every tool the upstream serves is exposed, and a denylist only
     removes the names it lists: a tool the upstream adds later reaches the agent with
-    nobody deciding it should (#947 (id 1030)). This warns and never refuses. Most
+    nobody deciding it should. This warns and never refuses. Most
     servers have no allowlist yet, and refusing a manifest is grant-lint's job in CI and
-    at deploy, not the broker's at startup (githost-scoped-2026-11 p3).
+    at deploy, not the broker's at startup.
 
     Counts and booleans only, like tool_inventory(): no tool names, URL or header.
     """
@@ -800,7 +800,7 @@ def _register_status_tool(
     is the **authenticated** reporter, so it is the only one that gets tool *names* —
     /health and the health file get counts only.
 
-    deviations (githost-scoped-2026-11 p3): each module's ``deviation`` marker, already
+    deviations (v1.21.0): each module's ``deviation`` marker, already
     capped by ModuleDeviation.for_status(), keyed by manifest name. Shown under that
     module's entry in ``modules``. Authenticated reporter only, like the tool names.
     """

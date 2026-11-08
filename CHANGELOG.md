@@ -9,21 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.21.0] — 2026-11-08
 
-Grant model (githost-scoped-2026-11 part 3). A manifest can record why a module's grant
+Grant model. A manifest can record why a module's grant
 differs from the platform's grant rules, and the broker says at startup which proxies have no
 allowlist. Neither changes which tools are served.
 
 ### Added
-- **`deviation`**, an optional module-level key (#520). A strict model: `rules` (a non-empty,
+- **`deviation`**, an optional module-level key (vikunja#520). A strict model: `rules` (a non-empty,
   repeat-free list from `allowlist_required`, `hitl_required`, `consistent_mode`), `reason`
   (1-500 chars, one line), `decided_by` (1-64 chars, one line), `decided` (ISO date) and
-  `ticket` (exactly `#N (id M)`). Every field is required, and an extra key is refused. A
+  `ticket` (any tracker reference, 1-64 chars, one line). Every field is required, and an extra key is refused. A
   malformed marker fails the manifest at load, with the field named. Metadata only:
-  scoped-mcp enforces nothing from it. The grant linter in host-forge/scripts reads it.
+  scoped-mcp enforces nothing from it. An external grant linter reads it.
 - `scoped_mcp_status` shows a module's `deviation` under that module's entry in `modules`,
   with the text fields capped. It is not added to the shared health map, so `/health` and the
   health file are unchanged.
-- **`mcp_proxy_unfiltered`** startup warning (#947): one per `mcp_proxy` module with no
+- **`mcp_proxy_unfiltered`** startup warning (vikunja#947): one per `mcp_proxy` module with no
   `tool_allowlist`, carrying `module`, `tool_count`, `denylisted` and `has_deviation`. Counts
   and booleans only, never tool names. It fires again when the self-healer recovers such a
   module. It warns and never refuses.
