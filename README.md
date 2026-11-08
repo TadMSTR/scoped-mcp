@@ -468,7 +468,7 @@ Notification modules are **write-only by design** — every agent needs to send 
 
 | Module | Description | Key config |
 |--------|-------------|------------|
-| `mcp_proxy` | Forward tool calls to an upstream MCP server (HTTP or stdio) | `url` or `command`, optional `tool_denylist`, `headers`, `env` |
+| `mcp_proxy` | Forward tool calls to an upstream MCP server (HTTP or stdio) | `url` or `command`, optional `tool_denylist`, `headers`, `env`, `forward_identity`, `result_attributes` |
 
 `mcp_proxy` connects to upstream MCP servers and re-exposes their tools through scoped-mcp.
 Tools are prefixed with the module name (e.g. `memsearch-mcp_search_memory`). Use `tool_denylist`
@@ -531,6 +531,22 @@ reconnects **once** and retries, logging `mcp_proxy_reconnect`. This matters und
 long-lived HTTP transport, where a dead pipe would otherwise persist until restart. The
 reconnect is serialized with a lock so concurrent callers do not race to replace the
 client; normal tool errors still propagate untouched so real outages are not masked.
+
+**Run and task attribution upstream** (v1.20.0) — `forward_identity: true` on an HTTP
+`mcp_proxy` block sends the upstream this call's `X-Forge-Run-Id`, `X-Forge-Task-Id` (each
+only when it is a valid UUID) and `X-Forge-Session-Id` (the broker's per-client session id),
+so an upstream's own audit trail can say which run and task a call belonged to. Off by
+default; attribution only, never authorization (see the
+[threat model](docs/threat-model.md#forwarded-correlation-ids)). scoped-mcp's own
+`tool_call`/`tool_error`/`scope_violation` records carry `run_id` and `task_id`, and the OTel
+span carries `forge.run_id` / `forge.task_id`, whether or not forwarding is on.
+
+**Result attributes** (v1.20.0) — `result_attributes` counts values from a proxied tool's
+result onto its audit record and span, e.g. which qmd collections a `qmd_query` returned
+(`result_attrs: {collections: {docs: 2}}`). Counts of short plain values only, nothing else
+from the result, and the result is never changed. Unknown `mcp_proxy` config keys are logged
+at startup as `mcp_proxy_unknown_config_key`. Both are in
+[manifest-schema.md](docs/manifest-schema.md#forward_identity).
 
 **Result content** (v1.17.2) — how an upstream `CallToolResult` reaches the agent:
 
@@ -770,7 +786,8 @@ guarantees. All are off by default; enable per-agent in the manifest:
 
 - **Rate limiting** (`rate_limits:`, v0.7) — sliding-window per-agent and
   per-tool limits with glob patterns. Backed by `InProcessBackend` (default)
-  or `DragonflyBackend` (`[dragonfly]` extra) for cross-process state.
+  or `DragonflyBackend` (`[dragonfly]` extra) for cross-process state. Since v1.20.0 a
+  refusal carries `retry_after_seconds`, `limit_type` and the limit as written.
 - **Vault-backed credentials** (`credentials.source: vault`, v0.8) — fetch
   credentials from HashiCorp Vault or OpenBao via AppRole; client token auto-renewed in
   the background, with opt-in self-heal re-auth, credential-health surfacing,

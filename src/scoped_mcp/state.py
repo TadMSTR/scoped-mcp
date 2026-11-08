@@ -11,9 +11,10 @@ from __future__ import annotations
 import asyncio
 import collections
 import contextlib
+import math
 import time
 from collections.abc import AsyncIterator
-from typing import Protocol, runtime_checkable
+from typing import NamedTuple, Protocol, runtime_checkable
 
 
 def _sanitize_key_component(value: str) -> str:
@@ -26,12 +27,41 @@ def _sanitize_key_component(value: str) -> str:
     return value.replace(":", "|").replace("\n", "_").replace("\r", "_").replace("\x00", "_")
 
 
+class IncrementResult(NamedTuple):
+    """A sliding-window increment, with how long until a refused call could succeed.
+
+    ``retry_after_seconds`` is set only when the call was refused: the oldest entry's
+    time plus the window, minus now, rounded up and never below 1 (vikunja#1288).
+    """
+
+    allowed: bool
+    count: int
+    retry_after_seconds: int | None = None
+
+
+def retry_after_seconds(oldest: float, window_seconds: float, now: float) -> int:
+    """Whole seconds until the oldest entry leaves the window. Always >= 1.
+
+    All three values must come from the same clock. A refusal means the window is full,
+    so the earliest a retry can succeed is when its oldest entry ages out; rounding up
+    keeps a client that waits exactly this long from being refused again, and the floor
+    of 1 keeps it from being told to retry immediately into the same refusal.
+    """
+    return max(1, math.ceil(oldest + window_seconds - now))
+
+
 @runtime_checkable
 class StateBackend(Protocol):
     """Shared state store for rate limiting and HITL."""
 
     async def increment(self, key: str, window_seconds: int, limit: int) -> tuple[bool, int]:
-        """Sliding window counter. Returns (allowed, current_count)."""
+        """Sliding window counter. Returns (allowed, current_count).
+
+        Backends may also provide ``increment_detailed(key, window_seconds, limit) ->
+        IncrementResult``, which adds ``retry_after_seconds`` on a refusal. It is not part
+        of this Protocol, so a third-party backend written against 1.19 still satisfies
+        ``isinstance(x, StateBackend)``; RateLimitMiddleware uses it when present.
+        """
         ...
 
     async def set_with_ttl(self, key: str, value: str, ttl_seconds: int) -> None: ...
@@ -86,7 +116,7 @@ class _SlidingWindow:
         self._lock = asyncio.Lock()
         self._timestamps: collections.deque[float] = collections.deque()
 
-    async def increment(self, window_seconds: int, limit: int) -> tuple[bool, int]:
+    async def increment(self, window_seconds: int, limit: int) -> IncrementResult:
         now = time.monotonic()
         cutoff = now - window_seconds
         async with self._lock:
@@ -95,9 +125,12 @@ class _SlidingWindow:
                 self._timestamps.popleft()
             count = len(self._timestamps)
             if count >= limit:
-                return False, count
+                oldest = self._timestamps[0] if self._timestamps else now
+                return IncrementResult(
+                    False, count, retry_after_seconds(oldest, window_seconds, now)
+                )
             self._timestamps.append(now)
-            return True, count + 1
+            return IncrementResult(True, count + 1)
 
 
 class InProcessBackend:
@@ -114,6 +147,12 @@ class InProcessBackend:
         self._lock = asyncio.Lock()
 
     async def increment(self, key: str, window_seconds: int, limit: int) -> tuple[bool, int]:
+        result = await self.increment_detailed(key, window_seconds, limit)
+        return result.allowed, result.count
+
+    async def increment_detailed(
+        self, key: str, window_seconds: int, limit: int
+    ) -> IncrementResult:
         async with self._lock:
             if key not in self._windows:
                 self._windows[key] = _SlidingWindow()

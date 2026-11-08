@@ -5,6 +5,8 @@ Emits one span per tool invocation. Span attributes:
     scoped_mcp.agent.type     — agent type
     scoped_mcp.tool.name      — full namespaced tool name
     scoped_mcp.call.status    — "ok" | "error"
+    forge.run_id, forge.task_id — the dispatcher run and task, when present (1.20.0)
+    scoped_mcp.result.<name>  — mcp_proxy result_attributes counts, a JSON string (1.20.0)
 
 Tool arguments (kwargs) are intentionally excluded from span attributes to
 prevent credential or sensitive data leakage to the OTLP collector endpoint.
@@ -40,6 +42,7 @@ from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
 from ..audit import _redact_string
+from ..session import read_run_identity
 
 _TRACER_NAME = "scoped_mcp"
 _log = structlog.get_logger("ops")
@@ -159,6 +162,13 @@ class OtelMiddleware:
             span.set_attribute("scoped_mcp.agent.id", agent_ctx.agent_id)
             span.set_attribute("scoped_mcp.agent.type", agent_ctx.agent_type)
             span.set_attribute("scoped_mcp.tool.name", tool_name)
+            # Dispatcher run and task, when the call carries them: a trace can then be
+            # found by task id without going through an upstream. Attribution only.
+            run_id, task_id = read_run_identity()
+            if run_id:
+                span.set_attribute("forge.run_id", run_id)
+            if task_id:
+                span.set_attribute("forge.task_id", task_id)
             try:
                 result = await call_next()
                 span.set_status(Status(StatusCode.OK))

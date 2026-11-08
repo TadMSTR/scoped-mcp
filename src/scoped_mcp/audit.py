@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import functools
 import json
 import logging
@@ -677,6 +678,41 @@ def get_ops_logger() -> structlog.stdlib.BoundLogger:
 # ── @audited decorator ───────────────────────────────────────────────────────
 
 
+# Per-call annotations a module adds to the call's audit record (mcp_proxy's
+# result_attributes). audited() opens a fresh dict for each call; the tool body runs in the
+# same task, so it sees that dict and writes into it.
+_call_annotations: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "scoped_mcp_call_annotations", default=None
+)
+
+
+def annotate_call(**fields: Any) -> None:
+    """Add fields to the in-flight call's ``tool_call`` audit record. No-op outside one.
+
+    For bounded, non-sensitive values only (counts of short plain strings); the caller is
+    responsible for that, as mcp_proxy_config.count_values() is.
+    """
+    current = _call_annotations.get()
+    if current is not None:
+        current.update(fields)
+
+
+def _set_result_span_attributes(annotations: dict[str, Any]) -> None:
+    """One ``scoped_mcp.result.<name>`` span attribute (a JSON string) per extractor."""
+    attrs = annotations.get("result_attrs")
+    if not attrs:
+        return
+    try:
+        from opentelemetry import trace as _otel
+
+        span = _otel.get_current_span()
+        if span.is_recording():
+            for name, counts in attrs.items():
+                span.set_attribute(f"scoped_mcp.result.{name}", json.dumps(counts, sort_keys=True))
+    except ImportError:
+        pass
+
+
 def audited(tool_name: str) -> Callable:
     """Decorator factory that wraps a tool handler with audit logging.
 
@@ -715,14 +751,24 @@ def audited(tool_name: str) -> Callable:
 
             _inject_session_id_to_current_span(session_id)
 
+            # The dispatcher run and task this call belongs to, validated UUIDs or None.
+            # Attribution only: they are recorded here and never gate anything.
+            from .session import read_run_identity
+
+            run_id, task_id = read_run_identity()
+
             log_kwargs: dict[str, Any] = {
                 "tool": tool_name,
                 "agent_id": agent_id,
                 "session_id": session_id,
+                "run_id": run_id,
+                "task_id": task_id,
             }
             if _log_args:
                 log_kwargs["args"] = kwargs
 
+            annotations: dict[str, Any] = {}
+            token = _call_annotations.set(annotations)
             try:
                 result = await fn(*args, **kwargs)
                 elapsed_ms = round((time.monotonic() - start) * 1000, 2)
@@ -730,7 +776,10 @@ def audited(tool_name: str) -> Callable:
                 if _response_filter is not None:
                     result = _response_filter.filter_response(result, tool_name, agent_id)
 
-                logger.info("tool_call", status="ok", elapsed_ms=elapsed_ms, **log_kwargs)
+                _set_result_span_attributes(annotations)
+                logger.info(
+                    "tool_call", status="ok", elapsed_ms=elapsed_ms, **annotations, **log_kwargs
+                )
 
                 if _agent_bus_emit and _agent_bus_comms_dir:
                     with contextlib.suppress(RuntimeError):
@@ -776,6 +825,8 @@ def audited(tool_name: str) -> Callable:
                         _t.add_done_callback(lambda _: None)
 
                 raise
+            finally:
+                _call_annotations.reset(token)
 
         return wrapper
 
