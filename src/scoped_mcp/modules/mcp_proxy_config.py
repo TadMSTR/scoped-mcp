@@ -145,7 +145,8 @@ def validate_proxy_config(config: dict[str, Any]) -> list[str]:
                 f"{where}.path must be a dotted path with optional [] on a segment, "
                 "e.g. results[].file"
             )
-        if ext["transform"] not in TRANSFORMS:
+        # Type first: `in TRANSFORMS` on a list or mapping raises TypeError.
+        if not isinstance(ext["transform"], str) or ext["transform"] not in TRANSFORMS:
             errors.append(f"{where}.transform must be one of: {', '.join(sorted(TRANSFORMS))}")
         name = ext["name"]
         if not isinstance(name, str) or not _NAME_RE.fullmatch(name):

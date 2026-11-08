@@ -361,6 +361,10 @@ def test_distinct_values_are_capped_with_overflow_as_other():
     ("extractors", "message"),
     [
         ([{**_QMD_EXTRACTOR, "transform": "upper"}], "transform must be one of"),
+        # Unhashable values: a dict membership test on them raises TypeError, which
+        # would crash `scoped-mcp validate` instead of reporting the problem.
+        ([{**_QMD_EXTRACTOR, "transform": ["first_path_segment"]}], "transform must be one of"),
+        ([{**_QMD_EXTRACTOR, "transform": {"a": 1}}], "transform must be one of"),
         ([{**_QMD_EXTRACTOR, "path": "results[*].file"}], "path must be a dotted path"),
         ([{**_QMD_EXTRACTOR, "path": "a..b"}], "path must be a dotted path"),
         ([{**_QMD_EXTRACTOR, "extra": 1}], "exactly the keys"),
