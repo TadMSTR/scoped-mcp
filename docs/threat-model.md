@@ -105,6 +105,11 @@ and never alters the call.
 **mcp_proxy loopback access**
 Unlike `http_proxy`, `mcp_proxy` does not block loopback or RFC1918 URLs — its purpose is specifically to proxy services running on the local host. The upstream URL or command is operator-declared in the manifest, not user-supplied. Agents can call any tool exposed by the upstream server that passes `tool_allowlist`/`tool_denylist` filtering. If an upstream server has weak input validation, that is not a scoped-mcp concern.
 
+**mcp_proxy grant filtering and the deviation marker (v1.21.0)**
+A `tool_denylist` fails open: it removes only the names it lists, so a tool the upstream adds later is exposed without anyone deciding to expose it. A module with no list exposes everything. scoped-mcp does not refuse either, because many deployments legitimately run upstreams without an allowlist. It logs `mcp_proxy_unfiltered` at startup for each such module, so the exposure is visible. Refusing a manifest is left to an external linter run in CI and before a deploy.
+
+The module-level `deviation` marker is metadata. Nothing gates on it at runtime: it changes no filtering and no HITL decision. Anyone who can edit a manifest can add one, so it does not raise the bar for an attacker who already has manifest write access. That attacker could equally widen the allowlist directly. The controls are that a linter prints every exemption with its reason and ticket, and that the manifest change is reviewed. The marker's text is operator-written, but `scoped_mcp_status` caps it anyway, and the load-time validator refuses control and line-break characters. It is shown only on the authenticated status tool, never on `/health` or in the health file.
+
 **mcp_proxy schema validation — semantic gap (v0.9)**
 v0.9 introduced JSON Schema validation of arguments forwarded through `mcp_proxy`: the upstream tool's declared `inputSchema` is cached at startup and every `tools/call` is validated before forwarding. This catches *shape* and *type* errors — missing required fields, wrong types, out-of-range values declared by the schema, and unknown fields when the schema sets `additionalProperties: false`.
 

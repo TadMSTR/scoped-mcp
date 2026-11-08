@@ -21,6 +21,7 @@ Each key under `modules` is a module name. The value is:
 | `mode` | `"read"` or `"write"` | `null` | Tool mode. `read` = read-only tools; `write` = read + write tools; `null` = all tools (write-only modules like ntfy) |
 | `type` | string | `null` | Module class name. Set when multiple instances of the same module class are needed (e.g. two `mcp_proxy` entries for separate upstream servers). When absent, the manifest key is used as the class name. |
 | `config` | object | `{}` | Module-specific configuration |
+| `deviation` | object | `null` | v1.21.0. A reviewed exception to a grant-lint rule: `rules`, `reason`, `decided_by`, `decided`, `ticket`, all required. Shown in `scoped_mcp_status`; enforces nothing. See README, "Deviation marker". |
 
 ### mcp_proxy config
 
