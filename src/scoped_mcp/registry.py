@@ -735,6 +735,39 @@ def _manifest_status_fields(manifest_snapshot: dict[str, Any]) -> dict[str, Any]
     return fields
 
 
+def _warn_if_unfiltered_proxy(
+    module_name: str, module_cfg: ModuleConfig, instance: ToolModule, ops: Any
+) -> None:
+    """Log ``mcp_proxy_unfiltered`` for an mcp_proxy module with no tool_allowlist.
+
+    Without an allowlist every tool the upstream serves is exposed, and a denylist only
+    removes the names it lists: a tool the upstream adds later reaches the agent with
+    nobody deciding it should (#947 (id 1030)). This warns and never refuses. Most
+    servers have no allowlist yet, and refusing a manifest is grant-lint's job in CI and
+    at deploy, not the broker's at startup (githost-scoped-2026-11 p3).
+
+    Counts and booleans only, like tool_inventory(): no tool names, URL or header.
+    """
+    if getattr(instance, "name", None) != "mcp_proxy":
+        return
+    inventory_fn = getattr(instance, "tool_inventory", None)
+    if not callable(inventory_fn):
+        return
+    try:
+        inventory = inventory_fn()
+    except Exception:  # a diagnostic must never break startup
+        return
+    if inventory.get("allowlisted"):
+        return
+    ops.warning(
+        "mcp_proxy_unfiltered",
+        module=module_name,
+        tool_count=inventory.get("tool_count"),
+        denylisted=bool(inventory.get("denylisted")),
+        has_deviation=module_cfg.deviation is not None,
+    )
+
+
 def _register_status_tool(
     server: FastMCP,
     module_health: dict,
@@ -742,6 +775,7 @@ def _register_status_tool(
     vault_source: object = None,
     optional_modules: set[str] | None = None,
     instances: dict[str, ToolModule] | None = None,
+    deviations: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     """Register scoped_mcp_status as a built-in tool on the parent server.
 
@@ -765,10 +799,15 @@ def _register_status_tool(
     reference with build_server so the self-healer's replacements are picked up. This
     is the **authenticated** reporter, so it is the only one that gets tool *names* —
     /health and the health file get counts only.
+
+    deviations (githost-scoped-2026-11 p3): each module's ``deviation`` marker, already
+    capped by ModuleDeviation.for_status(), keyed by manifest name. Shown under that
+    module's entry in ``modules``. Authenticated reporter only, like the tool names.
     """
     manifest_snapshot = manifest_snapshot or {}
     optional_modules = optional_modules or set()
     instances = {} if instances is None else instances
+    deviations = deviations or {}
 
     async def scoped_mcp_status() -> dict:
         """Return the health status of all manifest-declared modules.
@@ -793,6 +832,11 @@ def _register_status_tool(
         agent proxying the same upstream under the same filtering means this process is
         serving a stale tool set and needs a restart.
 
+        A module entry carries ``deviation`` when its manifest block records a reviewed
+        exception to a grant-lint rule: the rules exempted, the reason, who decided,
+        when, and the ticket. It is information only and changes nothing about which
+        tools are served.
+
         session_registry reports whether HITL approvals are being attributed to a
         session: disabled (no DSN), uninitialised (no writer has run yet),
         unavailable (configured but the pool could not be built — approvals are
@@ -805,8 +849,14 @@ def _register_status_tool(
             module_health, optional_modules
         )
         healthy = len(required_failed) == 0
+        # A copy per entry: module_health is shared with the lifespan and /health, which
+        # must not grow a deviation field.
+        modules = {
+            name: {**health, "deviation": deviations[name]} if name in deviations else health
+            for name, health in module_health.items()
+        }
         result = {
-            "modules": module_health,
+            "modules": modules,
             "failed_count": len(required_failed),
             "total_count": len(module_health),
             "healthy": healthy,
@@ -1150,6 +1200,7 @@ def build_server(
         if hasattr(instance, "_manifest_key"):
             instance._manifest_key = module_name
         _apply_content_limits(instance, manifest)
+        _warn_if_unfiltered_proxy(module_name, module_cfg, instance, ops)
         module_health[module_name] = {"status": "instantiated"}
         all_instances.append((module_name, module_cfg, instance))
 
@@ -1205,6 +1256,7 @@ def build_server(
         if hasattr(instance, "_manifest_key"):
             instance._manifest_key = module_name
         _apply_content_limits(instance, manifest)
+        _warn_if_unfiltered_proxy(module_name, module_cfg, instance, ops)
 
         try:
             await instance.startup()
@@ -1302,6 +1354,11 @@ def build_server(
         vault_source=vault_source,
         optional_modules=optional_modules,
         instances=instance_registry,
+        deviations={
+            name: cfg.deviation.for_status()
+            for name, cfg in manifest.modules.items()
+            if cfg.deviation is not None
+        },
     )
     registered_tool_names.append("scoped_mcp_status")
 

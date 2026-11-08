@@ -396,6 +396,37 @@ workspace_access:
 `extra="ignore"`; modeling it as a typed field lets the top-level model keep
 `extra="forbid"` while still validating the block present in every agent manifest.
 
+### Deviation marker
+
+A module block may carry a `deviation` (v1.21.0). It records a reviewed exception to a
+grant-lint rule: a rule that an external manifest linter applies to the platform's
+manifests, such as "this server must use an allowlist". scoped-mcp validates its shape at
+load and shows it under the module's entry in `scoped_mcp_status`. **It enforces nothing.**
+No tool is exposed, hidden, allowed or refused because of it.
+
+```yaml
+modules:
+  docs-mcp:
+    type: mcp_proxy
+    config:
+      url: http://127.0.0.1:8500/mcp
+    deviation:
+      rules: [allowlist_required]       # grant-lint rules this module is exempt from
+      reason: "read-only upstream; every tool is a read"   # 1-500 chars, one line
+      decided_by: "Ted"                 # 1-64 chars, one line
+      decided: 2026-11-08               # ISO date
+      ticket: "#520 (id 603)"           # a Vikunja reference, exactly "#N (id M)"
+```
+
+Every field is required, and unknown keys are refused. `rules` is a non-empty list without
+repeats, drawn from `allowlist_required`, `hitl_required` and `consistent_mode`. A malformed
+marker fails the whole manifest at load, with the field named. `scoped_mcp_status` caps every
+text field on output. The marker is not shown on the unauthenticated `/health` route or in the
+health file.
+
+`deviation` is a module-level key, beside `type` and `config`. Inside `config:` it would be an
+unknown `mcp_proxy` key, warned about and ignored.
+
 ### Manifest-to-Tools Mapping
 
 ```mermaid
@@ -468,11 +499,19 @@ Notification modules are **write-only by design** — every agent needs to send 
 
 | Module | Description | Key config |
 |--------|-------------|------------|
-| `mcp_proxy` | Forward tool calls to an upstream MCP server (HTTP or stdio) | `url` or `command`, optional `tool_denylist`, `headers`, `env`, `forward_identity`, `result_attributes` |
+| `mcp_proxy` | Forward tool calls to an upstream MCP server (HTTP or stdio) | `url` or `command`, optional `tool_allowlist`, `tool_denylist`, `headers`, `env`, `forward_identity`, `result_attributes` |
 
 `mcp_proxy` connects to upstream MCP servers and re-exposes their tools through scoped-mcp.
-Tools are prefixed with the module name (e.g. `memsearch-mcp_search_memory`). Use `tool_denylist`
-to hide specific upstream tools from the agent.
+Tools are prefixed with the module name (e.g. `memsearch-mcp_search_memory`). Use
+`tool_allowlist` to expose only the tools you name, or `tool_denylist` to hide specific
+upstream tools from the agent.
+
+**Prefer an allowlist for any upstream with write tools.** A denylist removes only the names
+it lists, so a tool the upstream adds later reaches the agent with nobody having decided it
+should. With no list at all, every upstream tool is exposed. Since v1.21.0, each `mcp_proxy`
+module without a `tool_allowlist` logs one `mcp_proxy_unfiltered` warning at startup, with
+the module name, the exposed tool count, `denylisted` and `has_deviation`. It is a warning,
+not a refusal.
 
 **Header injection** — pass custom HTTP headers to upstream streamable-http servers:
 
