@@ -31,7 +31,7 @@ class IncrementResult(NamedTuple):
     """A sliding-window increment, with how long until a refused call could succeed.
 
     ``retry_after_seconds`` is set only when the call was refused: the oldest entry's
-    time plus the window, minus now, rounded up and never below 1 (#1288 (id 1371)).
+    time plus the window, minus now, rounded up and never below 1 (vikunja#1288).
     """
 
     allowed: bool

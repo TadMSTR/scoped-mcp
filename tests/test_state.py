@@ -275,7 +275,7 @@ async def test_dragonfly_set_get_delete(dragonfly_backend) -> None:
 @pytest.mark.asyncio
 @_skip_no_dragonfly
 async def test_dragonfly_refusal_carries_retry_after(dragonfly_backend) -> None:
-    """The Lua script returns the oldest entry's score with a refusal (#1288 (id 1371))."""
+    """The Lua script returns the oldest entry's score with a refusal (vikunja#1288)."""
     key = "rate:retryafter"
     await dragonfly_backend._client.delete(dragonfly_backend._key(key))
     for _ in range(2):

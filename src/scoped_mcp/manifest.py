@@ -562,7 +562,7 @@ class Manifest(BaseModel):
                         " (0 disables the cap)"
                     )
             # forward_identity / result_attributes: the same checks McpProxyModule runs at
-            # init, so `scoped-mcp validate` refuses them first (githost-scoped-2026-11 p2).
+            # init, so `scoped-mcp validate` refuses them first.
             # Unknown keys only warn, at module init: refusing them would stop brokers
             # whose manifests carry keys older releases tolerated.
             if module_name == "mcp_proxy":

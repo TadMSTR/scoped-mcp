@@ -94,7 +94,11 @@ them unless the operator opts in per module.
 **mcp_proxy result attributes (v1.20.0)**
 `result_attributes` reads a proxied result after the call to count values onto the audit
 record. Only counts of values matching `[A-Za-z0-9_.-]{1,64}` are kept (anything else is
-`other`, at most 32 keys), so result text cannot reach the audit log or a span through it. The
+`other`, at most 32 keys), so free text cannot reach the audit log or a span through it. A
+value that matches the pattern is recorded verbatim, though, and many credentials do (a 40-hex
+token, for one). The guarantee is only as good as the operator's choice of `path`: it must
+select non-sensitive identifier fields, as `results[].file` with `first_path_segment` does for
+qmd. The
 result itself is passed to the agent unchanged; an extractor that fails records its error class
 and never alters the call.
 

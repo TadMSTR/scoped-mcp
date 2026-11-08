@@ -24,7 +24,7 @@ except ImportError as _e:
 # KEYS[1] = key, ARGV[1] = now (ms), ARGV[2] = window_ms, ARGV[3] = limit, ARGV[4] = uuid
 # Returns {count after the add} when allowed, or {-1, count, oldest score (ms)} when over
 # the limit. The oldest score is what a refusal's retry_after_seconds is computed from
-# (#1288 (id 1371)); reading it here keeps it atomic with the count, and saves the
+# (vikunja#1288); reading it here keeps it atomic with the count, and saves the
 # separate ZCARD round trip the over-limit path used to make.
 _SLIDING_WINDOW_LUA = """
 local key = KEYS[1]

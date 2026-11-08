@@ -15,10 +15,13 @@ result_attributes
     A list of ``{tool, path, transform, name}``. After a successful call of ``tool``, the
     values at ``path`` in the result are transformed and counted, and the counts are
     recorded on the audit record (``result_attrs: {name: {value: count}}``) and as one span
-    attribute (``scoped_mcp.result.<name>``). Nothing else from the result is recorded, and
-    the result returned to the agent is not changed.
+    attribute (``scoped_mcp.result.<name>``). A transformed value matching
+    ``[A-Za-z0-9_.-]{1,64}`` IS recorded verbatim, as a key (anything else counts as
+    ``other``), so ``path`` must select only non-sensitive identifier fields: a token-shaped
+    value at that path would land in the audit log and the span. Nothing outside ``path``
+    is recorded, and the result returned to the agent is not changed.
 
-The caps below are constants on purpose (githost-scoped-2026-11 p2): a manifest cannot
+The caps below are constants on purpose: a manifest cannot
 raise them.
 """
 

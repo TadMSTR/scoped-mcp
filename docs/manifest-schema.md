@@ -119,7 +119,10 @@ collections a query's results came from.
 
 - The counts go on the `tool_call` audit record as `result_attrs: {collections: {docs: 2,
   agent-memory: 1}}` and on the span as `scoped_mcp.result.collections` (a JSON string).
-  Nothing else from the result is recorded: no query text, snippets or paths.
+  Nothing outside `path` is recorded. A value at `path` that matches
+  `[A-Za-z0-9_.-]{1,64}` after the transform **is** recorded verbatim, as a key, so point
+  `path` only at non-sensitive identifier fields: many credentials (a 40-hex token, say)
+  match that pattern.
 - `path` is dotted keys with optional `[]` on a segment for "each item of this list". No
   expressions or other wildcards.
 - `transform` is one of a closed set: `first_path_segment`.

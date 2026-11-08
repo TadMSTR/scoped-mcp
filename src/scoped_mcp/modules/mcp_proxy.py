@@ -89,8 +89,9 @@ Config:
         call, e.g. ``qmd_query``, or the upstream name — the values at ``path``
         (``results[].file``) are transformed (``first_path_segment``) and counted onto
         the audit record as ``result_attrs`` and the span as ``scoped_mcp.result.<name>``.
-        Counts of short plain values only; the result itself is never recorded or
-        changed. See mcp_proxy_config.py.
+        Counts of short plain values only: a value matching the pattern is recorded
+        verbatim as a key, so ``path`` must select non-sensitive fields. Nothing outside
+        ``path`` is recorded, and the result is never changed. See mcp_proxy_config.py.
 
     Any other key is ignored and logged once at startup as
     ``mcp_proxy_unknown_config_key`` (key name only).

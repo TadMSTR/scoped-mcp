@@ -212,7 +212,7 @@ def test_invalid_rate_spec_raises() -> None:
 
 
 # ---------------------------------------------------------------------------
-# retry_after_seconds on a refusal (#1288 (id 1371))
+# retry_after_seconds on a refusal (vikunja#1288)
 # ---------------------------------------------------------------------------
 
 

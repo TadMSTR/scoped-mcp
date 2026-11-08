@@ -125,7 +125,7 @@ class RateLimitMiddleware:
         from ..exceptions import ConfigError
 
         # retry_after_seconds tells the caller when the window frees, instead of leaving
-        # it to guess and retry into the same refusal (#1288 (id 1371)). The window is
+        # it to guess and retry into the same refusal (vikunja#1288). The window is
         # per agent identity: every subagent and concurrent session of this agent shares
         # it, so the count includes calls this caller did not make.
         retry = (

@@ -1,6 +1,6 @@
 """forward_identity, result_attributes and unknown-key warnings on mcp_proxy (1.20.0).
 
-githost-scoped-2026-11 p2. scoped-mcp already read X-Forge-Run-Id / X-Forge-Task-Id on
+scoped-mcp already read X-Forge-Run-Id / X-Forge-Task-Id on
 every call but used them only for HITL attribution, and mcp_proxy sent an upstream only
 the manifest's static headers. These tests drive a real loopback FastMCP upstream that
 echoes the headers it received, so they check what goes over the wire.
