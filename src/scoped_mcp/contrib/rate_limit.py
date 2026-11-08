@@ -23,7 +23,7 @@ from typing import Any
 
 import structlog
 
-from ..state import StateBackend, _sanitize_key_component
+from ..state import IncrementResult, StateBackend, _sanitize_key_component
 
 logger = structlog.get_logger("audit")
 
@@ -64,26 +64,83 @@ class RateLimitMiddleware:
         self._state = state
         self._agent_id = agent_id
         self._global_limit = _parse_rate(global_limit) if global_limit else None
+        # The spec as written in the manifest, quoted back in a refusal.
+        self._global_spec = global_limit
         # Preserve insertion order — first match wins for glob patterns
-        self._per_tool: list[tuple[str, int, int]] = []
+        self._per_tool: list[tuple[str, int, int, str]] = []
         for pattern, spec in (per_tool or {}).items():
             lim, win = _parse_rate(spec)
-            self._per_tool.append((pattern, lim, win))
+            self._per_tool.append((pattern, lim, win, spec))
 
     def _global_key(self) -> str:
         return "rate:global"
 
-    def _match_per_tool(self, tool_name: str) -> tuple[str, int, int] | None:
-        """Return (counter_key, limit, window_seconds) for the first matching per_tool pattern.
+    def _match_per_tool(self, tool_name: str) -> tuple[str, int, int, str] | None:
+        """Return (counter_key, limit, window_seconds, spec) for the first matching pattern.
 
         The counter key is derived from the PATTERN, not the individual tool name, so that
         glob patterns like 'mcp_proxy.*' share a single sliding window across all matching tools.
         """
-        for pattern, lim, win in self._per_tool:
+        for pattern, lim, win, spec in self._per_tool:
             if fnmatch.fnmatch(tool_name, pattern):
                 # Use sanitized pattern as key so all tools matching the pattern share a counter
-                return f"rate:{_sanitize_key_component(pattern)}", lim, win
+                return f"rate:{_sanitize_key_component(pattern)}", lim, win, spec
         return None
+
+    async def _increment(self, key: str, window: int, limit: int) -> IncrementResult:
+        """increment_detailed() when the backend has it, else the 1.19 two-tuple form."""
+        detailed = getattr(self._state, "increment_detailed", None)
+        if detailed is not None:
+            return await detailed(key, window, limit)
+        allowed, count = await self._state.increment(key, window, limit)
+        return IncrementResult(allowed, count)
+
+    async def _check(
+        self, tool_name: str, key: str, limit_type: str, spec: str, lim: int, win: int
+    ) -> None:
+        try:
+            result = await self._increment(key, win, lim)
+        except Exception:
+            # fail-closed: backend errors block the call rather than silently bypassing limits
+            logger.warning(
+                "rate_limit_backend_error",
+                agent_id=self._agent_id,
+                tool_name=tool_name,
+                limit_type=limit_type,
+            )
+            raise
+        if result.allowed:
+            return
+        logger.warning(
+            "rate_limit_exceeded",
+            agent_id=self._agent_id,
+            tool_name=tool_name,
+            limit_type=limit_type,
+            limit_spec=spec,
+            current_count=result.count,
+            limit=lim,
+            window_seconds=win,
+            retry_after_seconds=result.retry_after_seconds,
+        )
+        from ..exceptions import ConfigError
+
+        # retry_after_seconds tells the caller when the window frees, instead of leaving
+        # it to guess and retry into the same refusal (#1288 (id 1371)). The window is
+        # per agent identity: every subagent and concurrent session of this agent shares
+        # it, so the count includes calls this caller did not make.
+        retry = (
+            f", retry_after_seconds={result.retry_after_seconds}"
+            if result.retry_after_seconds is not None
+            else ""
+        )
+        if limit_type == "global":
+            subject = f"agent '{self._agent_id}': global limit {spec}"
+        else:
+            subject = f"tool '{tool_name}' on agent '{self._agent_id}': limit {spec}"
+        raise ConfigError(
+            f"Rate limit exceeded for {subject} ({lim}/{win}s), current={result.count}, "
+            f"limit_type={limit_type}{retry}"
+        )
 
     async def __call__(
         self,
@@ -95,64 +152,14 @@ class RateLimitMiddleware:
         # Check global limit first
         if self._global_limit is not None:
             lim, win = self._global_limit
-            try:
-                allowed, count = await self._state.increment(self._global_key(), win, lim)
-            except Exception:
-                # fail-closed: backend errors block the call rather than silently bypassing limits
-                logger.warning(
-                    "rate_limit_backend_error",
-                    agent_id=self._agent_id,
-                    tool_name=tool_name,
-                    limit_type="global",
-                )
-                raise
-            if not allowed:
-                logger.warning(
-                    "rate_limit_exceeded",
-                    agent_id=self._agent_id,
-                    tool_name=tool_name,
-                    limit_type="global",
-                    current_count=count,
-                    limit=lim,
-                    window_seconds=win,
-                )
-                from ..exceptions import ConfigError
-
-                raise ConfigError(
-                    f"Rate limit exceeded for agent '{self._agent_id}': "
-                    f"global limit {lim}/{win}s, current={count}"
-                )
+            await self._check(
+                tool_name, self._global_key(), "global", self._global_spec or "", lim, win
+            )
 
         # Check per-tool limit
         per_tool_match = self._match_per_tool(tool_name)
         if per_tool_match is not None:
-            counter_key, lim, win = per_tool_match
-            try:
-                allowed, count = await self._state.increment(counter_key, win, lim)
-            except Exception:
-                # fail-closed: backend errors block the call rather than silently bypassing limits
-                logger.warning(
-                    "rate_limit_backend_error",
-                    agent_id=self._agent_id,
-                    tool_name=tool_name,
-                    limit_type="per_tool",
-                )
-                raise
-            if not allowed:
-                logger.warning(
-                    "rate_limit_exceeded",
-                    agent_id=self._agent_id,
-                    tool_name=tool_name,
-                    limit_type="per_tool",
-                    current_count=count,
-                    limit=lim,
-                    window_seconds=win,
-                )
-                from ..exceptions import ConfigError
-
-                raise ConfigError(
-                    f"Rate limit exceeded for tool '{tool_name}' on agent '{self._agent_id}': "
-                    f"limit {lim}/{win}s, current={count}"
-                )
+            counter_key, lim, win, spec = per_tool_match
+            await self._check(tool_name, counter_key, "per_tool", spec, lim, win)
 
         return await call_next()

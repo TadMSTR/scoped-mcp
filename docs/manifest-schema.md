@@ -58,6 +58,77 @@ modules:
 | `discovery_timeout_seconds` | float | `10.0` | Timeout for connecting to the upstream server at startup |
 | `max_binary_bytes` | int | manifest `content_limits.max_binary_bytes` | Per-module override of the binary block cap. `0` disables it for this module (v1.19.0) |
 | `env` | dict[str,str] | `{}` | Environment variables for a spawned stdio child. Ignored on HTTP transport (warns since v1.16.0). Extends the MCP SDK's conditionally-forwarded safe base rather than replacing it — a child inherits nothing else from scoped-mcp. |
+| `headers` | dict[str,str] | `{}` | Static HTTP headers sent to the upstream on every call (HTTP only) |
+| `forward_identity` | bool | `false` | HTTP only (v1.20.0). Adds `X-Forge-Run-Id`, `X-Forge-Task-Id` and `X-Forge-Session-Id` to every proxied call, so the upstream can attribute it. See [forward_identity](#forward_identity) |
+| `result_attributes` | list | — | Up to 8 extractors that count values from a tool's result onto the audit record and span (v1.20.0). See [result_attributes](#result_attributes) |
+
+Any other key is ignored. Since v1.20.0 each one is logged once at startup as
+`mcp_proxy_unknown_config_key` with the key name only (not refused: a manifest carrying a
+key an older release tolerated must not stop the broker). A typo such as
+`forward_identiy` is visible there rather than silently doing nothing.
+
+#### forward_identity
+
+```yaml
+  githost-mcp:
+    type: mcp_proxy
+    config:
+      url: "http://127.0.0.1:8620/mcp/"
+      headers:
+        Authorization: "Bearer ${GITHOST_MCP_AUTH_TOKEN}"
+      forward_identity: true
+```
+
+With `forward_identity: true`, each proxied call adds three request headers, built per call:
+
+| Header | Value | Sent when |
+|---|---|---|
+| `X-Forge-Run-Id` | the dispatcher run id this call arrived with | it validated as a UUID |
+| `X-Forge-Task-Id` | the task-queue task id this call arrived with | it validated as a UUID |
+| `X-Forge-Session-Id` | this broker's per-client session id (the audit `session_id`) | it matches `[A-Za-z0-9._:-]{1,128}` |
+
+A missing or invalid value is omitted, never sent empty. The run and task ids are the ones
+scoped-mcp already reads from its own inbound `X-Forge-Run-Id` / `X-Forge-Task-Id` headers
+(or `FORGE_RUN_ID` / `FORGE_TASK_ID` on stdio). The default is off: an upstream receives
+these ids only when its manifest block asks for them, which matters for a third-party
+upstream. `scoped-mcp validate` refuses a block whose static `headers` name any of the three
+while `forward_identity` is true, since a static value would mask the real one. On a stdio
+upstream the key is ignored with one `mcp_proxy_forward_identity_ignored` warning.
+
+These ids are **attribution, not authorization**: see the
+[threat model](threat-model.md#forwarded-correlation-ids).
+
+#### result_attributes
+
+```yaml
+  qmd:
+    type: mcp_proxy
+    config:
+      url: http://localhost:8181/mcp
+      result_attributes:
+        - tool: qmd_query            # the name agents call; the upstream name also matches
+          path: "results[].file"
+          transform: first_path_segment
+          name: collections
+```
+
+After a successful call of `tool`, scoped-mcp reads the result's `structuredContent` (or else
+its first text block parsed as JSON), takes every value at `path`, applies `transform`, and
+counts the results. For qmd, `results[].file` is `<collection>/<path>`, so this records which
+collections a query's results came from.
+
+- The counts go on the `tool_call` audit record as `result_attrs: {collections: {docs: 2,
+  agent-memory: 1}}` and on the span as `scoped_mcp.result.collections` (a JSON string).
+  Nothing else from the result is recorded: no query text, snippets or paths.
+- `path` is dotted keys with optional `[]` on a segment for "each item of this list". No
+  expressions or other wildcards.
+- `transform` is one of a closed set: `first_path_segment`.
+- A value must match `[A-Za-z0-9_.-]{1,64}` or it is counted as `other`. At most 32 distinct
+  keys per extractor, including `other`.
+- A result that is not JSON, or a missing path, records `result_attrs_error` (the error class)
+  and never fails or alters the call. The result returned to the agent is unchanged.
+- `scoped-mcp validate` refuses an unknown transform, a malformed path, a duplicate `name`,
+  extra keys, or more than 8 extractors per module.
 
 > **stdio transport lifecycle:** Two subprocess spawns occur per module lifetime. A short-lived
 > subprocess runs during startup for tool discovery (`tools/list`). A persistent subprocess is
@@ -181,6 +252,19 @@ rate_limits:
 ```
 
 Format: `<N>/second`, `<N>/minute`, or `<N>/hour`. Glob patterns in `per_tool` share a single sliding window across all matched tool names. Rate limit violations fail closed — backend errors block tool calls rather than silently bypassing limits.
+
+The window is per agent identity: every subagent and concurrent session of one agent shares
+it. Since v1.20.0 a refusal says when the window frees:
+
+```
+Rate limit exceeded for agent 'research': global limit 120/minute (120/60s), current=120, limit_type=global, retry_after_seconds=14
+```
+
+`retry_after_seconds` is the oldest counted call's time plus the window, minus now, rounded
+up and never below 1. The `rate_limit_exceeded` audit line carries it too, with `limit_type`
+and `limit_spec` (the spec as written in the manifest). A custom `StateBackend` that
+implements only `increment()` still works; its refusals simply carry no
+`retry_after_seconds` (implement `increment_detailed()` returning `IncrementResult` to add it).
 
 > **Pattern grammar:** Tool names are always `{manifest_key}_{method}` (underscore-joined). Use `mcp_proxy_*`, not `mcp_proxy.*` — a dotted glob matches nothing. scoped-mcp warns at startup for any `per_tool` pattern that matches no registered tool.
 

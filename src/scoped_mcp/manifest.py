@@ -561,6 +561,14 @@ class Manifest(BaseModel):
                         f"modules.{key}: max_binary_bytes must be an integer >= 0"
                         " (0 disables the cap)"
                     )
+            # forward_identity / result_attributes: the same checks McpProxyModule runs at
+            # init, so `scoped-mcp validate` refuses them first (githost-scoped-2026-11 p2).
+            # Unknown keys only warn, at module init: refusing them would stop brokers
+            # whose manifests carry keys older releases tolerated.
+            if module_name == "mcp_proxy":
+                from .modules.mcp_proxy_config import validate_proxy_config
+
+                errors.extend(f"modules.{key}: {p}" for p in validate_proxy_config(mod_cfg.config))
             # mode: read has no effect on mcp_proxy — capability restriction for proxied
             # tools requires tool_denylist, not mode filtering
             if module_name == "mcp_proxy" and mod_cfg.mode == "read":

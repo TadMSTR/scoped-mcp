@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.0] — 2026-11-08
+
+Attribution and telemetry (githost-scoped-2026-11 part 2). scoped-mcp already read
+`X-Forge-Run-Id` / `X-Forge-Task-Id` on every call, but used them only for HITL attribution.
+They now reach an upstream that asks for them, scoped-mcp's own audit records and spans, and
+rate-limit refusals say when to retry.
+
+### Added
+- **`forward_identity`** (`mcp_proxy`, HTTP only, default off). With `true`, every proxied
+  call adds `X-Forge-Run-Id` and `X-Forge-Task-Id` (each only when it validated as a UUID,
+  never sent empty) and `X-Forge-Session-Id` (this broker's per-client session id). The
+  transport is built per call, merged over the static `headers`. `scoped-mcp validate` refuses
+  a block whose static `headers` name one of the three while it is on. On stdio it is ignored
+  with one `mcp_proxy_forward_identity_ignored` warning. **Attribution, not authorization**:
+  nothing may gate on these ids (docs/threat-model.md).
+- **`run_id` and `task_id` on `tool_call`, `tool_error` and `scope_violation` records**, null
+  when absent, and **`forge.run_id` / `forge.task_id` on the OTel span**, so a trace can be
+  found by task id.
+- **`result_attributes`** (`mcp_proxy`): up to 8 `{tool, path, transform, name}` extractors.
+  After a successful call the values at `path` (`results[].file`) are transformed
+  (`first_path_segment`, the only transform) and counted onto the audit record
+  (`result_attrs`) and span (`scoped_mcp.result.<name>`). Values must match
+  `[A-Za-z0-9_.-]{1,64}` (else `other`); at most 32 keys. A parse failure or missing path
+  records `result_attrs_error` and never fails or alters the call. Generic, for #1201
+  (id 1284) (qmd collections).
+- **`retry_after_seconds` on rate-limit refusals** (#1288 (id 1371)), with `limit_type` and
+  the limit as written in the manifest, in both the refusal message and the
+  `rate_limit_exceeded` line. It is the oldest counted call's time plus the window, minus
+  now, rounded up, never below 1. New `IncrementResult` and `increment_detailed()` on
+  `InProcessBackend` and `DragonflyBackend`; `increment()` keeps its `(allowed, count)`
+  shape, and a custom backend with only `increment()` still works (no `retry_after_seconds`
+  in its refusals). The Dragonfly script now returns the oldest entry's score with a
+  refusal, which also drops the extra `ZCARD` round trip.
+- **`mcp_proxy_unknown_config_key`**: an `mcp_proxy` config key the module does not read is
+  logged once at startup by name. Warned, not refused, so a manifest carrying a key an older
+  release tolerated does not stop a broker. A test fails when `mcp_proxy.py` reads a key that
+  is not in `KNOWN_CONFIG_KEYS`.
+
+### Changed
+- The rate-limit refusal message is reworded to carry the new fields:
+  `Rate limit exceeded for agent 'a': global limit 120/minute (120/60s), current=120,
+  limit_type=global, retry_after_seconds=14`.
+
 ## [1.19.4] — 2026-11-06
 
 Patch release: URL-userinfo log redaction, a HITL message fix, a dependency bump, and four

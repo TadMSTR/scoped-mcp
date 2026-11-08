@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
-from .state import _sanitize_key_component
+from .state import IncrementResult, _sanitize_key_component, retry_after_seconds
 
 try:
     import redis.asyncio as aioredis
@@ -22,7 +22,10 @@ except ImportError as _e:
 
 # Lua script: atomic sliding window increment using a sorted set.
 # KEYS[1] = key, ARGV[1] = now (ms), ARGV[2] = window_ms, ARGV[3] = limit, ARGV[4] = uuid
-# Returns current count after the operation (before potential add), or -1 if over limit.
+# Returns {count after the add} when allowed, or {-1, count, oldest score (ms)} when over
+# the limit. The oldest score is what a refusal's retry_after_seconds is computed from
+# (#1288 (id 1371)); reading it here keeps it atomic with the count, and saves the
+# separate ZCARD round trip the over-limit path used to make.
 _SLIDING_WINDOW_LUA = """
 local key = KEYS[1]
 local now = tonumber(ARGV[1])
@@ -35,13 +38,14 @@ redis.call('ZREMRANGEBYSCORE', key, 0, cutoff)
 local count = redis.call('ZCARD', key)
 
 if count >= limit then
+    local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
     redis.call('EXPIRE', key, math.ceil(window_ms / 1000) * 2)
-    return -1
+    return {-1, count, oldest[2] or tostring(now)}
 end
 
 redis.call('ZADD', key, now, uuid)
 redis.call('EXPIRE', key, math.ceil(window_ms / 1000) * 2)
-return count + 1
+return {count + 1}
 """
 
 
@@ -63,6 +67,12 @@ class DragonflyBackend:
         return f"{self._prefix}{key}"
 
     async def increment(self, key: str, window_seconds: int, limit: int) -> tuple[bool, int]:
+        result = await self.increment_detailed(key, window_seconds, limit)
+        return result.allowed, result.count
+
+    async def increment_detailed(
+        self, key: str, window_seconds: int, limit: int
+    ) -> IncrementResult:
         import time
         import uuid as _uuid
 
@@ -74,11 +84,14 @@ class DragonflyBackend:
             keys=[self._key(key)],
             args=[now_ms, window_ms, limit, entry_id],
         )
-        if result == -1:
-            # Over limit — get current count for logging
-            count = await self._client.zcard(self._key(key))
-            return False, int(count)
-        return True, int(result)
+        if int(result[0]) == -1:
+            oldest_ms = float(result[2])
+            return IncrementResult(
+                False,
+                int(result[1]),
+                retry_after_seconds(oldest_ms / 1000, window_seconds, now_ms / 1000),
+            )
+        return IncrementResult(True, int(result[0]))
 
     async def set_with_ttl(self, key: str, value: str, ttl_seconds: int) -> None:
         await self._client.set(self._key(key), value, ex=ttl_seconds)

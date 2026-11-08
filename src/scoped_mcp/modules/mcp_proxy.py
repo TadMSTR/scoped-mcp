@@ -77,6 +77,24 @@ Config:
         warning below, which emits sorted key names only — the same
         keys-not-values discipline _validate_arguments uses for arguments.
 
+    forward_identity (bool): HTTP only, default false. When true, every proxied call
+        also sends X-Forge-Run-Id and X-Forge-Task-Id (each only when it validated as a
+        UUID) and X-Forge-Session-Id (this broker's per-client session id), so the
+        upstream can attribute the call to a dispatcher run and task. Attribution, not
+        authorization: see docs/threat-model.md. Static ``headers`` may not name these
+        three while it is on. Ignored, with a warning, on stdio.
+
+    result_attributes (list[dict]): Optional ``{tool, path, transform, name}`` entries
+        (at most 8). After a successful call of ``tool`` — the namespaced name agents
+        call, e.g. ``qmd_query``, or the upstream name — the values at ``path``
+        (``results[].file``) are transformed (``first_path_segment``) and counted onto
+        the audit record as ``result_attrs`` and the span as ``scoped_mcp.result.<name>``.
+        Counts of short plain values only; the result itself is never recorded or
+        changed. See mcp_proxy_config.py.
+
+    Any other key is ignored and logged once at startup as
+    ``mcp_proxy_unknown_config_key`` (key name only).
+
     tool_allowlist (list[str]): If set, only these tools are exposed.
         Empty list or absent = all tools exposed.
     tool_denylist (list[str]): Tools in this list are never exposed.
@@ -122,6 +140,7 @@ from mcp.types import (
 from pydantic_core import to_json, to_jsonable_python
 
 from ..manifest import DEFAULT_MAX_BINARY_BYTES
+from . import mcp_proxy_config as proxy_cfg
 from ._base import ToolModule
 
 _log = structlog.get_logger("audit")
@@ -308,6 +327,11 @@ class McpProxyModule(ToolModule):
         # Used as the server key for hook lookups in run_before_hooks().
         self._manifest_key: str = ""
 
+        # Every config.get() key below must be in mcp_proxy_config.KNOWN_CONFIG_KEYS
+        # (a test enforces it). Anything else is reported, not silently ignored.
+        for key in proxy_cfg.unknown_keys(config):
+            _ops_log.warning("mcp_proxy_unknown_config_key", key=key)
+
         self._url: str | None = config.get("url")
         self._command: str | None = config.get("command")
         self._args: list[str] = config.get("args", [])
@@ -334,6 +358,17 @@ class McpProxyModule(ToolModule):
                 reason="env config has no effect on http transport (nothing is spawned)",
                 env_keys=sorted(self._env),
             )
+
+        problems = proxy_cfg.validate_proxy_config(config)
+        if problems:
+            raise ValueError("mcp_proxy: " + "; ".join(problems))
+        self._forward_identity: bool = bool(config.get("forward_identity", False))
+        if self._forward_identity and self._command:
+            _log.warning(
+                "mcp_proxy_forward_identity_ignored",
+                reason="forward_identity has no effect on stdio transport",
+            )
+        self._result_attributes: list[dict[str, str]] = list(config.get("result_attributes") or [])
 
         allowlist = config.get("tool_allowlist", [])
         denylist = config.get("tool_denylist", [])
@@ -428,11 +463,18 @@ class McpProxyModule(ToolModule):
             inventory["tools"] = sorted(self._registered_names)
         return inventory
 
-    def _transport(self) -> str | dict | StreamableHttpTransport:
-        """Return a fastmcp.Client-compatible transport spec."""
+    def _transport(
+        self, extra_headers: dict[str, str] | None = None
+    ) -> str | dict | StreamableHttpTransport:
+        """Return a fastmcp.Client-compatible transport spec.
+
+        ``extra_headers`` are per-call (forward_identity) and merge over the static
+        manifest ``headers``; validation keeps the two from naming the same header.
+        """
         if self._url:
-            if self._headers:
-                return StreamableHttpTransport(url=self._url, headers=self._headers)
+            headers = {**self._headers, **(extra_headers or {})}
+            if headers:
+                return StreamableHttpTransport(url=self._url, headers=headers)
             return self._url
         spec: dict = {"command": self._command, "args": self._args}
         if self._env:
@@ -559,6 +601,63 @@ class McpProxyModule(ToolModule):
             self._client_handle = Client(self._transport())
             self._persistent_client = await self._client_handle.__aenter__()
             await self._refresh_schemas_from_client(self._persistent_client)
+
+    def _identity_headers(self) -> dict[str, str]:
+        """The forward_identity headers for the in-flight call; only valid values are sent.
+
+        Run and task ids come from session.read_run_identity(), which already validated
+        them as UUIDs; the session id is this broker's per-client id. A missing value is
+        omitted, never sent empty.
+        """
+        from ..audit import SESSION_ID
+        from ..identity import resolve_request_identity
+        from ..session import read_run_identity
+
+        headers: dict[str, str] = {}
+        run_id, task_id = read_run_identity()
+        if run_id:
+            headers[proxy_cfg.RUN_ID_HEADER] = run_id
+        if task_id:
+            headers[proxy_cfg.TASK_ID_HEADER] = task_id
+        agent_id = getattr(self.agent_ctx, "agent_id", "unknown")
+        session_id = resolve_request_identity(agent_id, SESSION_ID).session_id
+        if session_id and proxy_cfg.SESSION_ID_RE.fullmatch(session_id):
+            headers[proxy_cfg.SESSION_ID_HEADER] = session_id
+        return headers
+
+    def _record_result_attributes(self, upstream_tool_name: str, result: Any) -> None:
+        """Count the configured result values onto the in-flight call's audit record.
+
+        Reads the raw upstream result and never changes it. Any failure is recorded as
+        ``result_attrs_error: <class>`` and swallowed: an extractor never fails or alters
+        a call.
+        """
+        if not self._result_attributes:
+            return
+        names = {upstream_tool_name, f"{self._manifest_key}_{upstream_tool_name}"}
+        wanted = [e for e in self._result_attributes if e["tool"] in names]
+        if not wanted:
+            return
+        from ..audit import annotate_call
+
+        attrs: dict[str, dict[str, int]] = {}
+        errors: dict[str, str] = {}
+        try:
+            payload = proxy_cfg.result_payload(
+                getattr(result, "structured_content", None), getattr(result, "content", None)
+            )
+        except Exception as exc:
+            annotate_call(result_attrs_error=type(exc).__name__)
+            return
+        for ext in wanted:
+            try:
+                attrs[ext["name"]] = proxy_cfg.count_values(payload, ext["path"], ext["transform"])
+            except Exception as exc:
+                errors[ext["name"]] = type(exc).__name__
+        if attrs:
+            annotate_call(result_attrs=attrs)
+        if errors:
+            annotate_call(result_attrs_error=errors)
 
     def _validate_arguments(self, upstream_tool_name: str, kwargs: dict[str, Any]) -> None:
         """Validate kwargs against the cached upstream inputSchema.
@@ -795,9 +894,12 @@ class McpProxyModule(ToolModule):
                         upstream_tool_name, arguments=kwargs
                     )
             else:
-                # HTTP: open a connection per call (cheap, stateless)
-                async with Client(module._transport()) as client:
+                # HTTP: open a connection per call (cheap, stateless). The transport is
+                # built per call so forward_identity's headers are this call's.
+                extra = module._identity_headers() if module._forward_identity else None
+                async with Client(module._transport(extra)) as client:
                     result = await client.call_tool(upstream_tool_name, arguments=kwargs)
+            module._record_result_attributes(upstream_tool_name, result)
             return _unwrap_result(
                 result,
                 module.max_binary_bytes,

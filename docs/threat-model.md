@@ -79,6 +79,25 @@ The Matrix module supports unencrypted rooms only. No libolm dependency.
 **DNS-based SSRF**
 Per-request async DNS resolution (`_resolve_and_check`) validates all resolved IPs before each HTTP call, preventing DNS rebinding attacks where an initially-safe hostname is flipped to an internal IP between requests. The resolved IP is pinned for the connection (`_PinnedHostTransport`) to eliminate the TOCTOU window between validation and the actual TCP connect. This applies only to hostname inputs — literal IPs in `base_url` are validated at init time by `_is_ssrf_target`. The `base_url` is operator-declared; agents control only the `path`. Defense in depth: run in a restricted network environment regardless.
 
+**Forwarded correlation ids (v1.20.0)**
+<a id="forwarded-correlation-ids"></a>
+`forward_identity: true` sends an upstream the run, task and session ids of each call
+(`X-Forge-Run-Id`, `X-Forge-Task-Id`, `X-Forge-Session-Id`). They are **attribution, not
+authorization**. scoped-mcp itself takes the run and task ids from its own inbound request
+headers, which any client holding the broker's bearer token can set, and the upstream trusts
+anything holding *its* token. In a single-OS-user deployment a process that can read either
+token can forge any id. Neither scoped-mcp nor an upstream may gate a decision on these
+values: they are validated for shape (UUIDs, a bounded session id), recorded in audit logs and
+spans, and nothing else. Forwarding is off by default so a third-party upstream never receives
+them unless the operator opts in per module.
+
+**mcp_proxy result attributes (v1.20.0)**
+`result_attributes` reads a proxied result after the call to count values onto the audit
+record. Only counts of values matching `[A-Za-z0-9_.-]{1,64}` are kept (anything else is
+`other`, at most 32 keys), so result text cannot reach the audit log or a span through it. The
+result itself is passed to the agent unchanged; an extractor that fails records its error class
+and never alters the call.
+
 **mcp_proxy loopback access**
 Unlike `http_proxy`, `mcp_proxy` does not block loopback or RFC1918 URLs — its purpose is specifically to proxy services running on the local host. The upstream URL or command is operator-declared in the manifest, not user-supplied. Agents can call any tool exposed by the upstream server that passes `tool_allowlist`/`tool_denylist` filtering. If an upstream server has weak input validation, that is not a scoped-mcp concern.
 
