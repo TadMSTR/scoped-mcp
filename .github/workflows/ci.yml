@@ -67,13 +67,14 @@ jobs:
           pip install ".[dev,all,otel]"
           pip install aiosqlite respx aiosmtplib
 
-      # agent-bus's outbox validator, for tests/test_hitl_events.py ONLY. It is not in the
-      # `dev` extra on purpose: extras are published package metadata, and PyPI refuses a
-      # direct git reference there. Pinned by SHA (tags are mutable); this is agent-bus
-      # v0.5.0. SCOPED_MCP_REQUIRE_AGENT_BUS below turns its absence into a failure, so
-      # the contract gate cannot pass by being skipped.
+      # agent-bus, test-only: its outbox validator (tests/test_hitl_events.py) and its
+      # signature verifier (tests/test_contrib/test_signing_hook_agent_bus.py). It is not in
+      # the `dev` extra on purpose: extras are published package metadata, and PyPI refuses
+      # a direct git reference there. Pinned by SHA (tags are mutable); this is agent-bus
+      # 0.7.1. SCOPED_MCP_REQUIRE_AGENT_BUS below turns its absence into a failure, so
+      # neither contract gate can pass by being skipped.
       - name: Install the agent-bus contract validator (test-only)
-        run: pip install "agent-bus @ git+https://github.com/TadMSTR/agent-bus@41c1adea50d1b2cc5f9fc5849569adc4348af635"
+        run: pip install "agent-bus @ git+https://github.com/TadMSTR/agent-bus@1e3ea4f30445997fd3cddfb8440952e4016474b8"
 
       - name: Lint (ruff)
         run: ruff check src/ tests/
@@ -123,7 +124,7 @@ jobs:
         run: |
           uv pip freeze --exclude-editable | sort > "$RUNNER_TEMP/locked.txt"
           uv pip install "respx==0.23.1" \
-            "agent-bus @ git+https://github.com/TadMSTR/agent-bus@41c1adea50d1b2cc5f9fc5849569adc4348af635"
+            "agent-bus @ git+https://github.com/TadMSTR/agent-bus@1e3ea4f30445997fd3cddfb8440952e4016474b8"
           uv pip freeze --exclude-editable | sort > "$RUNNER_TEMP/after.txt"
           moved=$(comm -23 "$RUNNER_TEMP/locked.txt" "$RUNNER_TEMP/after.txt")
           if [ -n "$moved" ]; then

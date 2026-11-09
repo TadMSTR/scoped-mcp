@@ -40,6 +40,9 @@ contrib/
   signing_hook.py     ed25519 signing hook factory. Loads private key from
                       Vault bundle; signs agent-bus log_event calls with the
                       canonical payload. Key never appears in logs or events.
+                      v2 since 1.22.0: signs sig_v/sig_ts/sig_nonce in metadata,
+                      so agent-bus can replay-check (window 120 s, nonce once
+                      per agent-bus process).
 
 scoping.py         Reusable scope strategies:
                    - PrefixScope: path/key prefix enforcement
