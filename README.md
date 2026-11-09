@@ -415,7 +415,7 @@ modules:
       reason: "read-only upstream; every tool is a read"   # 1-500 chars, one line
       decided_by: "Ted"                 # 1-64 chars, one line
       decided: 2026-11-08               # ISO date
-      ticket: "OPS-520"                 # your tracker's reference, 1-64 chars, one line
+      ticket: "vikunja#520"             # any tracker reference, 1-64 chars, one line
 ```
 
 Every field is required, and unknown keys are refused. `rules` is a non-empty list without
@@ -510,8 +510,9 @@ upstream tools from the agent.
 it lists, so a tool the upstream adds later reaches the agent with nobody having decided it
 should. With no list at all, every upstream tool is exposed. Since v1.21.0, each `mcp_proxy`
 module without a `tool_allowlist` logs one `mcp_proxy_unfiltered` warning at startup, with
-the module name, the exposed tool count, `denylisted` and `has_deviation`. It is a warning,
-not a refusal.
+the module name, the exposed tool count, `denylisted` and `has_deviation` (counts and
+booleans only, never tool names). It fires again when the self-heal loop recovers such a
+module. It is a warning, not a refusal.
 
 **Header injection** — pass custom HTTP headers to upstream streamable-http servers:
 
@@ -574,7 +575,8 @@ client; normal tool errors still propagate untouched so real outages are not mas
 **Run and task attribution upstream** (v1.20.0) — `forward_identity: true` on an HTTP
 `mcp_proxy` block sends the upstream this call's `X-Forge-Run-Id`, `X-Forge-Task-Id` (each
 only when it is a valid UUID) and `X-Forge-Session-Id` (the broker's per-client session id),
-so an upstream's own audit trail can say which run and task a call belonged to. Off by
+so an upstream's own audit trail can say which run and task a call belonged to. On a stdio
+block it is ignored with one `mcp_proxy_forward_identity_ignored` warning. Off by
 default; attribution only, never authorization (see the
 [threat model](docs/threat-model.md#forwarded-correlation-ids)). scoped-mcp's own
 `tool_call`/`tool_error`/`scope_violation` records carry `run_id` and `task_id`, and the OTel
@@ -582,10 +584,14 @@ span carries `forge.run_id` / `forge.task_id`, whether or not forwarding is on.
 
 **Result attributes** (v1.20.0) — `result_attributes` counts values from a proxied tool's
 result onto its audit record and span, e.g. which qmd collections a `qmd_query` returned
-(`result_attrs: {collections: {docs: 2}}`). Counts of short plain values only, nothing else
-from the result, and the result is never changed. Unknown `mcp_proxy` config keys are logged
-at startup as `mcp_proxy_unknown_config_key`. Both are in
-[manifest-schema.md](docs/manifest-schema.md#forward_identity).
+(`result_attrs: {collections: {docs: 2}}`). Only counts are kept, and only values matching
+`[A-Za-z0-9_.-]{1,64}` (anything else counts as `other`). The result itself is never changed.
+A value that matches is recorded verbatim, and many credentials match, so point `path` only at
+non-sensitive identifier fields (see the
+[threat model](docs/threat-model.md#not-protected) and
+[manifest-schema.md](docs/manifest-schema.md#result_attributes)). Unknown `mcp_proxy` config
+keys are logged at startup as `mcp_proxy_unknown_config_key`, warned and not refused.
+`forward_identity` is in [manifest-schema.md](docs/manifest-schema.md#forward_identity).
 
 **Result content** (v1.17.2) — how an upstream `CallToolResult` reaches the agent:
 
@@ -869,7 +875,7 @@ guarantees. All are off by default; enable per-agent in the manifest:
   path that doesn't require a shell on the host. Under `--transport http`,
   gated agents also register three loopback routes: `POST /hitl/approve`,
   `POST /hitl/deny`, `GET /hitl/pending`. The intended caller is
-  [`matrix-hitl-bot`](https://gitea.tadmstr.me/host-forge/matrix-hitl-bot) —
+  `matrix-hitl-bot` —
   the operator replies approve/deny to the agent's notify room in Matrix, and
   the bot calls the endpoint on their behalf; the requesting agent is never in
   that loop. These routes are unauthenticated by FastMCP's `BearerTokenVerifier`
