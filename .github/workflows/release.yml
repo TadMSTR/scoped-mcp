@@ -7,7 +7,7 @@ on:
 
 # Least privilege at the workflow level. `id-token: write` used to sit here, which handed the
 # OIDC-token-minting capability to all three jobs when only `publish-pypi` exchanges it for a
-# PyPI trusted-publishing credential. `build` runs `python -m build` on the checked-out tree
+# PyPI trusted-publishing credential. `build` runs `uv build` on the checked-out tree
 # and `create-github-release` runs `gh`; neither has any business minting an identity token for
 # this repository. Escalation is now per job, below. This is OSSF Scorecard's Token-Permissions
 # check, and it is the same finding that moved searxng-mcp's `packages: write` down a level.
@@ -27,11 +27,16 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install build tools
-        run: pip install build
+      # Pinned build frontend: the same uv, same version, as ci.yml's build job and forge's
+      # deploy script. An unpinned `pip install build` here was the one unpinned tool on the
+      # path to PyPI.
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.11.18"
 
       - name: Build sdist and wheel
-        run: python -m build
+        run: uv build --out-dir dist
 
       - name: Upload distribution artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

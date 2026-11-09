@@ -67,7 +67,7 @@ secrets.yaml
 *.pfx
 
 # Core dumps
-core.*
+core.[0-9]*
 *.core
 
 # Logs

@@ -41,6 +41,10 @@ dependencies = [
     # Core, not an extra: the signed-approval verifier (hitl_signing) cannot be
     # optional. Floor past PYSEC-2026-3552 (fixed in 50.0.0).
     "cryptography>=50.0,<51.0",
+    # Not imported here: fastmcp pulls it in through authlib. The floor is the point. A
+    # non-lock install could otherwise resolve joserfc 1.7.1 (GHSA-9pg5-8c7x-5hfx,
+    # GHSA-jpxq-7h8p-2q76); 1.8.0 is what uv.lock pins.
+    "joserfc>=1.8.0,<2.0",
 ]
 
 [project.urls]

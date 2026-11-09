@@ -15,6 +15,23 @@ on:
 permissions:
   contents: read
 
+# WHICH JOB PROVES WHAT. Two different dependency sets matter, and no single job covers both.
+#
+#   - The LOCKED set: exactly what uv.lock pins. This is what forge installs (the deploy script
+#     installs a hash-pinned `uv export --frozen` of the tag's lock) and what the `audit` job
+#     checks for advisories. `test-locked` runs the full suite on that set, on 3.13, forge's
+#     Python. Without it, the audited set and the tested set were never the same set.
+#   - A FRESH RESOLVE: what `pip install scoped-mcp` gets from PyPI today, inside the ranges in
+#     pyproject.toml. The `test` matrix (3.11-3.14) covers that, so an upstream release inside a
+#     range that breaks us shows up here before a user reports it.
+#
+# A green matrix says nothing about the lock, and a green `test-locked` says nothing about
+# today's upstream. Keep both.
+#
+# Every tool that touches the lock or the distribution is pinned: uv by setup-uv's `version:`
+# (the same uv forge's deploy script runs, so the two agree on the lock format), pip-audit by
+# `--from pip-audit==<x>`, and the build frontend is that same pinned uv (`uv build`).
+
 jobs:
   test:
     name: Test (Python ${{ matrix.python-version }})
@@ -69,6 +86,57 @@ jobs:
           SCOPED_MCP_REQUIRE_AGENT_BUS: "1"
         run: pytest --cov=scoped_mcp
 
+  # The suite on the LOCKED dependency set (see the note above `jobs:`). `uv sync --frozen`
+  # installs uv.lock exactly and fails rather than re-resolve; the `audit` job's
+  # `uv lock --check` is what keeps that lock in step with pyproject.toml.
+  test-locked:
+    name: Test (locked set, Python 3.13)
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.11.18"
+
+      - name: Install the locked set
+        run: uv sync --frozen --all-extras --python 3.13
+
+      # The same test-only additions as the matrix, none of them in the lock: respx (HTTP
+      # mocking) and agent-bus's outbox validator. Installing them must not move anything the
+      # lock pinned, or this job would be testing a set nobody deploys; the comparison below
+      # fails the job if any locked package changed version or went missing.
+      - name: Install test-only tools, then prove the locked set did not move
+        run: |
+          uv pip freeze --exclude-editable | sort > "$RUNNER_TEMP/locked.txt"
+          uv pip install "respx==0.23.1" \
+            "agent-bus @ git+https://github.com/TadMSTR/agent-bus@41c1adea50d1b2cc5f9fc5849569adc4348af635"
+          uv pip freeze --exclude-editable | sort > "$RUNNER_TEMP/after.txt"
+          moved=$(comm -23 "$RUNNER_TEMP/locked.txt" "$RUNNER_TEMP/after.txt")
+          if [ -n "$moved" ]; then
+            echo "::error::installing test-only tools changed the locked set:"
+            echo "$moved"
+            exit 1
+          fi
+
+      - name: Run tests
+        env:
+          SCOPED_MCP_REQUIRE_AGENT_BUS: "1"
+        run: uv run --no-sync pytest --cov=scoped_mcp
+
   # WHAT THIS JOB USED TO BE, AND WHY IT WAS NOT AN AUDIT.
   #
   # It was one step: `pip-audit --strict .`. That reads the RANGE specs in pyproject.toml and
@@ -98,6 +166,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.11.18"
 
       # THE GATE THAT MATTERS MOST, AND THE ONE THAT DID NOT EXIST.
       #
@@ -140,12 +210,12 @@ jobs:
       - name: Audit runtime dependencies
         run: |
           mkdir -p .audit-runtime && cp pylock.runtime.toml .audit-runtime/pylock.toml
-          uv tool run pip-audit --strict --locked .audit-runtime
+          uv tool run --from "pip-audit==2.10.1" pip-audit --strict --locked .audit-runtime
 
       - name: Audit dev dependencies
         run: |
           mkdir -p .audit-dev && cp pylock.dev.toml .audit-dev/pylock.toml
-          uv tool run pip-audit --strict --locked .audit-dev
+          uv tool run --from "pip-audit==2.10.1" pip-audit --strict --locked .audit-dev
 
   build:
     name: Build distribution
@@ -160,11 +230,16 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install build tools
-        run: pip install build
+      # The build frontend is the pinned uv, not an unpinned `pip install build`. release.yml
+      # builds the published artefact the same way, and so does forge's deploy script when it
+      # rebuilds the wheel to compare with PyPI's.
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.11.18"
 
       - name: Build sdist and wheel
-        run: python -m build
+        run: uv build --out-dir dist
 
       # Same script release.yml runs before it uploads to PyPI. One definition, two call sites
       # — the PR path and the publish path must not be able to drift apart, because the only
