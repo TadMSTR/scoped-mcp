@@ -76,7 +76,7 @@ jobs:
       # 0.7.1. SCOPED_MCP_REQUIRE_AGENT_BUS below turns its absence into a failure, so
       # neither contract gate can pass by being skipped.
       - name: Install the agent-bus contract validator (test-only)
-        run: pip install "agent-bus @ git+https://github.com/TadMSTR/agent-bus@1e3ea4f30445997fd3cddfb8440952e4016474b8"
+        run: pip install "agent-bus @ git+https://github.com/TadMSTR/agent-bus@1ba2ab5cc7d5a6fd1c3a38c6e1ce1f0773ed3b0e"
 
       - name: Lint (ruff)
         run: ruff check src/ tests/
@@ -134,7 +134,7 @@ jobs:
             exit 1
           fi
           uv pip install "respx==0.23.1" \
-            "agent-bus @ git+https://github.com/TadMSTR/agent-bus@1e3ea4f30445997fd3cddfb8440952e4016474b8"
+            "agent-bus @ git+https://github.com/TadMSTR/agent-bus@1ba2ab5cc7d5a6fd1c3a38c6e1ce1f0773ed3b0e"
           uv pip freeze --exclude-editable | sort > "$RUNNER_TEMP/after.txt"
           moved=$(comm -23 "$RUNNER_TEMP/locked.txt" "$RUNNER_TEMP/after.txt")
           if [ -n "$moved" ]; then
