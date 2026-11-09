@@ -1341,7 +1341,10 @@ def test_vault_redaction_keeps_manifest_names_and_logs_only_a_count(
     manifest = tmp_path / "m.yml"
     manifest.write_text("modules:\n  x:\n    config:\n      header: ${UPSTREAM_HEADER_VALUE}\n")
     monkeypatch.setenv("UPSTREAM_HEADER_VALUE", "manifest-ref-value-1")
-    bundle = {"dockhand_api_token": "vb-H4tKw8Np2Rz6Qm", "signing_private_key": "pk-Zq81mVt3Lr0aXc"}
+    bundle = {  # planted test values, not credentials
+        "dockhand_api_token": "vb-H4tKw8Np2Rz6Qm",  # gitleaks:allow
+        "signing_private_key": "pk-Zq81mVt3Lr0aXc",  # gitleaks:allow
+    }
     ops = _RecordingOps()
     try:
         _configure_vault_value_redaction(bundle, str(manifest), ops)
@@ -1372,7 +1375,7 @@ def test_build_server_redacts_the_fetched_vault_bundle(monkeypatch: pytest.Monke
             pass
 
         def fetch(self) -> dict[str, str]:
-            return {"some_module_token": "vb-H4tKw8Np2Rz6Qm"}
+            return {"some_module_token": "vb-H4tKw8Np2Rz6Qm"}  # gitleaks:allow
 
     manifest = Manifest.model_validate(
         {

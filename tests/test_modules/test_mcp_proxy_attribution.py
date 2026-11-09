@@ -283,6 +283,31 @@ def test_known_keys_do_not_warn(agent_ctx, echo_upstream):
 _CONFIG_READ_METHODS = frozenset({"get", "pop", "setdefault"})
 
 
+def _is_config_ref(node: ast.AST, aliases: set[str]) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id == "config" or node.id in aliases
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr in ("config", "_config")
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    )
+
+
+def _config_aliases(tree: ast.AST) -> set[str]:
+    aliases: set[str] = set()
+    changed = True
+    while changed:  # an alias of an alias is still the config dict
+        changed = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and _is_config_ref(node.value, aliases):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id not in aliases:
+                        aliases.add(target.id)
+                        changed = True
+    return aliases
+
+
 def _config_keys_read(source: str) -> set[str]:
     """Every literal key the source reads from a module's config dict.
 
@@ -291,27 +316,10 @@ def _config_keys_read(source: str) -> set[str]:
     ``<dict>.get/pop/setdefault("k", ...)``, ``<dict>["k"]`` or ``"k" in <dict>``.
     """
     tree = ast.parse(source)
+    aliases = _config_aliases(tree)
 
     def is_config_ref(node: ast.AST, aliases: set[str]) -> bool:
-        if isinstance(node, ast.Name):
-            return node.id == "config" or node.id in aliases
-        return (
-            isinstance(node, ast.Attribute)
-            and node.attr in ("config", "_config")
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "self"
-        )
-
-    aliases: set[str] = set()
-    changed = True
-    while changed:  # an alias of an alias is still the config dict
-        changed = False
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Assign) and is_config_ref(node.value, aliases):
-                for target in node.targets:
-                    if isinstance(target, ast.Name) and target.id not in aliases:
-                        aliases.add(target.id)
-                        changed = True
+        return _is_config_ref(node, aliases)
 
     def literal(node: ast.AST) -> str | None:
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -346,12 +354,58 @@ def _config_keys_read(source: str) -> set[str]:
     return read
 
 
-def test_every_key_mcp_proxy_reads_is_a_known_key():
-    """Closed world: a new config read in mcp_proxy.py must be added to
-    KNOWN_CONFIG_KEYS, or it would be warned about as unknown in every manifest that
-    uses it. And every known key must still be read somewhere."""
+def _whole_dict_callees(source: str) -> set[str]:
+    """Every function the source hands the whole config dict to, as written at the call.
+
+    A key read inside such a function is invisible to _config_keys_read on this file,
+    so each callee must be one whose reads are scanned too (or that reads none)."""
+    tree = ast.parse(source)
+    aliases = _config_aliases(tree)
+    callees: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            values = [*node.args, *(k.value for k in node.keywords)]
+            if any(_is_config_ref(v, aliases) for v in values):
+                callees.add(ast.unparse(node.func))
+    return callees
+
+
+# The functions mcp_proxy.py may pass its whole config dict to. Each is either scanned
+# (its module is in _SCANNED) or reads no key: ToolModule.__init__ only stores the dict.
+# A new callee fails test_the_config_dict_reaches_only_scanned_functions until it is
+# listed here and its module scanned.
+_WHOLE_DICT_CALLEES = {
+    "super().__init__",
+    "proxy_cfg.unknown_keys",
+    "proxy_cfg.validate_proxy_config",
+}
+_SCANNED = ("mcp_proxy.py", "mcp_proxy_config.py")
+
+
+def test_the_config_dict_reaches_only_scanned_functions():
+    """vikunja#1434 F-14 (IV-75): a read inside a helper the dict is passed to is a read
+    the closed-world check must see. Passing it to an unscanned function fails here."""
     source = pathlib.Path(cfg.__file__).with_name("mcp_proxy.py").read_text()
-    read = _config_keys_read(source)
+    assert _whole_dict_callees(source) == _WHOLE_DICT_CALLEES
+
+
+@pytest.mark.parametrize(
+    "shape",
+    ["helper(config)", "x = mod.check(self._config)", "f(cfg=config)", "c = config\nf(c)"],
+)
+def test_a_new_whole_dict_callee_is_seen_control(shape: str):
+    source = "def f(self, config):\n" + "".join(f"    {line}\n" for line in shape.splitlines())
+    assert _whole_dict_callees(source) - _WHOLE_DICT_CALLEES != set()
+
+
+def test_every_key_mcp_proxy_reads_is_a_known_key():
+    """Closed world: a new config read in mcp_proxy.py, or in a helper it hands the dict
+    to, must be added to KNOWN_CONFIG_KEYS, or it would be warned about as unknown in
+    every manifest that uses it. And every known key must still be read somewhere."""
+    here = pathlib.Path(cfg.__file__)
+    read: set[str] = set()
+    for name in _SCANNED:
+        read |= _config_keys_read(here.with_name(name).read_text())
     assert read, "found no config reads — the AST walk is broken"
     assert read - cfg.KNOWN_CONFIG_KEYS == set(), "add these to KNOWN_CONFIG_KEYS"
     assert cfg.KNOWN_CONFIG_KEYS - read == set(), "KNOWN_CONFIG_KEYS lists keys nothing reads"

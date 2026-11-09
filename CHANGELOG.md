@@ -40,6 +40,8 @@ approval says so. agent-bus events carry replay-checkable signatures.
 - CI and release pin their tools (vikunja#1301): uv 0.11.18 through setup-uv's `version:`,
   pip-audit 2.10.1, and both workflows build with `uv build` from that uv rather than an
   unpinned `pip install build`.
+- Every `actions/checkout` in `ci.yml`, `release.yml` and `codeql.yml` sets
+  `persist-credentials: false`: no job pushes, so none keeps the job token in `.git/config`.
 - `joserfc>=1.8.0,<2.0` is a direct dependency, as a floor for the version fastmcp pulls in
   through authlib (vikunja#1409 F-05). No locked version changed.
 - `.gitignore` ignores core dumps as `core.[0-9]*`, so a file called `core.py` is no longer
@@ -57,7 +59,8 @@ approval says so. agent-bus events carry replay-checkable signatures.
   identity headers, while the run and task ids still go (vikunja#1434 F-14).
 - The `KNOWN_CONFIG_KEYS` closed-world guard also sees `self.config` / `self._config`, local
   aliases of the config dict, `"key" in config`, and `pop`/`setdefault`, with one control per
-  shape (vikunja#1434 F-14).
+  shape (vikunja#1434 F-14). It scans `mcp_proxy_config.py` too, and fails when the config
+  dict is handed whole to a function it does not scan.
 - Signing is checked against agent-bus's own verifier (CI pins agent-bus at 0.7.1).
 
 ## [1.21.0] — 2026-11-08
