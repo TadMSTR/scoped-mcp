@@ -1356,3 +1356,108 @@ def test_configure_logging_quiets_httpx_and_httpcore() -> None:
         root.handlers[:] = saved_root_handlers
         for n, lvl in saved_levels.items():
             logging.getLogger(n).setLevel(lvl)
+
+
+# ── By-value redaction of the Vault bundle (vikunja#1168) ─────────────────────
+
+_VAULT_SHAPELESS = "vb-H4tKw8Np2Rz6Qm"
+
+
+def test_vault_value_is_raw_without_extra_values() -> None:
+    """The premise: a bundle value never reaches os.environ, so the env pass misses it."""
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    configure_value_redaction(environ={})
+    assert _redact_string(f"key={_VAULT_SHAPELESS}") == f"key={_VAULT_SHAPELESS}"
+
+
+def test_vault_value_is_redacted_under_its_label() -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    n = configure_value_redaction(
+        environ={}, extra_values={"vault:dockhand_api_token": _VAULT_SHAPELESS}
+    )
+    assert n == 1
+    assert _redact_string(f"key={_VAULT_SHAPELESS}") == (
+        "key=<redacted-value:vault:dockhand_api_token>"
+    )
+
+
+def test_vault_values_and_env_values_are_both_kept() -> None:
+    """A rebuild with extra_values must not drop the env or the manifest names."""
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    env = {"DOCKHAND_API_TOKEN": _SHAPELESS, "UPSTREAM_HEADER_VALUE": "manifest-ref-value-1"}
+    configure_value_redaction(
+        ["UPSTREAM_HEADER_VALUE"], environ=env, extra_values={"vault:k": _VAULT_SHAPELESS}
+    )
+    out = _redact_string(f"{_SHAPELESS} manifest-ref-value-1 {_VAULT_SHAPELESS}")
+    assert out == (
+        "<redacted-value:DOCKHAND_API_TOKEN> <redacted-value:UPSTREAM_HEADER_VALUE> "
+        "<redacted-value:vault:k>"
+    )
+
+
+def test_env_name_wins_over_a_vault_label_for_the_same_value() -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    n = configure_value_redaction(
+        environ={"DOCKHAND_API_TOKEN": _SHAPELESS}, extra_values={"vault:dup": _SHAPELESS}
+    )
+    assert n == 1
+    assert _redact_string(_SHAPELESS) == "<redacted-value:DOCKHAND_API_TOKEN>"
+
+
+@pytest.mark.parametrize("value", ["", "short", "123456789012345", None, 42, "https://vault:8200"])
+def test_vault_non_secrets_and_non_strings_are_skipped(value: object) -> None:
+    from scoped_mcp.audit import configure_value_redaction
+
+    assert configure_value_redaction(environ={}, extra_values={"vault:x": value}) == 0  # type: ignore[dict-item]
+
+
+def test_vault_value_is_redacted_in_tool_args_and_errors() -> None:
+    from scoped_mcp.audit import _sanitize_processor, configure_value_redaction
+
+    configure_value_redaction(environ={}, extra_values={"vault:tok": _VAULT_SHAPELESS})
+    event = {
+        "event": "tool_call",
+        "args": {"command": f"curl -H 'X-Api-Key: {_VAULT_SHAPELESS}'"},
+        "error": f"401 for key {_VAULT_SHAPELESS}",
+    }
+    out = _sanitize_processor(None, "info", event)
+    assert _VAULT_SHAPELESS not in str(out)
+    assert "<redacted-value:vault:tok>" in out["args"]["command"]
+
+
+def test_vault_value_is_redacted_in_stderr_records() -> None:
+    import logging
+
+    from scoped_mcp.audit import _RedactionFilter, configure_value_redaction
+
+    configure_value_redaction(environ={}, extra_values={"vault:tok": _VAULT_SHAPELESS})
+    record = logging.LogRecord(
+        "uvicorn", logging.INFO, __file__, 1, "hdr %s", (_VAULT_SHAPELESS,), None
+    )
+    _RedactionFilter().filter(record)
+    assert record.getMessage() == "hdr <redacted-value:vault:tok>"
+
+
+def test_vault_value_is_redacted_in_a_traceback() -> None:
+    import logging
+    import sys
+
+    from scoped_mcp.audit import _RedactionFilter, configure_value_redaction
+
+    configure_value_redaction(environ={}, extra_values={"vault:tok": _VAULT_SHAPELESS})
+    try:
+        raise RuntimeError(f"upstream refused {_VAULT_SHAPELESS}")
+    except RuntimeError:
+        exc_info = sys.exc_info()
+    record = logging.LogRecord(
+        "fastmcp", logging.ERROR, __file__, 1, "Error calling tool", (), exc_info
+    )
+    _RedactionFilter().filter(record)
+    out = logging.Formatter("%(message)s").format(record)
+    assert "RuntimeError" in out, "the traceback was dropped, so the test proves nothing"
+    assert _VAULT_SHAPELESS not in out
+    assert "<redacted-value:vault:tok>" in out

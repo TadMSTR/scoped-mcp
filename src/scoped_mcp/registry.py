@@ -676,6 +676,29 @@ def _resolve_class_name(module_name: str, module_cfg: ModuleConfig) -> str:
     return module_cfg.type if module_cfg.type is not None else module_name
 
 
+def _configure_vault_value_redaction(
+    vault_bundle: dict[str, str], manifest_path: str | None, ops: object
+) -> None:
+    """Add the Vault bundle's values to the by-value redaction set (vikunja#1168).
+
+    Bundle values never pass through the environment, so server.py's env-and-manifest
+    pass cannot see them. The set is rebuilt from scratch on every call, so the env and
+    the manifest's ${VAR} names are passed again. The bundle is read once per process:
+    Vault re-auth (credentials_vault L1 self-heal) mints a new token and does not
+    re-read the secret, so there is no later rebuild to make.
+
+    Only the count is logged, never the set or its labels.
+    """
+    from .audit import configure_value_redaction
+    from .manifest import manifest_env_var_names
+
+    names = manifest_env_var_names(manifest_path) if manifest_path else set()
+    count = configure_value_redaction(
+        names, extra_values={f"vault:{k}": v for k, v in vault_bundle.items()}
+    )
+    ops.info("value_redaction_configured", value_count=count, source="env+manifest+vault")
+
+
 def _register_signing_hook_if_available(vault_bundle: dict[str, str], ops: object) -> None:
     """Register the agent-bus ed25519 signing hook if signing keys are in the Vault bundle.
 
@@ -1168,6 +1191,7 @@ def build_server(
             kv_version=vc.kv_version,
         )
         vault_bundle = vault_source.fetch()
+        _configure_vault_value_redaction(vault_bundle, manifest_path, ops)
         _register_signing_hook_if_available(vault_bundle, ops)
 
     # Instantiate modules, skipping any that failed discovery. One shared gate

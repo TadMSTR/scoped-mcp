@@ -476,8 +476,11 @@ Before a record is written, every string in it is redacted twice:
   and every variable the manifest references as `${VAR}`, whatever it is called. Each occurrence is replaced with
   `<redacted-value:NAME>`. Values under 12 characters, digit-only values and bare URL
   origins (`https://host:port`) are skipped. A URL with userinfo, a path or a query is
-  kept, because any of those can carry the credential. Values held only in Vault or a
-  secrets file are not in the environment, so this pass does not see them.
+  kept, because any of those can carry the credential. Since v1.22.0, with
+  `credentials.source: vault`, every value in the Vault credential bundle is collected too,
+  under the same filters, and replaced with `<redacted-value:vault:<key>>`. The bundle is
+  read once at startup (re-auth renews the token, it does not re-read the secret). Values
+  held only in a secrets file (`credentials.source: file`) are still not seen by this pass.
 - **By pattern.** JWTs, bearer tokens, GitHub tokens, Vault tokens and hex runs of 32+.
   Since v1.19.4, URL userinfo by shape as well: in the text after each `://`, up to the next
   whitespace, the userinfo before the last `@` becomes `***` (`scheme://***@host`), or the

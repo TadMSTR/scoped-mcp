@@ -283,15 +283,25 @@ def _is_redactable_value(value: str) -> bool:
 
 
 def configure_value_redaction(
-    extra_names: Iterable[str] = (), environ: Mapping[str, str] | None = None
+    extra_names: Iterable[str] = (),
+    environ: Mapping[str, str] | None = None,
+    extra_values: Mapping[str, str] | None = None,
 ) -> int:
     """(Re)build the by-value redaction set from the process environment.
 
     Collects every variable whose name looks sensitive, every URL value carrying
     userinfo (a password in a DSN, whatever the variable is called), the names in
     ``_SECRET_ENV_NAMES``, and ``extra_names`` (the manifest's ${VAR} references,
-    whatever they are called). Rebuilt from scratch on each call. Returns how many
-    distinct values are redacted, the one thing about the set that may be logged.
+    whatever they are called).
+
+    ``extra_values`` maps a label to a secret that never passes through the environment:
+    the Vault credential bundle, labelled ``vault:<key>``. Every value in it is redacted
+    whatever its name, subject to the same "is this a secret at all" filter as the env.
+    An env name keeps priority over a label for the same value.
+
+    Rebuilt from scratch on each call, so a caller adding ``extra_values`` passes the
+    env and the manifest names again. Returns how many distinct values are redacted, the
+    one thing about the set that may be logged.
     """
     global _value_redaction
     env = os.environ if environ is None else environ
@@ -301,16 +311,22 @@ def configure_value_redaction(
         | set(extra_names)
     )
     names: dict[str, str] = {}
+
+    def _add(value: object, label: str) -> None:
+        if not isinstance(value, str) or not value or not _is_redactable_value(value):
+            return
+        names.setdefault(value, label)
+        # The same secret as repr() and JSON escape it (doubled backslashes, escaped
+        # quotes, \xNN / \uNNNN). Either form is trivially reversed, so match it too.
+        for escaped in (repr(value)[1:-1], json.dumps(value)[1:-1]):
+            if escaped != value:
+                names.setdefault(escaped, label)
+
     # Sorted so that two names sharing a value always report the same one.
     for name in sorted(wanted):
-        value = env.get(name)
-        if value and _is_redactable_value(value):
-            names.setdefault(value, name)
-            # The same secret as repr() and JSON escape it (doubled backslashes, escaped
-            # quotes, \xNN / \uNNNN). Either form is trivially reversed, so match it too.
-            for escaped in (repr(value)[1:-1], json.dumps(value)[1:-1]):
-                if escaped != value:
-                    names.setdefault(escaped, name)
+        _add(env.get(name), name)
+    for label in sorted(extra_values or {}):
+        _add((extra_values or {})[label], label)
     if not names:
         _value_redaction = None
         return 0

@@ -1319,3 +1319,87 @@ async def test_lifespan_alerts_on_recovery_across_restart(
     async with lifespan2(server=None):
         pass
     assert sent == ["optional_module_offline", "optional_module_recovered"]
+
+
+# ── _configure_vault_value_redaction (vikunja#1168) ───────────────────────────
+
+
+class _RecordingOps:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict]] = []
+
+    def info(self, event: str, **kw: object) -> None:
+        self.events.append((event, kw))
+
+
+def test_vault_redaction_keeps_manifest_names_and_logs_only_a_count(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+    from scoped_mcp.registry import _configure_vault_value_redaction
+
+    manifest = tmp_path / "m.yml"
+    manifest.write_text("modules:\n  x:\n    config:\n      header: ${UPSTREAM_HEADER_VALUE}\n")
+    monkeypatch.setenv("UPSTREAM_HEADER_VALUE", "manifest-ref-value-1")
+    bundle = {"dockhand_api_token": "vb-H4tKw8Np2Rz6Qm", "signing_private_key": "pk-Zq81mVt3Lr0aXc"}
+    ops = _RecordingOps()
+    try:
+        _configure_vault_value_redaction(bundle, str(manifest), ops)
+        out = _redact_string("manifest-ref-value-1 vb-H4tKw8Np2Rz6Qm pk-Zq81mVt3Lr0aXc")
+        assert out == (
+            "<redacted-value:UPSTREAM_HEADER_VALUE> <redacted-value:vault:dockhand_api_token> "
+            "<redacted-value:vault:signing_private_key>"
+        )
+        [(event, fields)] = ops.events
+        assert event == "value_redaction_configured"
+        assert set(fields) == {"value_count", "source"}
+        assert fields["value_count"] >= 3
+        logged = json.dumps(ops.events)
+        assert "vb-H4tKw8Np2Rz6Qm" not in logged and "dockhand_api_token" not in logged
+    finally:
+        configure_value_redaction(environ={})
+
+
+def test_build_server_redacts_the_fetched_vault_bundle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wiring: build_server's Vault branch feeds the bundle to the redaction set."""
+    from unittest.mock import patch
+
+    from scoped_mcp import credentials_vault
+    from scoped_mcp.audit import _redact_string, configure_value_redaction
+
+    class _Src:
+        def __init__(self, **kw: object) -> None:
+            pass
+
+        def fetch(self) -> dict[str, str]:
+            return {"some_module_token": "vb-H4tKw8Np2Rz6Qm"}
+
+    manifest = Manifest.model_validate(
+        {
+            "agent_type": "test-agent",
+            "credentials": {
+                "source": "vault",
+                "vault": {
+                    "addr": "http://127.0.0.1:8200",
+                    "role_id_env": "R",
+                    "secret_id_env": "S",
+                    "path": "secret/x",
+                },
+            },
+            "modules": {"my-mod": {"type": "mock", "config": {}}},
+        }
+    )
+    ctx = AgentContext(agent_id="test-agent", agent_type="test-agent")
+    try:
+        configure_value_redaction(environ={})
+        with (
+            patch.object(credentials_vault, "VaultCredentialSource", _Src),
+            patch(
+                "scoped_mcp.registry._discover_module_classes",
+                return_value=({"mock": _mock_module_cls()}, {}),
+            ),
+        ):
+            build_server(ctx, manifest)
+        assert _redact_string("vb-H4tKw8Np2Rz6Qm") == "<redacted-value:vault:some_module_token>"
+    finally:
+        configure_value_redaction(environ={})
