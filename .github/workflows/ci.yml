@@ -126,7 +126,13 @@ jobs:
       # fails the job if any locked package changed version or went missing.
       - name: Install test-only tools, then prove the locked set did not move
         run: |
+          # pipefail: a failed freeze must not leave an empty locked.txt that compares clean.
+          set -o pipefail
           uv pip freeze --exclude-editable | sort > "$RUNNER_TEMP/locked.txt"
+          if [ ! -s "$RUNNER_TEMP/locked.txt" ]; then
+            echo "::error::uv pip freeze produced no locked set to compare"
+            exit 1
+          fi
           uv pip install "respx==0.23.1" \
             "agent-bus @ git+https://github.com/TadMSTR/agent-bus@1e3ea4f30445997fd3cddfb8440952e4016474b8"
           uv pip freeze --exclude-editable | sort > "$RUNNER_TEMP/after.txt"

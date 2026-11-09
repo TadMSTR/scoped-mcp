@@ -41,7 +41,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import hashlib
 import json
 import os
@@ -186,15 +185,22 @@ def check_record(record: Any, approval_id: str, agent_id: str) -> str | None:
     return None
 
 
-async def _mark_decided(client: Any, prefix: str, approval_id: str) -> None:
+async def _mark_decided(client: Any, prefix: str, approval_id: str, err: Any) -> None:
     """So the broker's approve of this id answers already_decided, not expired.
 
     After the decision is written, and best-effort: losing it changes a status message
-    the agent may read later, never the decision.
+    the agent may read later, never the decision. A failure is reported, not swallowed
+    (audit p5 F-06).
     """
-    with contextlib.suppress(Exception):
+    try:
         await client.set(
             prefix + _issued_key(approval_id), ISSUED_MARKER_DECIDED, ex=ISSUED_MARKER_GRACE_SECONDS
+        )
+    except Exception as e:
+        print(
+            f"warning: decided marker not written for {approval_id} "
+            f"({type(e).__name__}); the decision stands",
+            file=err,
         )
 
 
@@ -229,7 +235,7 @@ async def run(
         await client.set(
             prefix + deny_tombstone_key(approval_id), "1", ex=DENY_TOMBSTONE_TTL_SECONDS
         )
-        await _mark_decided(client, prefix, approval_id)
+        await _mark_decided(client, prefix, approval_id, err)
         print(f"denied: {approval_id}", file=out)
         return EXIT_OK
 
@@ -274,7 +280,7 @@ async def run(
         value,
         ex=MAX_LIFETIME_SECONDS,
     )
-    await _mark_decided(client, prefix, approval_id)
+    await _mark_decided(client, prefix, approval_id, err)
     print(
         f"approved: {approval_id} — valid for {MAX_LIFETIME_SECONDS} s; "
         "the agent must retry the same call now",

@@ -193,11 +193,20 @@ async def _decide(redis_url: str, approval_id: str, decision: str, _client=None)
         # Delete the pending key in both approve and reject cases.
         await client.delete(key)
         # So the broker's approve of this id answers already_decided, not expired.
-        await client.set(
-            f"scoped-mcp:{agent_id}:{_issued_key(approval_id)}",
-            ISSUED_MARKER_DECIDED,
-            ex=ISSUED_MARKER_GRACE_SECONDS,
-        )
+        # Best-effort, as at the other three writers: the decision is already applied,
+        # so a failure here must not read as a failed decision (audit p5 F-01).
+        try:
+            await client.set(
+                f"scoped-mcp:{agent_id}:{_issued_key(approval_id)}",
+                ISSUED_MARKER_DECIDED,
+                ex=ISSUED_MARKER_GRACE_SECONDS,
+            )
+        except Exception as e:
+            print(
+                f"warning: decided marker not written for {approval_id} "
+                f"({type(e).__name__}); the decision stands",
+                file=sys.stderr,
+            )
 
         verb = "approved" if decision == "approve" else "rejected"
         print(f"{verb}: {approval_id}")

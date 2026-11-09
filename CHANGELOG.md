@@ -53,6 +53,12 @@ approval says so. agent-bus events carry replay-checkable signatures.
   `hitl:` namespace and its value is not an approval record. Both listings now skip every
   side key (pre-approval and OTP tokens, deny tombstones, issued markers) and any value that
   is not a record.
+- `scoped-mcp hitl decide` ended in a traceback when the decided-marker write failed, after the
+  decision had been applied, so a retry read as a lost decision. The write is best-effort, as at
+  the other writers: it prints a warning and the verb, and exits 0. `scoped-mcp-approve` no
+  longer swallows the same failure silently; it prints a one-line warning to stderr.
+- CI's `test-locked` comparison runs with `pipefail` and fails on an empty locked set, so a
+  failed `uv pip freeze` can no longer pass as "the locked set did not move".
 
 ### Tests
 - A malformed session id (newline, over-length, wrong shape) is left out of the forwarded
