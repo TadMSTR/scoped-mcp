@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.0] — 2026-11-09
+
+Hygiene. The CI and release tools are pinned, and the dependency set CI tests now includes
+the locked one forge installs. Vault-sourced secrets are redacted by value. An expired HITL
+approval says so. agent-bus events carry replay-checkable signatures.
+
+### Added
+- **v2 agent-bus signatures** (vikunja#434). The signing hook adds `sig_v: 2`, `sig_ts` (UTC
+  ISO 8601) and `sig_nonce` (uuid4) to the event metadata before signing, so the signature
+  covers them, and agent-bus's replay check applies: a valid signature, a nonce seen at most
+  once per agent-bus process, signed within agent-bus's window (120 s by default from agent-bus
+  0.7.1). Values a caller puts in those keys are overwritten. In agent-bus `warn` mode, the
+  default, a replay is logged and accepted; only `enforce` rejects it.
+- **`expired` approval status** (vikunja#628 option E). Approving or denying an id this agent
+  issued that timed out undecided returns `expired` (HTTP `410` on `/hitl/approve`), with a
+  `detail` saying to re-issue the original call. An approved or denied id returns
+  `already_decided`. An unknown id, and any other agent's id, still return `not_found`; the
+  ownership check runs first. A short-lived marker (`hitl:issued:<id>`, the request's timeout
+  plus one hour) records this; every decision path, `scoped-mcp-approve` and the `scoped-mcp
+  hitl` CLI included, marks it decided. `scoped_mcp_hitl_confirm` returns the same statuses.
+- CI job **`test-locked`**: the full suite on `uv sync --frozen --all-extras`, Python 3.13
+  (vikunja#745). It fails if installing the test-only tools moves a locked package. The
+  fresh-resolve 3.11-3.14 matrix stays; a comment in `ci.yml` says which job covers which set.
+
+### Changed
+- **By-value log redaction includes the Vault credential bundle** (vikunja#1168). With
+  `credentials.source: vault`, every bundle value passing the usual filters is replaced with
+  `<redacted-value:vault:<key>>`, alongside the env and manifest values.
+  `configure_value_redaction` takes `extra_values`. `value_redaction_configured` is logged
+  again after the bundle is read, as a count only.
+- CI and release pin their tools (vikunja#1301): uv 0.11.18 through setup-uv's `version:`,
+  pip-audit 2.10.1, and both workflows build with `uv build` from that uv rather than an
+  unpinned `pip install build`.
+- Every `actions/checkout` in `ci.yml`, `release.yml` and `codeql.yml` sets
+  `persist-credentials: false`: no job pushes, so none keeps the job token in `.git/config`.
+- `joserfc>=1.8.0,<2.0` is a direct dependency, as a floor for the version fastmcp pulls in
+  through authlib (vikunja#1409 F-05). No locked version changed.
+- `.gitignore` ignores core dumps as `core.[0-9]*`, so a file called `core.py` is no longer
+  ignored (vikunja#1301).
+
+### Fixed
+- `GET /hitl/pending` returned `503`, and `scoped-mcp hitl list` crashed, for an hour after any
+  deny made through `scoped-mcp-approve --deny` or the CLI: the deny tombstone shares the
+  `hitl:` namespace and its value is not an approval record. Both listings now skip every
+  side key (pre-approval and OTP tokens, deny tombstones, issued markers) and any value that
+  is not a record.
+- `scoped-mcp hitl decide` ended in a traceback when the decided-marker write failed, after the
+  decision had been applied, so a retry read as a lost decision. The write is best-effort, as at
+  the other writers: it prints a warning and the verb, and exits 0. `scoped-mcp-approve` no
+  longer swallows the same failure silently; it prints a one-line warning to stderr.
+- CI's `test-locked` comparison runs with `pipefail` and fails on an empty locked set, so a
+  failed `uv pip freeze` can no longer pass as "the locked set did not move".
+
+### Tests
+- A malformed session id (newline, over-length, wrong shape) is left out of the forwarded
+  identity headers, while the run and task ids still go (vikunja#1434 F-14).
+- The `KNOWN_CONFIG_KEYS` closed-world guard also sees `self.config` / `self._config`, local
+  aliases of the config dict, `"key" in config`, and `pop`/`setdefault`, with one control per
+  shape (vikunja#1434 F-14). It scans `mcp_proxy_config.py` too, and fails when the config
+  dict is handed whole to a function it does not scan.
+- Signing is checked against agent-bus's own verifier (CI pins agent-bus at 0.7.1).
+
 ## [1.21.0] — 2026-11-08
 
 Grant model. A manifest can record why a module's grant

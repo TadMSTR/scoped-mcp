@@ -30,15 +30,35 @@ from __future__ import annotations
 import contextlib
 import hmac
 import json
+import time
 from typing import Any
 
 import structlog
 
 from . import hitl_events
-from .hitl import PREAPPROVAL_TTL_SECONDS, _otp_key, _preapproval_key
+from .hitl import (
+    ISSUED_MARKER_DECIDED,
+    ISSUED_MARKER_GRACE_SECONDS,
+    PREAPPROVAL_TTL_SECONDS,
+    _issued_key,
+    _otp_key,
+    _preapproval_key,
+    is_side_key,
+)
 from .state import StateBackend
 
 _log = structlog.get_logger("audit")
+
+# Returned with status "expired", so every consumer (the interactive confirm tool, the
+# HTTP endpoint) tells the agent the same next step.
+EXPIRED_DETAIL = (
+    "the approval request expired before it was decided; re-issue the original tool call "
+    "to get a new approval id, then ask the operator again"
+)
+
+# A pending key's TTL and this process's clock are read independently; allow this much
+# skew before calling a lapsed request expired.
+_EXPIRY_SKEW_SECONDS = 1.0
 
 
 def _pending_key(approval_id: str) -> str:
@@ -53,6 +73,56 @@ def _belongs_to_agent(approval_id: str, agent_id: str) -> bool:
     as not-found rather than touching another namespace.
     """
     return "." in approval_id and approval_id.rsplit(".", 1)[0] == agent_id
+
+
+def _expired() -> dict[str, Any]:
+    return {"status": "expired", "detail": EXPIRED_DETAIL}
+
+
+async def _lapsed_status(state: StateBackend, approval_id: str) -> str:
+    """Why this agent's pending record for ``approval_id`` is gone.
+
+    - ``already_decided``: the deny tombstone or the marker says someone decided it, or
+      the record went before its time was up (only a decision removes it early);
+    - ``expired``: the marker says it ran out its time undecided;
+    - ``not_found``: nothing is known (a wrong id, a marker past its grace period, or a
+      request issued before markers existed).
+
+    Only ever called after _belongs_to_agent, so it never looks at another agent's ids.
+    """
+    from .hitl_events import deny_tombstone_key
+
+    if await state.get(deny_tombstone_key(approval_id)) is not None:
+        return "already_decided"
+    raw = await state.get(_issued_key(approval_id))
+    if raw is None:
+        return "not_found"
+    try:
+        marker = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return "not_found"
+    if not isinstance(marker, dict):
+        return "not_found"
+    if marker.get("decided"):
+        return "already_decided"
+    expires_at = marker.get("expires_at")
+    if not isinstance(expires_at, int | float) or isinstance(expires_at, bool):
+        return "not_found"
+    if time.time() + _EXPIRY_SKEW_SECONDS >= expires_at:
+        return "expired"
+    return "already_decided"
+
+
+async def _mark_decided(state: StateBackend, approval_id: str) -> None:
+    """Best-effort: record that the request was decided, so a later approve says so."""
+    try:
+        await state.set_with_ttl(
+            _issued_key(approval_id), ISSUED_MARKER_DECIDED, ISSUED_MARKER_GRACE_SECONDS
+        )
+    except Exception as e:
+        _log.warning(
+            "hitl_issued_marker_write_failed", approval_id=approval_id, error=type(e).__name__
+        )
 
 
 async def _resolve_audit(approval_id: str, state: str, resolved_via: str | None = None) -> None:
@@ -75,7 +145,13 @@ async def approve(
 ) -> dict[str, Any]:
     """Approve a pending request. Returns a result dict with a ``status`` key.
 
-    status ∈ {approved, not_found, already_decided, invalid_otp}.
+    status ∈ {approved, expired, not_found, already_decided, invalid_otp}.
+
+    ``not_found`` covers an unknown id and another agent's id alike, and the ownership
+    check runs first, so a response never shows that another agent's id exists.
+    ``expired`` (with ``detail`` saying to re-issue the call) means this agent issued the
+    id and it ran out its time undecided, or its record cannot be bound to a call.
+    ``already_decided`` means someone approved or denied it already.
 
     ``resolved_via`` tags the audit row with the resolution channel so a later
     audit can tell the real out-of-band path (``matrix_bot`` / ``courier``) apart
@@ -94,7 +170,8 @@ async def approve(
     # the pending record, so a bad guess cannot destroy a legitimate pending item.
     raw = await state.get(_pending_key(approval_id))
     if raw is None:
-        return {"status": "not_found"}
+        lapsed = await _lapsed_status(state, approval_id)
+        return _expired() if lapsed == "expired" else {"status": lapsed}
     try:
         payload = json.loads(raw)
         tool_name = payload.get("tool", "")
@@ -120,6 +197,10 @@ async def approve(
     # a race (or it was already decided), get_delete returns None.
     claimed = await state.get_delete(_pending_key(approval_id))
     if claimed is None:
+        # Lost a race with another decision, or the TTL ran out between the peek and the
+        # claim. Without a marker, the old answer stands.
+        if await _lapsed_status(state, approval_id) == "expired":
+            return _expired()
         return {"status": "already_decided"}
 
     # Phase 1 bot form never presented the OTP; invalidate it now so it can never
@@ -130,10 +211,11 @@ async def approve(
     if not tool_name or not args_hash:
         # Cannot bind a pre-approval token without both — refuse rather than write
         # a token the middleware will never match (which would silently never
-        # approve). Surface as not_found so the operator re-triggers.
+        # approve). Audited as expired, and reported as expired too: the request can no
+        # longer be approved, and re-issuing the call is the way out.
         _log.warning("hitl_approve_missing_binding", approval_id=approval_id, agent_id=agent_id)
         await _resolve_audit(approval_id, "expired", resolved_via=resolved_via)
-        return {"status": "not_found"}
+        return _expired()
 
     # Write the one-time pre-approval token the middleware consumes on retry.
     # The approval_id rides along in the token value (not just "approved") so
@@ -156,6 +238,7 @@ async def approve(
     except Exception:
         await _resolve_audit(approval_id, "expired", resolved_via=resolved_via)
         raise
+    await _mark_decided(state, approval_id)
     _log.warning(
         "hitl_approved_via_endpoint",
         approval_id=approval_id,
@@ -183,7 +266,9 @@ async def deny(
     claimed = await state.get_delete(_pending_key(approval_id))
     await state.delete(_otp_key(approval_id))
     if claimed is None:
-        return {"status": "not_found"}
+        lapsed = await _lapsed_status(state, approval_id)
+        return _expired() if lapsed == "expired" else {"status": lapsed}
+    await _mark_decided(state, approval_id)
     tool_name = ""
     with contextlib.suppress(json.JSONDecodeError, AttributeError):
         tool_name = json.loads(claimed).get("tool", "")
@@ -206,16 +291,18 @@ async def deny(
 async def list_pending(state: StateBackend, agent_id: str) -> list[dict[str, Any]]:
     """List this agent's pending approvals (approval_id, agent_id, tool).
 
-    Excludes the ``preapproved:`` and ``otp:`` tokens that share the ``hitl:``
-    namespace but are not pending approvals.
+    Excludes the side keys (pre-approval and OTP tokens, deny tombstones, issued
+    markers) that share the ``hitl:`` namespace but are not pending approvals.
     """
     out: list[dict[str, Any]] = []
     for key, value in await state.scan("hitl:*.*"):
-        if ":preapproved:" in key or ":otp:" in key:
+        if is_side_key(key):
             continue
         try:
             payload = json.loads(value)
         except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(payload, dict):
             continue
         aid = payload.get("approval_id", "")
         if not _belongs_to_agent(aid, agent_id):

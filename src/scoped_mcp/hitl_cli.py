@@ -33,7 +33,13 @@ import asyncio
 import json
 import sys
 
-from .hitl import PREAPPROVAL_TTL_SECONDS
+from .hitl import (
+    ISSUED_MARKER_DECIDED,
+    ISSUED_MARKER_GRACE_SECONDS,
+    PREAPPROVAL_TTL_SECONDS,
+    _issued_key,
+    is_side_key,
+)
 from .hitl_events import DENY_TOMBSTONE_TTL_SECONDS, deny_tombstone_key
 from .manifest import load_manifest
 
@@ -77,17 +83,20 @@ async def _list_pending(redis_url: str, _client=None) -> int:
     try:
         pending: list[dict] = []
         async for key in client.scan_iter(match="scoped-mcp:*:hitl:*.*"):
-            # Skip pre-approval tokens — they share the hitl: namespace but
-            # are not pending approvals. Approval IDs never contain "preapproved:".
-            if ":preapproved:" in key:
+            # Skip the side keys (pre-approval and OTP tokens, deny tombstones, issued
+            # markers): they share the hitl: namespace but are not pending approvals, and
+            # the deny tombstone's value "1" parses as JSON to an int.
+            if is_side_key(key):
                 continue
             raw = await client.get(key)
             if raw is None:
                 continue
             try:
-                pending.append(json.loads(raw))
+                record = json.loads(raw)
             except json.JSONDecodeError:
                 continue
+            if isinstance(record, dict):
+                pending.append(record)
         if not pending:
             print("(no pending approvals)")
             return 0
@@ -183,6 +192,21 @@ async def _decide(redis_url: str, approval_id: str, decision: str, _client=None)
 
         # Delete the pending key in both approve and reject cases.
         await client.delete(key)
+        # So the broker's approve of this id answers already_decided, not expired.
+        # Best-effort, as at the other three writers: the decision is already applied,
+        # so a failure here must not read as a failed decision (audit p5 F-01).
+        try:
+            await client.set(
+                f"scoped-mcp:{agent_id}:{_issued_key(approval_id)}",
+                ISSUED_MARKER_DECIDED,
+                ex=ISSUED_MARKER_GRACE_SECONDS,
+            )
+        except Exception as e:
+            print(
+                f"warning: decided marker not written for {approval_id} "
+                f"({type(e).__name__}); the decision stands",
+                file=sys.stderr,
+            )
 
         verb = "approved" if decision == "approve" else "rejected"
         print(f"{verb}: {approval_id}")

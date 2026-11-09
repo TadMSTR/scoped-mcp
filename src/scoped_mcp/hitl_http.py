@@ -44,6 +44,9 @@ _STATUS_CODES = {
     "approved": 200,
     "denied": 200,
     "not_found": 404,
+    # Gone, not Not Found: the id was real and is no longer approvable. Only ever reached
+    # for this agent's own ids (the ownership check comes first).
+    "expired": 410,
     "already_decided": 409,
     "invalid_otp": 403,
 }

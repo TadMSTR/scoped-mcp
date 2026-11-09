@@ -646,7 +646,8 @@ async def test_r2_04_endpoint_writes_the_audit_row_before_the_token(registry, mo
     real_resolve = registry.resolve_hitl_approval
 
     async def set_spy(k, v, ttl):
-        order.append("token")
+        # The issued marker (vikunja#628 E) is written after the token; it is not the token.
+        order.append("marker" if ":issued:" in k else "token")
         await real_set(k, v, ttl)
 
     async def resolve_spy(approval_id, st, **kw):
@@ -656,7 +657,7 @@ async def test_r2_04_endpoint_writes_the_audit_row_before_the_token(registry, mo
     monkeypatch.setattr(state, "set_with_ttl", set_spy)
     monkeypatch.setattr(registry, "resolve_hitl_approval", resolve_spy)
     assert (await hitl_endpoint.approve(state, AGENT, aid))["status"] == "approved"
-    assert order == ["row:approved", "token"]
+    assert order == ["row:approved", "token", "marker"]
 
 
 async def test_r2_04_a_failed_token_write_moves_the_row_to_expired(registry, monkeypatch):
@@ -672,3 +673,43 @@ async def test_r2_04_a_failed_token_write_moves_the_row_to_expired(registry, mon
     with pytest.raises(ConnectionError):
         await hitl_endpoint.approve(state, AGENT, aid)
     assert registry.rows[aid]["state"] == "expired"
+
+
+# ── p5 audit F-01 / F-06: a failed decided-marker write never reads as a failed decision ──
+
+
+class _MarkerDown(FakeRedis):
+    async def set(self, k: str, v: str, ex: int | None = None) -> None:
+        if ":issued:" in k:
+            raise ConnectionError("state backend down")
+        await super().set(k, v, ex)
+
+
+@pytest.mark.parametrize("decision,verb", [("approve", "approved"), ("reject", "rejected")])
+async def test_p5_f01_cli_decide_survives_a_failed_marker_write(registry, capsys, decision, verb):
+    from scoped_mcp.hitl_cli import _decide
+
+    redis = _MarkerDown()
+    mw = _mw(PrefixedState(redis, AGENT), "off", None, registry)
+    aid = await _request(mw, _args(1))
+    assert await _decide("redis://unused", aid, decision, _client=redis) == 0
+    out = capsys.readouterr()
+    assert f"{verb}: {aid}" in out.out
+    assert "decided marker not written" in out.err and "ConnectionError" in out.err
+    assert f"hitl:{aid}" not in "".join(redis.store)  # the decision was applied
+
+
+@pytest.mark.parametrize("deny,verb", [(False, "approved"), (True, "denied")])
+async def test_p5_f06_approver_reports_a_failed_marker_write(registry, key, deny, verb):
+    import io
+
+    redis = _MarkerDown()
+    mw = _mw(PrefixedState(redis, AGENT), "enforce", key, registry)
+    aid = await _request(mw, _args(1))
+    out, err = io.StringIO(), io.StringIO()
+    rc = await hitl_approver.run(
+        aid, deny=deny, client=redis, private_key=key, confirm=lambda _p: True, out=out, err=err
+    )
+    assert rc == hitl_approver.EXIT_OK
+    assert f"{verb}: {aid}" in out.getvalue()
+    assert aid in err.getvalue() and "ConnectionError" in err.getvalue()

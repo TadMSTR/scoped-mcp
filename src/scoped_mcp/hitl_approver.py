@@ -53,7 +53,15 @@ from typing import Any
 import yaml
 
 from .audit import _key_looks_sensitive
-from .hitl import _canonical_args_digest, _otp_key, _preapproval_key, _short_args_hash
+from .hitl import (
+    ISSUED_MARKER_DECIDED,
+    ISSUED_MARKER_GRACE_SECONDS,
+    _canonical_args_digest,
+    _issued_key,
+    _otp_key,
+    _preapproval_key,
+    _short_args_hash,
+)
 from .hitl_events import DENY_TOMBSTONE_TTL_SECONDS, deny_tombstone_key
 from .hitl_signing import (
     MAX_LIFETIME_SECONDS,
@@ -177,6 +185,25 @@ def check_record(record: Any, approval_id: str, agent_id: str) -> str | None:
     return None
 
 
+async def _mark_decided(client: Any, prefix: str, approval_id: str, err: Any) -> None:
+    """So the broker's approve of this id answers already_decided, not expired.
+
+    After the decision is written, and best-effort: losing it changes a status message
+    the agent may read later, never the decision. A failure is reported, not swallowed
+    (audit p5 F-06).
+    """
+    try:
+        await client.set(
+            prefix + _issued_key(approval_id), ISSUED_MARKER_DECIDED, ex=ISSUED_MARKER_GRACE_SECONDS
+        )
+    except Exception as e:
+        print(
+            f"warning: decided marker not written for {approval_id} "
+            f"({type(e).__name__}); the decision stands",
+            file=err,
+        )
+
+
 async def run(
     approval_id: str,
     *,
@@ -208,6 +235,7 @@ async def run(
         await client.set(
             prefix + deny_tombstone_key(approval_id), "1", ex=DENY_TOMBSTONE_TTL_SECONDS
         )
+        await _mark_decided(client, prefix, approval_id, err)
         print(f"denied: {approval_id}", file=out)
         return EXIT_OK
 
@@ -252,6 +280,7 @@ async def run(
         value,
         ex=MAX_LIFETIME_SECONDS,
     )
+    await _mark_decided(client, prefix, approval_id, err)
     print(
         f"approved: {approval_id} — valid for {MAX_LIFETIME_SECONDS} s; "
         "the agent must retry the same call now",

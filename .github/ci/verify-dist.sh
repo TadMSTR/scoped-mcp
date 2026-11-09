@@ -43,7 +43,7 @@ echo "== verify-dist: $DIST_DIR =="
 #
 # More than one means a stale build is sitting in the directory, and `pip install dist/*.whl`
 # or twine's glob would pick one nondeterministically. Zero means the build silently produced
-# nothing, which a `set -e` on `python -m build` does not always catch.
+# nothing, which a `set -e` on the build step does not always catch.
 # --------------------------------------------------------------------------
 shopt -s nullglob
 wheels=("$DIST_DIR"/*.whl)

@@ -583,10 +583,15 @@ async def test_approver_deny_drops_request(key):
     aid = await _pending(redis, key)
     rc = await hitl_approver.run(aid, deny=True, client=redis, private_key=None, confirm=None)
     assert rc == hitl_approver.EXIT_OK
-    # The request and its OTP are gone. The one key left is the deny tombstone (1.18.0),
-    # which authorises nothing and only lets the broker's reconcile tell deny from expiry.
-    left = [x for x in redis.store if aid in x]
-    assert left == [f"scoped-mcp:{AGENT}:hitl:denied:{aid}"]
+    # The request and its OTP are gone. What is left authorises nothing: the deny tombstone
+    # (1.18.0) lets the broker's reconcile tell deny from expiry, and the issued marker, now
+    # saying "decided" (1.22.0), lets its approve answer already_decided.
+    left = sorted(x for x in redis.store if aid in x)
+    assert left == [
+        f"scoped-mcp:{AGENT}:hitl:denied:{aid}",
+        f"scoped-mcp:{AGENT}:hitl:issued:{aid}",
+    ]
+    assert json.loads(redis.store[f"scoped-mcp:{AGENT}:hitl:issued:{aid}"]) == {"decided": True}
 
 
 @pytest.mark.asyncio
@@ -894,3 +899,33 @@ def test_every_reason_class_has_a_test():
     for r in ALL_REASONS:
         const = "REASON_" + r.upper()
         assert src.count(const) >= 2, f"{const} is not exercised"
+
+
+@pytest.mark.asyncio
+async def test_approver_approve_marks_decided_so_the_broker_never_says_expired(key, monkeypatch):
+    """vikunja#628 E: after a signed approval, the broker's approve of the same id answers
+    already_decided, even once the request's timeout has passed."""
+    from scoped_mcp import hitl_endpoint
+
+    redis = FakeRedis()
+    aid = await _pending(redis, key)
+    rc = await hitl_approver.run(
+        aid, deny=False, client=redis, private_key=key, confirm=lambda _p: True
+    )
+    assert rc == hitl_approver.EXIT_OK
+    assert json.loads(redis.store[f"scoped-mcp:{AGENT}:hitl:issued:{aid}"]) == {"decided": True}
+    later = time.time() + 10_000
+    monkeypatch.setattr(hitl_endpoint.time, "time", lambda: later)
+    result = await hitl_endpoint.approve(PrefixedState(redis, AGENT), AGENT, aid)
+    assert result["status"] == "already_decided"
+
+
+@pytest.mark.asyncio
+async def test_approver_refusal_leaves_the_marker_undecided(key):
+    redis = FakeRedis()
+    aid = await _pending(redis, key)
+    rc = await hitl_approver.run(
+        aid, deny=False, client=redis, private_key=key, confirm=lambda _p: False
+    )
+    assert rc == hitl_approver.EXIT_REFUSED
+    assert set(json.loads(redis.store[f"scoped-mcp:{AGENT}:hitl:issued:{aid}"])) == {"expires_at"}

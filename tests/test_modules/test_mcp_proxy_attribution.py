@@ -127,6 +127,62 @@ def test_a_missing_or_invalid_id_is_omitted_never_sent_empty(agent_ctx, echo_ups
     assert headers["x-forge-session-id"] == SESSION_ID
 
 
+@pytest.mark.parametrize(
+    "bad_session",
+    [
+        "sess\nX-Injected: 1",  # newline: a second header if it ever reached the wire
+        "s" * 129,  # one over the 128-character cap
+        "has spaces in it",
+        "slash/not/allowed",
+        "",
+    ],
+)
+def test_a_malformed_session_id_is_left_out_while_run_and_task_still_go(
+    agent_ctx, echo_upstream, monkeypatch, bad_session
+):
+    """vikunja#1434 F-14: only a session id matching SESSION_ID_RE is forwarded. The run
+    and task ids are validated separately and are not dropped along with it."""
+    from scoped_mcp import identity
+
+    monkeypatch.setenv("FORGE_RUN_ID", RUN)
+    monkeypatch.setenv("FORGE_TASK_ID", TASK)
+    monkeypatch.setattr(
+        identity,
+        "resolve_request_identity",
+        lambda agent_id, _default: identity.RequestIdentity(
+            session_id=bad_session, agent_id=agent_id
+        ),
+    )
+    mod = _module(agent_ctx, echo_upstream, forward_identity=True)
+    assert proxy_session_header(mod) is None
+    headers, _ = _received(mod)
+    assert "x-forge-session-id" not in headers
+    assert "x-injected" not in headers
+    assert headers["x-forge-run-id"] == RUN
+    assert headers["x-forge-task-id"] == TASK
+
+
+def test_a_well_formed_session_id_is_forwarded_control(agent_ctx, echo_upstream, monkeypatch):
+    """The control for the row above: the same patch with a valid id does send it."""
+    from scoped_mcp import identity
+
+    monkeypatch.setattr(
+        identity,
+        "resolve_request_identity",
+        lambda agent_id, _default: identity.RequestIdentity(
+            session_id="client-7.abc:def_1", agent_id=agent_id
+        ),
+    )
+    mod = _module(agent_ctx, echo_upstream, forward_identity=True)
+    assert proxy_session_header(mod) == "client-7.abc:def_1"
+    headers, _ = _received(mod)
+    assert headers["x-forge-session-id"] == "client-7.abc:def_1"
+
+
+def proxy_session_header(mod: McpProxyModule) -> str | None:
+    return mod._identity_headers().get(cfg.SESSION_ID_HEADER)
+
+
 def test_each_call_gets_its_own_ids(agent_ctx, echo_upstream, monkeypatch):
     """The transport is built per call: a later call must not reuse an earlier call's id."""
     mod = _module(agent_ctx, echo_upstream, forward_identity=True)
@@ -224,33 +280,179 @@ def test_known_keys_do_not_warn(agent_ctx, echo_upstream):
     assert not [e for e in logs if e["event"] == "mcp_proxy_unknown_config_key"]
 
 
-def test_every_key_mcp_proxy_reads_is_a_known_key():
-    """Closed world: a new config.get("…") in mcp_proxy.py must be added to
-    KNOWN_CONFIG_KEYS, or it would be warned about as unknown in every manifest that
-    uses it. And every known key must still be read somewhere."""
-    source = pathlib.Path(cfg.__file__).with_name("mcp_proxy.py").read_text()
+_CONFIG_READ_METHODS = frozenset({"get", "pop", "setdefault"})
+
+
+def _is_config_ref(node: ast.AST, aliases: set[str]) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id == "config" or node.id in aliases
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr in ("config", "_config")
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    )
+
+
+def _config_aliases(tree: ast.AST) -> set[str]:
+    aliases: set[str] = set()
+    changed = True
+    while changed:  # an alias of an alias is still the config dict
+        changed = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and _is_config_ref(node.value, aliases):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id not in aliases:
+                        aliases.add(target.id)
+                        changed = True
+    return aliases
+
+
+def _config_keys_read(source: str) -> set[str]:
+    """Every literal key the source reads from a module's config dict.
+
+    A config dict is ``config``, ``self.config`` or ``self._config``, or any local name
+    assigned from one of those (``cfg = self._config``). A read is
+    ``<dict>.get/pop/setdefault("k", ...)``, ``<dict>["k"]`` or ``"k" in <dict>``.
+    """
+    tree = ast.parse(source)
+    aliases = _config_aliases(tree)
+
+    def is_config_ref(node: ast.AST, aliases: set[str]) -> bool:
+        return _is_config_ref(node, aliases)
+
+    def literal(node: ast.AST) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        return None
+
     read: set[str] = set()
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(tree):
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "get"
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "config"
+            and node.func.attr in _CONFIG_READ_METHODS
+            and is_config_ref(node.func.value, aliases)
             and node.args
-            and isinstance(node.args[0], ast.Constant)
+            and (key := literal(node.args[0])) is not None
         ):
-            read.add(node.args[0].value)
-        if (
+            read.add(key)
+        elif (
             isinstance(node, ast.Subscript)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "config"
-            and isinstance(node.slice, ast.Constant)
+            and is_config_ref(node.value, aliases)
+            and (key := literal(node.slice)) is not None
         ):
-            read.add(node.slice.value)
+            read.add(key)
+        elif (
+            isinstance(node, ast.Compare)
+            and len(node.ops) == 1
+            and isinstance(node.ops[0], ast.In | ast.NotIn)
+            and is_config_ref(node.comparators[0], aliases)
+            and (key := literal(node.left)) is not None
+        ):
+            read.add(key)
+    return read
+
+
+def _whole_dict_callees(source: str) -> set[str]:
+    """Every function the source hands the whole config dict to, as written at the call.
+
+    A key read inside such a function is invisible to _config_keys_read on this file,
+    so each callee must be one whose reads are scanned too (or that reads none)."""
+    tree = ast.parse(source)
+    aliases = _config_aliases(tree)
+    callees: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            values = [*node.args, *(k.value for k in node.keywords)]
+            if any(_is_config_ref(v, aliases) for v in values):
+                callees.add(ast.unparse(node.func))
+    return callees
+
+
+# The functions mcp_proxy.py may pass its whole config dict to. Each is either scanned
+# (its module is in _SCANNED) or reads no key: ToolModule.__init__ only stores the dict.
+# A new callee fails test_the_config_dict_reaches_only_scanned_functions until it is
+# listed here and its module scanned.
+_WHOLE_DICT_CALLEES = {
+    "super().__init__",
+    "proxy_cfg.unknown_keys",
+    "proxy_cfg.validate_proxy_config",
+}
+_SCANNED = ("mcp_proxy.py", "mcp_proxy_config.py")
+
+
+def test_the_config_dict_reaches_only_scanned_functions():
+    """vikunja#1434 F-14 (IV-75): a read inside a helper the dict is passed to is a read
+    the closed-world check must see. Passing it to an unscanned function fails here."""
+    source = pathlib.Path(cfg.__file__).with_name("mcp_proxy.py").read_text()
+    assert _whole_dict_callees(source) == _WHOLE_DICT_CALLEES
+
+
+@pytest.mark.parametrize(
+    "shape",
+    ["helper(config)", "x = mod.check(self._config)", "f(cfg=config)", "c = config\nf(c)"],
+)
+def test_a_new_whole_dict_callee_is_seen_control(shape: str):
+    source = "def f(self, config):\n" + "".join(f"    {line}\n" for line in shape.splitlines())
+    assert _whole_dict_callees(source) - _WHOLE_DICT_CALLEES != set()
+
+
+def test_every_key_mcp_proxy_reads_is_a_known_key():
+    """Closed world: a new config read in mcp_proxy.py, or in a helper it hands the dict
+    to, must be added to KNOWN_CONFIG_KEYS, or it would be warned about as unknown in
+    every manifest that uses it. And every known key must still be read somewhere."""
+    here = pathlib.Path(cfg.__file__)
+    read: set[str] = set()
+    for name in _SCANNED:
+        read |= _config_keys_read(here.with_name(name).read_text())
     assert read, "found no config reads — the AST walk is broken"
     assert read - cfg.KNOWN_CONFIG_KEYS == set(), "add these to KNOWN_CONFIG_KEYS"
     assert cfg.KNOWN_CONFIG_KEYS - read == set(), "KNOWN_CONFIG_KEYS lists keys nothing reads"
+
+
+# One control per access shape (vikunja#1434 F-14): each fixture reads a key that is not in
+# KNOWN_CONFIG_KEYS in one way, and the guard must see it. Before 1.22.0 only the first two
+# shapes were seen, so a read written any other way slipped past the closed-world check.
+_UNLISTED = "not_a_listed_key"
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "x = config.get('{k}')",
+        "x = config['{k}']",
+        "x = self._config.get('{k}', 1)",
+        "x = self._config['{k}']",
+        "x = self.config.get('{k}')",
+        "cfg = self._config\nx = cfg.get('{k}')",
+        "cfg = config\nx = cfg['{k}']",
+        "a = self._config\nb = a\nx = b.get('{k}')",
+        "x = '{k}' in config",
+        "x = '{k}' not in self._config",
+        "x = config.pop('{k}', None)",
+        "x = config.setdefault('{k}', [])",
+    ],
+)
+def test_the_guard_sees_every_config_access_shape(shape: str):
+    source = "def f(self, config):\n" + "".join(
+        f"    {line}\n" for line in shape.format(k=_UNLISTED).splitlines()
+    )
+    assert _config_keys_read(source) - cfg.KNOWN_CONFIG_KEYS == {_UNLISTED}
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "x = other.get('{k}')",
+        "x = self.other['{k}']",
+        "x = '{k}' in other",
+        "x = config.get(name)",
+    ],
+)
+def test_the_guard_ignores_reads_of_other_dicts_control(shape: str):
+    source = "def f(self, config, other, name):\n    " + shape.format(k=_UNLISTED) + "\n"
+    assert _config_keys_read(source) == set()
 
 
 def test_unknown_keys_with_unprintable_names_are_not_echoed():

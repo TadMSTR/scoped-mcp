@@ -185,3 +185,48 @@ async def test_decide_reject_deletes_pending_no_preapproval(redis_client):
 async def test_decide_missing_approval_id_returns_3(redis_client):
     rc = await _decide(_REDIS_URL, "test-agent-1.nonexistentabc", "approve", _client=redis_client)
     assert rc == 3
+
+
+# ── side keys and the decided marker (vikunja#628 E) ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_list_pending_survives_a_deny_tombstone(redis_client, capsys):
+    """Before 1.22.0 the tombstone's value "1" was appended as an int and `.get` crashed."""
+    approval_id = "test-agent-1.ddeeff445566"
+    pending_key = f"scoped-mcp:test-agent-1:hitl:{approval_id}"
+    tomb = "scoped-mcp:test-agent-1:hitl:denied:test-agent-1.aabbcc000000"
+    marker = "scoped-mcp:test-agent-1:hitl:issued:test-agent-1.aabbcc000000"
+    payload = json.dumps({"approval_id": approval_id, "agent_id": "test-agent-1", "tool": "x"})
+    await redis_client.set(pending_key, payload, ex=60)
+    await redis_client.set(tomb, "1", ex=60)
+    await redis_client.set(marker, json.dumps({"decided": True}), ex=60)
+    try:
+        rc = await _list_pending(_REDIS_URL, _client=redis_client)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert out.strip().splitlines() == [f"{approval_id}  agent=test-agent-1  tool=x"]
+    finally:
+        await redis_client.delete(pending_key, tomb, marker)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+async def test_decide_marks_the_request_decided(redis_client, decision):
+    approval_id = "test-agent-1.112233445566"
+    key = f"scoped-mcp:test-agent-1:hitl:{approval_id}"
+    marker = f"scoped-mcp:test-agent-1:hitl:issued:{approval_id}"
+    payload = json.dumps(
+        {"approval_id": approval_id, "agent_id": "test-agent-1", "tool": "t", "args_hash": "h"}
+    )
+    await redis_client.set(key, payload, ex=60)
+    try:
+        assert await _decide(_REDIS_URL, approval_id, decision, _client=redis_client) == 0
+        assert json.loads(await redis_client.get(marker)) == {"decided": True}
+    finally:
+        await redis_client.delete(
+            key,
+            marker,
+            f"scoped-mcp:test-agent-1:hitl:denied:{approval_id}",
+            "scoped-mcp:test-agent-1:hitl:preapproved:t:h",
+        )
