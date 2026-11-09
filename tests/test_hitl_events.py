@@ -646,7 +646,8 @@ async def test_r2_04_endpoint_writes_the_audit_row_before_the_token(registry, mo
     real_resolve = registry.resolve_hitl_approval
 
     async def set_spy(k, v, ttl):
-        order.append("token")
+        # The issued marker (vikunja#628 E) is written after the token; it is not the token.
+        order.append("marker" if ":issued:" in k else "token")
         await real_set(k, v, ttl)
 
     async def resolve_spy(approval_id, st, **kw):
@@ -656,7 +657,7 @@ async def test_r2_04_endpoint_writes_the_audit_row_before_the_token(registry, mo
     monkeypatch.setattr(state, "set_with_ttl", set_spy)
     monkeypatch.setattr(registry, "resolve_hitl_approval", resolve_spy)
     assert (await hitl_endpoint.approve(state, AGENT, aid))["status"] == "approved"
-    assert order == ["row:approved", "token"]
+    assert order == ["row:approved", "token", "marker"]
 
 
 async def test_r2_04_a_failed_token_write_moves_the_row_to_expired(registry, monkeypatch):

@@ -325,3 +325,27 @@ async def test_endpoint_approve_defaults_to_operator_endpoint(monkeypatch) -> No
         r["state"] == "approved" and r["resolved_via"] == "operator_endpoint"
         for r in recording.resolves
     )
+
+
+@pytest.mark.asyncio
+async def test_confirm_expired_tells_the_agent_to_reissue(agent_ctx: AgentContext) -> None:
+    """vikunja#628 E: the interactive tool answers expired, with the next step."""
+    import time
+
+    from scoped_mcp.hitl import _issued_key
+
+    state = InProcessBackend()
+    expired_id = f"{AGENT}.0000000000aa"
+    await state.set_with_ttl(
+        _issued_key(expired_id), json.dumps({"expires_at": time.time() - 5}), 300
+    )
+    server = _build(agent_ctx, _manifest(mode="interactive", approval_required=[TOOL]), state)
+
+    async with Client(server) as client:
+        result = await client.call_tool(
+            "scoped_mcp_hitl_confirm", {"approval_id": expired_id, "decision": "approve"}
+        )
+
+    assert result.data["status"] == "expired"
+    assert "re-issue the original tool call" in result.data["detail"]
+    assert await state.get(_preapproval_key(TOOL, ARGS_HASH)) is None

@@ -58,7 +58,8 @@ async def test_approve_is_one_time():
     first = await hitl_endpoint.approve(state, AGENT, APPROVAL_ID)
     second = await hitl_endpoint.approve(state, AGENT, APPROVAL_ID)
     assert first["status"] == "approved"
-    assert second["status"] == "not_found"  # pending already consumed
+    # The pending record is consumed; the decided marker says why it is gone.
+    assert second["status"] == "already_decided"
 
 
 async def test_approve_unknown_id_not_found():
@@ -133,7 +134,9 @@ async def test_missing_args_hash_binding_refuses():
     payload = json.dumps({"tool": TOOL, "agent_id": AGENT, "approval_id": APPROVAL_ID})
     await state.set_with_ttl(f"hitl:{APPROVAL_ID}", payload, 300)
     result = await hitl_endpoint.approve(state, AGENT, APPROVAL_ID)
-    assert result["status"] == "not_found"
+    # Reported as it is audited: unapprovable, re-issue the call (vikunja#628 E).
+    assert result["status"] == "expired"
+    assert "re-issue" in result["detail"]
     assert await state.get(_preapproval_key(TOOL, "")) is None
 
 

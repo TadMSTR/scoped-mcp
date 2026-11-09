@@ -954,9 +954,12 @@ def _register_hitl_confirm_tool(
             decision: ``"approve"`` or ``"deny"``.
 
         Returns a result dict with a ``status`` key:
-        approved | denied | not_found | already_decided | invalid_decision |
+        approved | denied | expired | not_found | already_decided | invalid_decision |
         backend_unavailable. On ``approved``, retry the original gated tool call —
-        it will find the one-time pre-approval token and proceed.
+        it will find the one-time pre-approval token and proceed. On ``expired``, the
+        request timed out before it was decided: re-issue the original tool call to get
+        a new approval id, and ask the operator again (``detail`` says the same).
+        ``not_found`` means the id is not one of this agent's known requests: check it.
         """
         if not approval_id or not isinstance(approval_id, str):
             return {"status": "invalid_decision", "detail": "approval_id is required"}

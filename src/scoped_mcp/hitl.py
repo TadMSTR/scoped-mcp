@@ -185,6 +185,36 @@ def _otp_key(approval_id: str) -> str:
     return f"hitl:otp:{approval_id}"
 
 
+def _issued_key(approval_id: str) -> str:
+    """State key remembering that this agent issued ``approval_id``, and when it lapses.
+
+    The pending record vanishes the same way whether it expired or was decided, so on its
+    own a missing record cannot tell an expired id from a wrong one (vikunja#628 option
+    E). This marker outlives the pending record by ``ISSUED_MARKER_GRACE_SECONDS`` and
+    holds either ``{"expires_at": <epoch>}`` or, once anyone decides the request,
+    ``{"decided": true}``. It authorises nothing: the worst a forged one does is change
+    which failure status an approve of a missing record reports.
+    """
+    return f"hitl:issued:{approval_id}"
+
+
+# How long the issued marker outlives the request's timeout. Past this, an expired id
+# reads as not_found again; an hour covers any conversation that lost track of one.
+ISSUED_MARKER_GRACE_SECONDS = 3600
+
+# Value written over the issued marker by every path that decides a request.
+ISSUED_MARKER_DECIDED = json.dumps({"decided": True})
+
+# Keys that share the ``hitl:`` namespace with pending records but are not pending records.
+# Anything that scans ``hitl:*.*`` for pending approvals must skip them: their values are
+# not approval records (the deny tombstone's is the bare string "1").
+SIDE_KEY_MARKERS = (":preapproved:", ":otp:", ":denied:", ":issued:")
+
+
+def is_side_key(key: str) -> bool:
+    return any(m in key for m in SIDE_KEY_MARKERS)
+
+
 def _generate_otp() -> str:
     return secrets.token_urlsafe(_OTP_BYTES)
 
@@ -461,6 +491,22 @@ class HitlMiddleware:
             # Don't chain via ``from e`` — the underlying exception type is an
             # operational fingerprint we should not surface to the agent.
             raise HitlRejectedError("approval rejected: state backend unavailable") from None
+
+        # Best-effort, and outside the fail-closed write above: the marker only lets a later
+        # approve of a lapsed id say `expired` instead of `not_found`. Losing it changes a
+        # status message, never the gate.
+        try:
+            await self._state.set_with_ttl(
+                _issued_key(approval_id),
+                json.dumps({"expires_at": record["timestamp"] + self._timeout}),
+                self._timeout + ISSUED_MARKER_GRACE_SECONDS,
+            )
+        except Exception as e:
+            _log.warning(
+                "hitl_issued_marker_write_failed",
+                approval_id=approval_id,
+                error=type(e).__name__,
+            )
 
         # Best-effort audit row (fail-open): only the OTP *hash* is persisted, so
         # the audit table can never be used to replay an approval. A DB outage must

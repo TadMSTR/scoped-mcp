@@ -94,9 +94,10 @@ def test_approve_happy_path_and_pending_listing(monkeypatch):
         token = json.loads(anyio.run(state.get, _preapproval_key(TOOL, ARGS_HASH)))
         assert token == {"status": "approved", "approval_id": APPROVAL_ID}
 
-        # second approve is one-time → 404
+        # second approve is one-time → 409 already_decided (the decided marker says why)
         r = client.post("/hitl/approve", json={"approval_id": APPROVAL_ID}, headers=auth)
-        assert r.status_code == 404
+        assert r.status_code == 409
+        assert r.json()["status"] == "already_decided"
 
 
 def test_approve_bad_request(monkeypatch):
@@ -189,3 +190,28 @@ def test_normalize_agent_id_strips_only_an_ascii_clone_suffix(agent_id, expected
     from scoped_mcp.hitl_http import _normalize_agent_id
 
     assert _normalize_agent_id(agent_id) == expected
+
+
+def test_expired_approve_is_410_with_the_way_out(monkeypatch):
+    """vikunja#628 E: a lapsed id of this agent's is Gone, not Not Found."""
+    import time
+
+    from scoped_mcp import hitl_endpoint
+    from scoped_mcp.hitl import _issued_key
+
+    app, state = _app_with_seed(monkeypatch)
+    expired_id = f"{AGENT}.0000000000aa"
+    state._store[_issued_key(expired_id)] = (
+        json.dumps({"expires_at": time.time() - 5}),
+        time.monotonic() + 300,
+    )
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    with TestClient(app) as client:
+        r = client.post("/hitl/approve", json={"approval_id": expired_id}, headers=auth)
+        assert r.status_code == 410
+        assert r.json() == {"status": "expired", "detail": hitl_endpoint.EXPIRED_DETAIL}
+        # Control: an id nobody issued is still 404.
+        r = client.post(
+            "/hitl/approve", json={"approval_id": f"{AGENT}.0000000000bb"}, headers=auth
+        )
+        assert r.status_code == 404

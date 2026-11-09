@@ -891,6 +891,10 @@ guarantees. All are off by default; enable per-agent in the manifest:
   record atomically (`StateBackend.get_delete`), so a second call or a race
   resolves to `already_decided`; a Dragonfly error denies (`503`) rather than
   approving — same fail-closed rule as the CLI path above.
+  Since v1.22.0 an id this agent issued that timed out undecided answers `expired`
+  (`410`, with a `detail` saying to re-issue the original call) instead of `not_found`
+  (`404`), for about an hour after its timeout. An unknown id, and any other agent's id,
+  still answer `not_found`. `scoped_mcp_hitl_confirm` returns the same statuses.
 
   **Interactive mode** (v1.11.0) — a manifest field, `hitl.mode: enforce | interactive`
   (default `enforce`, no behavior change for existing manifests), controls how a gated
