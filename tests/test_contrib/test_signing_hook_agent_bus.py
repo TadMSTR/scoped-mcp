@@ -38,12 +38,13 @@ def _keypair() -> tuple[str, str]:
 def bus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     """agent-bus's server module, with its key registry and nonce set isolated."""
     monkeypatch.setenv("AGENT_BUS_COMMS_DIR", str(tmp_path))  # first import mkdirs here
-    try:
+    if _REQUIRED:
         server = importlib.import_module("server")
-    except ImportError:
-        if _REQUIRED:
-            raise
-        pytest.skip("agent-bus not installed (CI installs it; SCOPED_MCP_REQUIRE_AGENT_BUS=1)")
+    else:
+        server = pytest.importorskip(
+            "server",
+            reason="agent-bus not installed (CI installs it; SCOPED_MCP_REQUIRE_AGENT_BUS=1)",
+        )
     if not hasattr(server, "_check_signature"):
         pytest.fail("the importable `server` module is not agent-bus")
     monkeypatch.setattr(server, "KEY_REGISTRY_PATH", tmp_path / "agent-keys.json")
