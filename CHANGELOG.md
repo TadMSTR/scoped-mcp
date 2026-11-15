@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.1] — 2026-11-15
+
+Dependency release. No new verb, module or manifest change, and no application code changed.
+
+### Security
+- **dnspython 2.9.2** (CVE-2026-128089). A new core floor, `dnspython>=2.9.2,<3.0`. scoped-mcp
+  does not import it; fastmcp pulls it in through `pydantic[email]` and `email-validator`.
+  `uv.lock` pins 2.9.2 (was 2.9.0).
+- **opentelemetry-api 1.45.2** (CVE-2026-126360). The `otel` extra now floors
+  `opentelemetry-api>=1.45.2,<2.0` (was `>=1.20`), and `uv.lock` pins 1.45.2 (was 1.45.1).
+
+### Changed
+- `uv.lock` was re-locked for those two packages only. Everything that moved:
+  dnspython 2.9.0 → 2.9.2, opentelemetry-api 1.45.1 → 1.45.2, opentelemetry-sdk
+  1.45.1 → 1.45.2 and opentelemetry-semantic-conventions 0.66b1 → 0.66b2. The SDK pins the
+  API at the exact version, and semantic-conventions moves with the SDK.
+
 ## [1.22.0] — 2026-11-09
 
 Hygiene. The CI and release tools are pinned, and the dependency set CI tests now includes
