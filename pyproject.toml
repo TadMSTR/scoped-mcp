@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "scoped-mcp"
-version = "1.22.0"
+version = "1.22.1"
 description = "Per-agent scoped MCP tool proxy with credential isolation and audit logging"
 readme = "README.md"
 license = "MIT"
@@ -45,6 +45,10 @@ dependencies = [
     # non-lock install could otherwise resolve joserfc 1.7.1 (GHSA-9pg5-8c7x-5hfx,
     # GHSA-jpxq-7h8p-2q76); 1.8.0 is what uv.lock pins.
     "joserfc>=1.8.0,<2.0",
+    # Not imported here: fastmcp pulls it in through pydantic[email] and email-validator. The
+    # floor is the point. A non-lock install could otherwise resolve a release affected by
+    # CVE-2026-128089 (fixed in 2.9.2, floor raised 2026-11-15).
+    "dnspython>=2.9.2,<3.0",
 ]
 
 [project.urls]
@@ -64,7 +68,8 @@ http = ["httpx>=0.27,<1.0"]         # enables grafana, influxdb, ntfy, slack, di
 smtp = ["aiosmtplib>=5.1.2,<6.0"]   # enables smtp module
 sqlite = ["aiosqlite>=0.20,<1.0"]   # enables sqlite module
 otel = [
-    "opentelemetry-api>=1.20,<2.0",
+    # Floor raised past CVE-2026-126360 (fixed in 1.45.2) on 2026-11-15.
+    "opentelemetry-api>=1.45.2,<2.0",
     "opentelemetry-sdk>=1.20,<2.0",
     "opentelemetry-exporter-otlp-proto-grpc>=1.20,<2.0",
     "opentelemetry-exporter-otlp-proto-http>=1.20,<2.0",
